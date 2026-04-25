@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+venv_win/
+.venv/
+
+# Logs
+*.log
+streamlit_err.log
+
+# OS
+.DS_Store
+
+# Claude Code internal
+.claude/

@@ -1,0 +1,6 @@
+Part_Number,Manufacturer,Model,Description,Voltage,HP,Location,Qty_On_Hand,Unit_Cost
+90VDC-1/3HP-AMGL,AmeriGlide,Hercules II 750,DC Motor 1/3HP,90 VDC,0.333,Shelf-A3,2,187.50
+GE-5KE49TN2167,GE Motors,5KE49TN2167,TEFC Motor 3HP,230/460 VAC,3.0,Shelf-B1,1,412.00
+ABB-M3AA090L,ABB,M3AA090L,IE3 Induction Motor 2HP,208-230 VAC,2.0,Shelf-C2,0,298.75
+SQD-8536SCG3V02,Square D,8536SCG3V02,Magnetic Motor Starter,600 VAC,N/A,Rack-D5,4,134.20
+SIE-3RV2021-4AA10,Siemens,3RV2021-4AA10,Circuit Breaker Motor Starter,690 VAC,N/A,Rack-D6,3,89.90
