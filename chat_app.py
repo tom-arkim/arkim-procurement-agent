@@ -326,6 +326,40 @@ st.markdown("""
   .t3-body { flex: 1; min-width: 0; }
   .t3-name { font-size: .92rem; font-weight: 700; color: #e6edf3; }
   .t3-meta { font-size: .74rem; color: #8b949e; margin-top: .2rem; }
+  /* ── MoR badge ── */
+  .mor-badge {
+    display: inline-block;
+    background: rgba(88,166,255,.12);
+    border: 1px solid #58a6ff;
+    border-radius: 4px;
+    padding: .04rem .38rem;
+    font-size: .6rem;
+    font-weight: 700;
+    color: #58a6ff;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    vertical-align: middle;
+    margin-left: .3rem;
+  }
+  /* ── Workflow selector ── */
+  .wf-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 10px;
+    padding: .8rem 1rem;
+    margin-bottom: .6rem;
+    cursor: pointer;
+    transition: border-color .15s;
+  }
+  .wf-card-active { border-color: #58a6ff; background: rgba(88,166,255,.07); }
+  .wf-title { font-size: .9rem; font-weight: 700; color: #e6edf3; }
+  .wf-sub   { font-size: .73rem; color: #8b949e; margin-top: .15rem; }
+  /* ── Warranty badge ── */
+  .warranty-active  { color: #3fb950; font-weight: 700; font-size: .78rem; }
+  .warranty-expired { color: #f85149; font-weight: 700; font-size: .78rem; }
+  .warranty-unknown { color: #8b949e; font-size: .78rem; }
+  /* ── TLV metric ── */
+  .tlv-xl { font-size: 1.5rem; font-weight: 800; color: #d29922; line-height: 1.1; }
   /* ── Misc ── */
   #MainMenu, footer, header { visibility: hidden; }
   code { background: #21262d; border-radius: 4px; padding: .1rem .3rem; }
@@ -359,6 +393,8 @@ _DEFAULTS: dict = {
     "pending_verification_site":  None,
     "pending_search_strategy":    None,  # {"specs": AssetSpecs, "site": str} — awaiting exact/equivalents choice
     "search_mode":                "exact",  # "exact" | "equivalents" — carried into pipeline
+    "workflow_mode":              "spare_parts",  # "spare_parts" | "replacement" | "capex"
+    "downtime_cost_per_day":      500.0,   # USD/day — used for TLV calculation
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -485,14 +521,21 @@ def _patch_sourcing_keys(tavily_key: str, anthropic_key: str) -> None:
 def _execute_pipeline(specs, site: str,
                       tavily_key: str, anthropic_key: str,
                       force_refresh: bool = False,
-                      search_mode: str = "exact") -> None:
+                      search_mode: str = "exact",
+                      workflow: str = "spare_parts",
+                      downtime_cost_per_day: float = 500.0) -> None:
     from utils.inventory import check_internal
     from utils.sourcing  import find_vendors
     from utils.quoting   import generate_arkim_quote
     from datetime import datetime as _dt
     _patch_sourcing_keys(tavily_key, anthropic_key)
 
-    with st.status("Running Arkim Procurement Pipeline…", expanded=True) as status:
+    wf_labels = {
+        "spare_parts": "Spare Parts (OpEx) — Exact PN",
+        "replacement":  "Replacement Equipment — Interchangeability",
+        "capex":        "New Equipment (CapEx) — Proposal Requests",
+    }
+    with st.status(f"Running Arkim Pipeline · {wf_labels.get(workflow, workflow)}…", expanded=True) as status:
         st.write("🔍 **Scanning** internal inventory…")
         hit, location, _ = check_internal(specs)
         st.session_state.inventory_hit      = hit
@@ -503,10 +546,15 @@ def _execute_pipeline(specs, site: str,
             "❌ Not in inventory — proceeding to external sourcing"
         )
 
-        src_label = "fetching fresh prices" if force_refresh else "checking price DB first"
-        mode_label = "exact PN match" if search_mode == "exact" else "exact + equivalents"
-        st.write(f"🌐 **Sourcing** Grainger · McMaster-Carr · MSC ({src_label} · {mode_label})…")
-        options, _ = find_vendors(specs, site=site, force_refresh=force_refresh, search_mode=search_mode)
+        if workflow == "capex":
+            st.write("📋 **CapEx Mode** — skipping Tier 1/2 price search, discovering specialist vendors…")
+        else:
+            src_label  = "fetching fresh prices" if force_refresh else "checking price DB first"
+            mode_label = "exact PN" if search_mode == "exact" else "exact + equivalents"
+            st.write(f"🌐 **Sourcing** Grainger · McMaster-Carr · MSC ({src_label} · {mode_label})…")
+
+        options, _ = find_vendors(specs, site=site, force_refresh=force_refresh,
+                                  search_mode=search_mode, workflow=workflow)
         st.session_state.all_options = options
         st.session_state.rfq_draft   = None
         st.session_state.rfq_emails  = {}
@@ -517,31 +565,19 @@ def _execute_pipeline(specs, site: str,
         national_inq    = sum(1 for o in options
                               if o.merchant_type in ("Enterprise", "National Specialist")
                               and getattr(o, "price_tbd", False))
-        local_priced    = sum(1 for o in options
-                              if o.merchant_type == "Local"
-                              and not getattr(o, "price_tbd", False))
-        local_tbd       = sum(1 for o in options
-                              if o.merchant_type == "Local"
-                              and getattr(o, "price_tbd", False))
+        tbd_count       = sum(1 for o in options if getattr(o, "price_tbd", False))
 
         if national_priced == 0 and national_inq == 0:
             st.write(
-                f"⚠️ No national distributor results found for `{specs.part_number}` — "
-                f"{local_tbd} local vendor(s) queued for Tier 3 Managed RFQ Outreach."
+                f"⚠️ No direct buy pricing found — "
+                f"{tbd_count} specialist(s) queued for Tier 3 Partner Outreach."
             )
         else:
             inq_note = f" · **{national_inq}** inquiry-required" if national_inq else ""
-            loc_note = (
-                f" · **{local_priced}** local estimate(s)"
-                + (f" · **{local_tbd}** local TBD" if local_tbd else "")
-            ) if (local_priced + local_tbd) else ""
-            st.write(
-                f"✅ **{national_priced}** priced{inq_note}{loc_note}"
-            )
+            st.write(f"✅ **{national_priced}** priced{inq_note}")
 
-        # Only quote options with real prices — TBD locals go straight to Tier 3 grid
         priced_options = [o for o in options if not getattr(o, "price_tbd", False)]
-        all_quotes = []   # defined here so history entry always has it
+        all_quotes: list = []
 
         if not priced_options:
             st.session_state.all_quotes     = []
@@ -551,18 +587,26 @@ def _execute_pipeline(specs, site: str,
             st.session_state.pipeline_ran   = True
             st.session_state.pipeline_error = None
         else:
-            st.write("📊 **Calculating** TCA scores, shipping, tax, and Arkim markup…")
-            all_quotes, best = generate_arkim_quote(specs, priced_options, site=site)
+            metric = "TCA" if workflow == "spare_parts" else "TLV"
+            st.write(f"📊 **Calculating** {metric} scores, shipping, tax, and Arkim markup…")
+            all_quotes, best = generate_arkim_quote(
+                specs, priced_options, site=site,
+                workflow=workflow, downtime_cost_per_day=downtime_cost_per_day,
+            )
             st.session_state.all_quotes    = all_quotes
             st.session_state.best_quote    = best
             st.session_state.specs         = specs
             st.session_state.site          = site
             st.session_state.pipeline_ran  = True
             st.session_state.pipeline_error = None
+            if workflow == "spare_parts":
+                score_str = f"TCA {best.tca_score:.0f}/100"
+            else:
+                score_str = f"TLV ${best.tlv_score:,.2f}"
             st.write(
                 f"✅ Recommended: **{best.chosen_option.vendor_name}** — "
                 f"Arkim **${best.arkim_sale_price:.2f}** + tax **${best.tax_amount:.2f}** = "
-                f"Grand Total **${best.grand_total:.2f}** | TCA {best.tca_score:.0f}/100"
+                f"Grand Total **${best.grand_total:.2f}** | {score_str}"
             )
 
         # Pre-check all Tier 3 vendor checkboxes (user can deselect)
@@ -581,6 +625,7 @@ def _execute_pipeline(specs, site: str,
             "all_quotes": all_quotes,
             "all_options":options,
             "site":       site,
+            "workflow":   workflow,
             "saved_at":   _dt.now().strftime("%Y-%m-%d %H:%M"),
         }
         history = st.session_state.sourcing_history
@@ -967,8 +1012,14 @@ def render_vendor_cards() -> None:
             </div>""", unsafe_allow_html=True)
         return
 
-    cat = getattr(st.session_state.specs, "category", "Part") if st.session_state.specs else "Part"
-    cmp_label = "Equipment Results — TCA Ranked by Tier" if cat == "Equipment" else "Vendor Comparison — TCA Ranked by Tier"
+    wf    = st.session_state.workflow_mode
+    cat   = getattr(st.session_state.specs, "category", "Part") if st.session_state.specs else "Part"
+    if wf == "spare_parts":
+        cmp_label = "Spare Parts — Ranked by TCA (Lead Time · Accuracy · Cost)"
+    elif wf == "replacement":
+        cmp_label = "Replacement Equipment — Ranked by TLV (Total Life Cycle Value)"
+    else:
+        cmp_label = "Vendor Comparison — TCA Ranked by Tier"
     st.markdown(f'<div class="a-label" style="margin:.4rem 0 .7rem;">{cmp_label}</div>', unsafe_allow_html=True)
 
     # Split into tiers for grouped display; global TCA rank preserved for best-badge
@@ -996,10 +1047,23 @@ def render_vendor_cards() -> None:
                     '<div class="tier-hdr tier-hdr-2">&#9679; Tier 2 — National Specialists</div>',
                     unsafe_allow_html=True)
 
-        is_best   = (q == quotes[0])          # global TCA best, regardless of tier order
+        is_best   = (q == quotes[0])
         card_cls  = "q-card q-card-best" if is_best else "q-card"
-        best_html = '<span class="best-badge">Best TCA Value</span>' if is_best else ""
+        _wf       = st.session_state.workflow_mode
+        _best_lbl = "Best TLV" if _wf != "spare_parts" else "Best TCA"
+        best_html = f'<span class="best-badge">{_best_lbl}</span>' if is_best else ""
         rfq_html  = '<div class="rfq-warning">&#9888; Requires 24-48h for manual outreach &middot; +$50 admin fee</div>' if o.requires_rfq else ""
+
+        # "Preferred" badge: only for 100% PN exact match (Spare Parts) or best value (Replacement)
+        _searched_pn_raw  = (st.session_state.specs.part_number or "") if st.session_state.specs else ""
+        _found_pn_raw     = getattr(o, "found_part_number", None) or ""
+        _pn_100_match     = (_searched_pn_raw and _found_pn_raw and
+                             _found_pn_raw.upper().strip() == _searched_pn_raw.upper().strip())
+        _preferred_html   = (
+            '<span class="best-badge" style="border-color:#3fb950;color:#3fb950;margin-left:.3rem;">&#10003; Preferred</span>'
+            if (_wf == "spare_parts" and _pn_100_match)
+            else ""
+        )
 
         # Price-source badge: Cached / Pre-Negotiated / Live
         notes = o.notes or ""
@@ -1032,24 +1096,53 @@ def render_vendor_cards() -> None:
         else:
             mt_badge = '<span class="chip" style="font-size:.62rem;">LOCAL</span>'
 
+        # MoR badge for Tier 2/3
+        _mor_html = (
+            '<span class="mor-badge">Purchasable via Arkim</span>'
+            if mt not in ("Enterprise",) else ""
+        )
+
         alt_badge = (
             '<span class="chip chip-a" style="font-size:.62rem;letter-spacing:.03em;">ALT RECOMMENDATION</span>'
             if getattr(o, "match_type", "Exact") == "Alternative" else ""
         )
+
+        # Market confidence score chip
+        _mcs = getattr(o, "market_confidence_score", None)
+        _mcs_html = (
+            f'<span class="chip" title="Market Confidence Score (web reliability data)" '
+            f'style="font-size:.62rem;border-color:#58a6ff;color:#58a6ff;">MCS {_mcs:.0f}/10</span>'
+            if _mcs is not None else ""
+        )
+
+        # Warranty chip
+        _wt = getattr(o, "warranty_terms", None)
+        _wt_html = (
+            f'<span class="chip" style="font-size:.62rem;">{_wt}</span>'
+            if _wt else ""
+        )
+
+        # Score display row: TCA for spare parts, TLV for replacement
+        _wf_mode = st.session_state.workflow_mode
+        if _wf_mode == "spare_parts":
+            _score_html = f'TCA: <b style="color:#58a6ff;">{q.tca_score:.1f}/100</b>'
+        else:
+            _score_html = f'TLV: <b style="color:#d29922;">${q.tlv_score:,.2f}</b>'
 
         with col_info:
             st.markdown(f"""
             <div class="{card_cls}">
               <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.35rem;">
                 <span style="font-size:1rem;font-weight:700;color:#e6edf3;">{o.vendor_name}</span>
-                {mt_badge}
-                {src_badge}{best_html}{alt_badge}{coll_badge}
+                {mt_badge}{_mor_html}
+                {src_badge}{best_html}{_preferred_html}{alt_badge}{coll_badge}
               </div>
               <div style="font-size:.77rem;color:#8b949e;">
                 Lead: <b style="color:#c9d1d9;">{o.lead_time_days}d</b> &nbsp;&middot;&nbsp;
                 Reliability: <b style="color:#c9d1d9;">{o.reliability_score:.0f}%</b> &nbsp;&middot;&nbsp;
-                TCA: <b style="color:#58a6ff;">{q.tca_score:.1f}/100</b>
+                {_score_html}
               </div>
+              <div style="margin-top:.25rem;">{_mcs_html}{_wt_html}</div>
               {rfq_html}{url_html}
             </div>""", unsafe_allow_html=True)
 
@@ -1124,11 +1217,15 @@ def render_vendor_cards() -> None:
                 st.rerun()
 
     if quotes:
-        st.markdown("""<div style="font-size:.7rem;color:#8b949e;margin-top:.2rem;">
-          TCA = Speed 35% + Reliability 25% + Friction 20% + Cost Efficiency 20%.
-          Grand Total includes Arkim markup + location sales tax.
-          Direct Buy via Arkim — no new vendor onboarding required.
-        </div>""", unsafe_allow_html=True)
+        _wf_note = st.session_state.workflow_mode
+        if _wf_note == "spare_parts":
+            _metric_note = "TCA = Speed 35% + Reliability 25% + Friction 20% + Cost Efficiency 20%. Preferred badge = 100% PN match."
+        else:
+            _metric_note = "TLV = Purchase Price + (Downtime Cost × Lead Days × Reliability Risk) + Shipping + Tax. Lower TLV = better lifecycle value."
+        st.markdown(f'<div style="font-size:.7rem;color:#8b949e;margin-top:.2rem;">'
+                    f'{_metric_note} &nbsp;·&nbsp; Grand Total includes Arkim markup + sales tax. '
+                    f'Purchasable via Arkim — no new vendor onboarding required.'
+                    f'</div>', unsafe_allow_html=True)
 
 
 def render_purchase_confirmed() -> None:
@@ -1378,7 +1475,7 @@ with st.sidebar:
             "rfq_vendors_selected", "pipeline_error", "pending_run", "pending_image",
             "pending_verification_specs", "pending_verification_site", "force_refresh",
             "inventory_hit", "inventory_location", "messages",
-            "pending_search_strategy", "search_mode",
+            "pending_search_strategy", "search_mode", "workflow_mode",
         ]
         for _ck in _clear_keys:
             st.session_state[_ck] = _DEFAULTS.get(_ck)
@@ -1490,27 +1587,32 @@ if st.session_state.pending_run:
 
     run_data = st.session_state.pending_run
     st.session_state.pending_run = None
-    fr = st.session_state.force_refresh
+    fr           = st.session_state.force_refresh
     st.session_state.force_refresh = False
-    search_mode = run_data.get("search_mode", "exact")
+    search_mode  = run_data.get("search_mode", "exact")
+    workflow     = run_data.get("workflow", st.session_state.workflow_mode)
+    dtc          = st.session_state.downtime_cost_per_day
     try:
         _execute_pipeline(run_data["specs"], run_data["site"], tav_key, ant_key,
-                          force_refresh=fr, search_mode=search_mode)
+                          force_refresh=fr, search_mode=search_mode,
+                          workflow=workflow, downtime_cost_per_day=dtc)
         bq = st.session_state.best_quote
         sp = run_data["specs"]
         if bq:
+            metric_str = (f"TCA {bq.tca_score:.0f}/100" if workflow == "spare_parts"
+                          else f"TLV ${bq.tlv_score:,.2f}")
             reply = (
                 f"Sourced **{sp.manufacturer} {sp.model}** for {run_data['site']}. "
                 f"Recommended: **{bq.chosen_option.vendor_name}** at "
                 f"**${bq.arkim_sale_price:.2f}** | {bq.chosen_option.lead_time_days}d lead | "
-                f"TCA {bq.tca_score:.0f}/100. See Live Sourcing tab for full breakdown."
+                f"{metric_str}. See Live Sourcing tab for full breakdown."
             )
         else:
             tbd = sum(1 for o in st.session_state.all_options if getattr(o, "price_tbd", False))
             reply = (
                 f"Sourced **{sp.manufacturer} {sp.model}** for {run_data['site']} — "
                 f"no direct buy pricing returned. "
-                f"**{tbd}** vendor(s) queued for Tier 3 Managed RFQ Outreach. "
+                f"**{tbd}** specialist(s) queued for Tier 3 Partner Outreach. "
                 f"Switch to the Live Sourcing tab to review and initiate outreach."
             )
     except Exception as exc:
@@ -1566,141 +1668,276 @@ if active_tab == "📊 Analytics":
 
 # ── Tab 2 · Active Sourcing ────────────────────────────────────────────────────
 elif active_tab == "🔍 Active Sourcing":
-    up_col, chat_col = st.columns([1, 1], gap="medium")
 
-    with up_col:
-        st.markdown('<div class="sb-sec">Nameplate Upload</div>', unsafe_allow_html=True)
-        uploaded = st.file_uploader(
-            "Upload nameplate photo",
-            type=["png", "jpg", "jpeg"],
-            label_visibility="collapsed",
-        )
-        if uploaded:
-            st.image(uploaded, use_column_width=True)
-            if st.button("Process Nameplate", use_container_width=True, type="primary"):
-                if not ant_key:
-                    st.error("Add your Anthropic API key in Settings (sidebar).")
-                else:
-                    st.session_state.accepted_quote = None
-                    st.session_state.rfq_campaign_sent = False
-                    st.session_state.active_tab = "🔍 Active Sourcing"
-                    st.session_state.pending_image = {
-                        "bytes": uploaded.getvalue(),
-                        "filename": uploaded.name,
-                        "site": site_sel,
-                    }
-                    st.session_state.messages.append({
-                        "role": "user",
-                        "content": f"Process nameplate image: **{uploaded.name}**",
-                    })
-                    st.rerun()
+    # ── Workflow selector ─────────────────────────────────────────────────────
+    _WF_OPTS = [
+        ("spare_parts",  "A — Spare Parts (OpEx)",         "Exact PN · Tier 1 priority · TCA ranked"),
+        ("replacement",  "B — Replacement Equipment",      "Functional equivalents · Compatibility check · TLV ranked"),
+        ("capex",        "C — New Equipment (CapEx)",       "Spec-driven RFQ · Specialist outreach · Proposal workflow"),
+    ]
+    _wf_labels = [x[1] for x in _WF_OPTS]
+    _wf_keys   = [x[0] for x in _WF_OPTS]
+    _wf_subs   = {x[0]: x[2] for x in _WF_OPTS}
+    _cur_idx   = _wf_keys.index(st.session_state.workflow_mode)
+    _sel_label = st.radio(
+        "Workflow", _wf_labels, index=_cur_idx, horizontal=True, label_visibility="collapsed"
+    )
+    _sel_wf = _wf_keys[_wf_labels.index(_sel_label)]
+    if _sel_wf != st.session_state.workflow_mode:
+        st.session_state.workflow_mode = _sel_wf
+        st.rerun()
 
-    with chat_col:
-        st.markdown('<div class="sb-sec">Chat Assistant</div>', unsafe_allow_html=True)
-        for m in st.session_state.messages[-6:]:
-            with st.chat_message(m["role"]):
-                st.markdown(m["content"])
+    st.markdown(
+        f'<div style="font-size:.74rem;color:#8b949e;margin:.2rem 0 .75rem;">'
+        f'{_wf_subs[_sel_wf]}</div>',
+        unsafe_allow_html=True,
+    )
 
-        chat_input = st.text_input(
-            "Message",
-            placeholder="e.g. Source a Square D 8536SCG3V02 for La Mirada",
-            label_visibility="collapsed",
-            key="chat_text",
-        )
-        if st.button("Send", use_container_width=True) and chat_input.strip():
-            prompt = chat_input.strip()
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            st.session_state.active_tab = "🔍 Active Sourcing"
-            if not ant_key:
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": "Please add your Anthropic API key in Settings (sidebar).",
-                })
+    # ── Section C: CapEx form (replaces upload/chat when capex selected) ──────
+    if st.session_state.workflow_mode == "capex":
+        from utils.models import AssetSpecs as _AS
+        st.markdown('<div class="a-label" style="margin:.4rem 0 .6rem;">New Equipment — Proposal Request</div>', unsafe_allow_html=True)
+        _wf_c1, _wf_c2 = st.columns(2)
+        with _wf_c1:
+            _cx_type  = st.text_input("Equipment Type", placeholder="e.g. Vertical Multi-Stage Centrifugal Pump")
+            _cx_mfg   = st.text_input("Preferred Manufacturer (optional)", placeholder="e.g. Grundfos, Goulds, Any")
+            _cx_specs = st.text_area("Technical Specifications", height=100,
+                                     placeholder="HP, GPM, PSI, Voltage, Phase, Frame Size…")
+        with _wf_c2:
+            _cx_use   = st.text_input("Use Case / Application", placeholder="e.g. Cooling water recirculation")
+            _cx_dc    = st.selectbox("Duty Cycle", ["Continuous", "Intermittent", "Standby", "Unknown"])
+            _cx_env   = st.text_input("Environmental Constraints (optional)",
+                                      placeholder="e.g. Washdown-rated, -20°C ambient, hazardous area")
+            _cx_bud   = st.text_input("Max Budget (optional)", placeholder="e.g. $15,000")
+            _cx_dtc   = st.number_input("Estimated Downtime Cost / Day ($)", min_value=0.0,
+                                        value=st.session_state.downtime_cost_per_day, step=100.0)
+
+        if st.button("Generate CapEx Proposal Requests", type="primary", use_container_width=True):
+            if not _cx_type.strip():
+                st.error("Please enter an Equipment Type before submitting.")
+            elif not ant_key:
+                st.error("Anthropic API key not configured.")
             else:
-                try:
-                    # ── Priority 1: awaiting search strategy choice ──────────
-                    pss = st.session_state.pending_search_strategy
-                    if pss is not None:
-                        if re.search(r"\bequiv\b|\bequivalent\b|\balt\b|\bsimilar\b|\binclude\b|\bopen\b", prompt, re.I):
-                            mode = "equivalents"
-                            mode_note = "equivalents included"
-                        else:
-                            mode = "exact"
-                            mode_note = "exact match only"
-                        st.session_state.pending_search_strategy = None
-                        st.session_state.search_mode = mode
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": f"Got it — searching **{mode_note}**. Running pipeline now…"
-                        })
-                        st.session_state.pending_run = {
-                            **pss, "search_strategy_confirmed": True, "search_mode": mode
-                        }
-                    # ── Priority 2: awaiting spec clarification ──────────────
-                    elif st.session_state.pending_verification_specs is not None:
-                        pv_specs = st.session_state.pending_verification_specs
-                        pv_site  = st.session_state.pending_verification_site or site_sel
-                        if re.search(r"\bsearch anyway\b|\bproceed\b|\bskip\b", prompt, re.I):
-                            st.session_state.pending_verification_specs = None
-                            st.session_state.pending_verification_site  = None
-                            st.session_state.pending_run = {
-                                "specs": pv_specs, "site": pv_site, "verified": True
-                            }
-                        else:
-                            classified = classify_message(
-                                f"Spec clarification for {pv_specs.manufacturer} {pv_specs.model}: {prompt}",
-                                ant_key
-                            )
-                            updated = _merge_spec_clarification(pv_specs, classified)
-                            st.session_state.pending_verification_specs = None
-                            st.session_state.pending_verification_site  = None
-                            st.session_state.pending_run = {
-                                "specs": updated, "site": pv_site, "verified": True
-                            }
-                    else:
-                        classified = classify_message(prompt, ant_key)
-                        intent    = classified.get("intent", "GENERAL")
-                        req_site  = classified.get("site") or site_sel
-                        if intent in ("SOURCING", "SPEC_CLARIFICATION") and (
-                            classified.get("manufacturer") or classified.get("model")
-                            or classified.get("part_number") or classified.get("gpm")
-                            or classified.get("detected_type")
-                        ):
-                            st.session_state.accepted_quote = None
-                            st.session_state.rfq_campaign_sent = False
-                            specs = specs_from_classification(classified)
-                            st.session_state.pending_run = {"specs": specs, "site": req_site}
-                        else:
-                            reply = chat_respond(prompt, ant_key)
-                            st.session_state.messages.append({"role": "assistant", "content": reply})
-                except Exception as exc:
-                    st.session_state.messages.append({"role": "assistant", "content": f"Error: {exc}"})
-            st.rerun()
-
-    st.divider()
-
-    if st.session_state.accepted_quote:
-        render_purchase_confirmed()
-    elif st.session_state.pipeline_ran:
-        render_asset_card()
-        _rc1, _rc2 = st.columns([6, 1])
-        with _rc2:
-            if st.button("🔄 Refresh", help="Bypass price cache and fetch fresh prices from Tavily",
-                         use_container_width=True):
-                st.session_state.force_refresh = True
-                st.session_state.accepted_quote = None
+                desc_parts = [p for p in [_cx_specs.strip(), _cx_env.strip()] if p]
+                _cx_specs_obj = _AS(
+                    manufacturer=_cx_mfg.strip() or "TBD",
+                    model=_cx_type.strip(),
+                    part_number="CAPEX-RFQ",
+                    voltage="TBD",
+                    category="Equipment",
+                    description=" | ".join(desc_parts) if desc_parts else _cx_type.strip(),
+                    detected_type=_cx_type.strip(),
+                    use_case=_cx_use.strip() or None,
+                    duty_cycle=_cx_dc,
+                    budget_max=_cx_bud.strip() or None,
+                )
+                st.session_state.downtime_cost_per_day = _cx_dtc
+                st.session_state.accepted_quote  = None
                 st.session_state.rfq_campaign_sent = False
+                st.session_state.messages.append({
+                    "role": "user",
+                    "content": (
+                        f"CapEx proposal request: **{_cx_type.strip()}** | "
+                        f"Use Case: {_cx_use or '—'} | Duty: {_cx_dc} | "
+                        f"Specs: {_cx_specs.strip() or '—'}"
+                    ),
+                })
                 st.session_state.pending_run = {
-                    "specs": st.session_state.specs,
-                    "site":  st.session_state.site,
+                    "specs":   _cx_specs_obj,
+                    "site":    site_sel,
+                    "verified": True,
+                    "search_strategy_confirmed": True,
+                    "search_mode": "equivalents",
+                    "workflow":    "capex",
                 }
                 st.rerun()
-        render_vendor_cards()
-        render_tier3_outreach()
-        if st.session_state.pipeline_error:
-            st.error(f"Pipeline error: {st.session_state.pipeline_error}")
+
+        st.divider()
+        if st.session_state.accepted_quote:
+            render_purchase_confirmed()
+        elif st.session_state.pipeline_ran:
+            render_asset_card()
+            render_tier3_outreach()
+            if st.session_state.pipeline_error:
+                st.error(f"Pipeline error: {st.session_state.pipeline_error}")
+        else:
+            st.markdown("""
+            <div style="text-align:center;padding:2.5rem 2rem;color:#8b949e;">
+              <div style="font-size:2.5rem;">📋</div>
+              <div style="font-size:.92rem;color:#e6edf3;font-weight:700;margin:.5rem 0 .3rem;">
+                CapEx Proposal Workflow
+              </div>
+              <div style="font-size:.82rem;line-height:1.6;max-width:420px;margin:0 auto;">
+                Fill in the form above and click <b>Generate CapEx Proposal Requests</b>. Arkim will
+                discover specialist vendors and draft Partner Invitation emails for each, including
+                your use case and duty cycle requirements.
+              </div>
+            </div>""", unsafe_allow_html=True)
+
     else:
-        render_empty()
+        # ── Sections A & B: Upload + Chat ──────────────────────────────────────
+        up_col, chat_col = st.columns([1, 1], gap="medium")
+
+        with up_col:
+            # Downtime cost input for TLV (Replacement mode only)
+            if st.session_state.workflow_mode == "replacement":
+                _dtc_val = st.number_input(
+                    "Downtime Cost / Day ($) — for TLV ranking",
+                    min_value=0.0,
+                    value=st.session_state.downtime_cost_per_day,
+                    step=100.0,
+                    help="Estimated production downtime cost per day — used in Total Life Cycle Value.",
+                )
+                if _dtc_val != st.session_state.downtime_cost_per_day:
+                    st.session_state.downtime_cost_per_day = _dtc_val
+
+            st.markdown('<div class="sb-sec">Nameplate Upload</div>', unsafe_allow_html=True)
+            uploaded = st.file_uploader(
+                "Upload nameplate photo",
+                type=["png", "jpg", "jpeg"],
+                label_visibility="collapsed",
+            )
+            if uploaded:
+                st.image(uploaded, use_column_width=True)
+                if st.button("Process Nameplate", use_container_width=True, type="primary"):
+                    if not ant_key:
+                        st.error("Add your Anthropic API key in Settings (sidebar).")
+                    else:
+                        st.session_state.accepted_quote = None
+                        st.session_state.rfq_campaign_sent = False
+                        st.session_state.active_tab = "🔍 Active Sourcing"
+                        st.session_state.pending_image = {
+                            "bytes": uploaded.getvalue(),
+                            "filename": uploaded.name,
+                            "site": site_sel,
+                        }
+                        st.session_state.messages.append({
+                            "role": "user",
+                            "content": f"Process nameplate image: **{uploaded.name}**",
+                        })
+                        st.rerun()
+
+        with chat_col:
+            st.markdown('<div class="sb-sec">Chat Assistant</div>', unsafe_allow_html=True)
+            for m in st.session_state.messages[-6:]:
+                with st.chat_message(m["role"]):
+                    st.markdown(m["content"])
+
+            _placeholder = (
+                "e.g. Find a replacement for GE 5KE49TN2167 3HP motor"
+                if st.session_state.workflow_mode == "replacement"
+                else "e.g. Source a Square D 8536SCG3V02 for La Mirada"
+            )
+            chat_input = st.text_input(
+                "Message",
+                placeholder=_placeholder,
+                label_visibility="collapsed",
+                key="chat_text",
+            )
+            if st.button("Send", use_container_width=True) and chat_input.strip():
+                prompt = chat_input.strip()
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                st.session_state.active_tab = "🔍 Active Sourcing"
+                if not ant_key:
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": "Please add your Anthropic API key in Settings (sidebar).",
+                    })
+                else:
+                    try:
+                        pss = st.session_state.pending_search_strategy
+                        if pss is not None:
+                            if re.search(r"\bequiv\b|\bequivalent\b|\balt\b|\bsimilar\b|\binclude\b|\bopen\b", prompt, re.I):
+                                mode = "equivalents"
+                                mode_note = "equivalents included"
+                            else:
+                                mode = "exact"
+                                mode_note = "exact match only"
+                            st.session_state.pending_search_strategy = None
+                            st.session_state.search_mode = mode
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": f"Got it — searching **{mode_note}**. Running pipeline now…"
+                            })
+                            st.session_state.pending_run = {
+                                **pss, "search_strategy_confirmed": True, "search_mode": mode,
+                                "workflow": st.session_state.workflow_mode,
+                            }
+                        elif st.session_state.pending_verification_specs is not None:
+                            pv_specs = st.session_state.pending_verification_specs
+                            pv_site  = st.session_state.pending_verification_site or site_sel
+                            if re.search(r"\bsearch anyway\b|\bproceed\b|\bskip\b", prompt, re.I):
+                                st.session_state.pending_verification_specs = None
+                                st.session_state.pending_verification_site  = None
+                                st.session_state.pending_run = {
+                                    "specs": pv_specs, "site": pv_site, "verified": True,
+                                    "workflow": st.session_state.workflow_mode,
+                                }
+                            else:
+                                classified = classify_message(
+                                    f"Spec clarification for {pv_specs.manufacturer} {pv_specs.model}: {prompt}",
+                                    ant_key
+                                )
+                                updated = _merge_spec_clarification(pv_specs, classified)
+                                st.session_state.pending_verification_specs = None
+                                st.session_state.pending_verification_site  = None
+                                st.session_state.pending_run = {
+                                    "specs": updated, "site": pv_site, "verified": True,
+                                    "workflow": st.session_state.workflow_mode,
+                                }
+                        else:
+                            classified = classify_message(prompt, ant_key)
+                            intent    = classified.get("intent", "GENERAL")
+                            req_site  = classified.get("site") or site_sel
+                            if intent in ("SOURCING", "SPEC_CLARIFICATION") and (
+                                classified.get("manufacturer") or classified.get("model")
+                                or classified.get("part_number") or classified.get("gpm")
+                                or classified.get("detected_type")
+                            ):
+                                st.session_state.accepted_quote = None
+                                st.session_state.rfq_campaign_sent = False
+                                specs = specs_from_classification(classified)
+                                # Replacement mode defaults to equivalents search
+                                default_mode = ("equivalents"
+                                               if st.session_state.workflow_mode == "replacement"
+                                               else "exact")
+                                st.session_state.pending_run = {
+                                    "specs": specs, "site": req_site,
+                                    "workflow": st.session_state.workflow_mode,
+                                    "search_mode": default_mode,
+                                }
+                            else:
+                                reply = chat_respond(prompt, ant_key)
+                                st.session_state.messages.append({"role": "assistant", "content": reply})
+                    except Exception as exc:
+                        st.session_state.messages.append({"role": "assistant", "content": f"Error: {exc}"})
+                st.rerun()
+
+        st.divider()
+
+        if st.session_state.accepted_quote:
+            render_purchase_confirmed()
+        elif st.session_state.pipeline_ran:
+            render_asset_card()
+            _rc1, _rc2 = st.columns([6, 1])
+            with _rc2:
+                if st.button("🔄 Refresh", help="Bypass price cache and fetch fresh prices from Tavily",
+                             use_container_width=True):
+                    st.session_state.force_refresh = True
+                    st.session_state.accepted_quote = None
+                    st.session_state.rfq_campaign_sent = False
+                    st.session_state.pending_run = {
+                        "specs":    st.session_state.specs,
+                        "site":     st.session_state.site,
+                        "workflow": st.session_state.workflow_mode,
+                    }
+                    st.rerun()
+            render_vendor_cards()
+            render_tier3_outreach()
+            if st.session_state.pipeline_error:
+                st.error(f"Pipeline error: {st.session_state.pipeline_error}")
+        else:
+            render_empty()
 
 # ── Tab 3 · History & Drafts ───────────────────────────────────────────────────
 elif active_tab == "📋 History & Drafts":
@@ -1779,3 +2016,109 @@ elif active_tab == "📋 History & Drafts":
             "Status":      st.column_config.TextColumn("Status"),
         },
     )
+
+    st.markdown("<div style='margin-top:1.5rem'></div>", unsafe_allow_html=True)
+
+    # ── Section C: Warranty Registry ──
+    st.markdown('<div class="a-label" style="margin:.6rem 0 .5rem;">Warranty Registry</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-size:.76rem;color:#8b949e;margin-bottom:.75rem;">'
+        'Coverage status derived from order date + extracted warranty period. '
+        'Update manually when vendor confirms warranty terms.</div>',
+        unsafe_allow_html=True,
+    )
+
+    from datetime import datetime as _dt
+    import re as _re
+
+    def _parse_warranty_months(terms: str) -> int | None:
+        """Extract warranty duration in months from a warranty_terms string."""
+        if not terms:
+            return None
+        t = terms.lower()
+        m = _re.search(r"(\d+)\s*-?\s*year", t)
+        if m:
+            return int(m.group(1)) * 12
+        m = _re.search(r"(\d+)\s*-?\s*month", t)
+        if m:
+            return int(m.group(1))
+        return None
+
+    def _warranty_status(accepted_str: str, months: int | None) -> str:
+        if months is None:
+            return "Unknown"
+        try:
+            accepted_dt = _dt.strptime(accepted_str[:10], "%Y-%m-%d")
+        except Exception:
+            return "Unknown"
+        from datetime import timedelta
+        expiry = accepted_dt + timedelta(days=months * 30.44)
+        return "Active" if expiry > _dt.now() else "Expired"
+
+    # Collect warranty data from accepted orders + options
+    _w_rows = []
+    # From live session options (have warranty_terms)
+    for _h in st.session_state.sourcing_history:
+        for _o in _h.get("all_options", []):
+            _wt = getattr(_o, "warranty_terms", None)
+            if not _wt:
+                continue
+            # Find matching order
+            _match = next(
+                (ord_ for ord_ in all_orders
+                 if _o.vendor_name == ord_.get("Vendor")),
+                None
+            )
+            if _match:
+                _months = _parse_warranty_months(_wt)
+                _status = _warranty_status(_match.get("Accepted", ""), _months)
+                _w_rows.append({
+                    "Asset":          _match.get("Asset", "—"),
+                    "Vendor":         _o.vendor_name,
+                    "Accepted":       _match.get("Accepted", "—")[:10],
+                    "Warranty Terms": _wt,
+                    "Coverage":       _status,
+                })
+
+    # Seed warranty data for demo orders
+    _seed_warranties = [
+        {"Asset": "Square D 8536SCG3V02",  "Vendor": "Grainger",      "Accepted": "2026-04-01",
+         "Warranty Terms": "12-month standard",  "Coverage": "Active"},
+        {"Asset": "GE 5KE49TN2167",         "Vendor": "McMaster-Carr", "Accepted": "2026-04-08",
+         "Warranty Terms": "12-month standard",  "Coverage": "Active"},
+        {"Asset": "ABB M3AA090L 2HP",       "Vendor": "MSC Industrial","Accepted": "2026-04-15",
+         "Warranty Terms": "24-month standard",  "Coverage": "Active"},
+        {"Asset": "Baldor EM3311T",          "Vendor": "Grainger",      "Accepted": "2026-04-19",
+         "Warranty Terms": "12-month standard",  "Coverage": "Active"},
+        {"Asset": "Siemens 1LE1001",         "Vendor": "McMaster-Carr", "Accepted": "2026-04-21",
+         "Warranty Terms": "18-month standard",  "Coverage": "Active"},
+    ]
+    # Merge: live rows take priority
+    _live_assets = {r["Asset"] for r in _w_rows}
+    _all_warranties = _w_rows + [r for r in _seed_warranties if r["Asset"] not in _live_assets]
+
+    if _all_warranties:
+        _wdf = pd.DataFrame(_all_warranties)
+
+        def _cov_color(v: str) -> str:
+            if v == "Active":
+                return "color: #3fb950; font-weight: 700"
+            if v == "Expired":
+                return "color: #f85149; font-weight: 700"
+            return "color: #8b949e"
+
+        st.dataframe(
+            _wdf,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Coverage": st.column_config.TextColumn("Coverage"),
+            },
+        )
+    else:
+        st.markdown("""
+        <div class="empty-state" style="padding:1.2rem;">
+          <div class="es-icon">&#9989;</div>
+          <div class="es-body">No warranty data yet. Warranty terms are automatically extracted
+          when vendors list them on their product pages.</div>
+        </div>""", unsafe_allow_html=True)

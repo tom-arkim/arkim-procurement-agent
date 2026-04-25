@@ -26,6 +26,10 @@ class AssetSpecs:
     frame: Optional[str] = None         # NEMA frame size (motors / pumps)
     phase: Optional[str] = None         # electrical phase (e.g. "3-phase", "single-phase")
     detected_type: Optional[str] = None # specific equipment type (e.g. "Vertical Multi-Stage Pump")
+    # CapEx workflow extras
+    use_case: Optional[str] = None      # application context (e.g. "cooling water recirculation")
+    duty_cycle: Optional[str] = None    # "Continuous" | "Intermittent" | "Standby"
+    budget_max: Optional[str] = None    # maximum budget for CapEx requests
 
 
 @dataclass
@@ -49,6 +53,9 @@ class SourcingOption:
     is_collection_page: bool = False          # True when URL is a search/collection list, not a direct product page
     suitability_score: float = 0.0            # 0-100 fit score for Tier 2/3 vendors (PN + type + auth status)
     partner_status: str = ""                  # "Gold" | "Silver" | "" — Arkim network tier
+    warranty_terms: Optional[str] = None      # e.g., "12-month standard", "5-year limited"
+    market_confidence_score: Optional[float] = None  # 1-10 web-sourced reliability score
+    weight_lbs: Optional[float] = None        # item weight in lbs (for freight guard)
 
 
 @dataclass
@@ -74,6 +81,8 @@ class ArkimQuote:
     avl_friction_note: str = (
         "Client purchases via Arkim — no new vendor onboarding required."
     )
+    tlv_score: float = 0.0             # Total Life Cycle Value (Purchase + Downtime Risk + Shipping + Tax)
+    workflow: str = "spare_parts"      # "spare_parts" | "replacement" | "capex"
 
 
 @dataclass

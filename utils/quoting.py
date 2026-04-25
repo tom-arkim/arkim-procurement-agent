@@ -24,6 +24,8 @@ COST_WEIGHT        = 0.20
 
 MAX_LEAD_TIME = 14  # days — normalisation ceiling
 
+DEFAULT_DOWNTIME_COST_PER_DAY = 500.0  # USD/day — override via generate_arkim_quote param
+
 
 # ---------------------------------------------------------------------------
 # Location-Based Tax
@@ -114,6 +116,31 @@ def _compute_tca_score(option: SourcingOption,
 # Markup selection
 # ---------------------------------------------------------------------------
 
+def compute_tlv(quote: "ArkimQuote", downtime_cost_per_day: float = DEFAULT_DOWNTIME_COST_PER_DAY) -> float:
+    """Total Life Cycle Value — lower is better.
+
+    TLV = Purchase Price + (Estimated Downtime Cost × Reliability Risk) + Shipping + Tax
+
+    Reliability Risk is the expected downtime exposure during lead time:
+      risk = lead_time_days × (1 - effective_reliability)
+      effective_reliability blends vendor reliability_score (0-100 %) with
+      market_confidence_score (1-10) when available.
+    """
+    opt = quote.chosen_option
+    rel = opt.reliability_score / 100.0
+    mcs = getattr(opt, "market_confidence_score", None)
+    if mcs is not None:
+        effective_rel = (rel + mcs / 10.0) / 2.0
+    else:
+        effective_rel = rel
+
+    risk_factor    = max(0.0, 1.0 - effective_rel)
+    downtime_cost  = downtime_cost_per_day * quote.chosen_option.lead_time_days * risk_factor
+    shipping       = quote.shipping_cost
+    tax            = quote.tax_amount
+    return round(quote.vendor_base_price + downtime_cost + shipping + tax, 2)
+
+
 def _markup_for(option: SourcingOption) -> float:
     """10 % for Tier 1 Enterprise; 25 % for Tier 2 (Direct Buy via Arkim) and Local."""
     if option.merchant_type == "Enterprise":
@@ -154,11 +181,21 @@ def _build_arkim_quote(specs: AssetSpecs, option: SourcingOption,
         tax_rate=tax_rate,
         tax_amount=tax_amount,
         grand_total=grand_total,
-        estimated_delivery_days=option.lead_time_days + 1,  # +1 for Arkim processing
+        estimated_delivery_days=option.lead_time_days + 1,
         tca_score=tca_score,
         shipping_ltl=is_ltl,
         shipping_label=s_label,
     )
+
+
+def _build_arkim_quote_for_workflow(specs: AssetSpecs, option: SourcingOption,
+                                    site: str, workflow: str,
+                                    downtime_cost_per_day: float) -> ArkimQuote:
+    """Wraps _build_arkim_quote and stamps workflow + TLV onto the result."""
+    q = _build_arkim_quote(specs, option, site)
+    q.workflow  = workflow
+    q.tlv_score = compute_tlv(q, downtime_cost_per_day)
+    return q
 
 
 # ---------------------------------------------------------------------------
@@ -167,18 +204,28 @@ def _build_arkim_quote(specs: AssetSpecs, option: SourcingOption,
 
 def generate_arkim_quote(specs: AssetSpecs,
                          options: list[SourcingOption],
-                         site: str = "La Mirada") -> tuple[list[ArkimQuote], ArkimQuote]:
+                         site: str = "La Mirada",
+                         workflow: str = "spare_parts",
+                         downtime_cost_per_day: float = DEFAULT_DOWNTIME_COST_PER_DAY,
+                         ) -> tuple[list[ArkimQuote], ArkimQuote]:
     """
     Two-pass scoring:
-      Pass 1 — build all quotes with line-item totals (TCA cost component neutral).
-      Pass 2 — recompute TCA using each quote's grand_total relative to peers.
+      Pass 1 — build all quotes (TCA cost component neutral).
+      Pass 2 — recompute TCA with grand_total context; compute TLV for each quote.
 
-    Returns (all_quotes sorted by tca_score desc, recommended_quote).
+    Ranking metric:
+      spare_parts → TCA (speed + reliability + friction + cost)
+      replacement → TLV (purchase price + downtime risk + shipping + tax)
+      capex       → TLV
+
+    Returns (all_quotes sorted by primary metric desc/asc, recommended_quote).
     """
-    print(f"\n[Quote Engine] Scoring {len(options)} sourcing options via TCA (site: {site})...")
+    print(f"\n[Quote Engine] Scoring {len(options)} options via "
+          f"{'TCA' if workflow == 'spare_parts' else 'TLV'} (site: {site}, workflow: {workflow})...")
 
     # Pass 1
-    all_quotes = [_build_arkim_quote(specs, opt, site) for opt in options]
+    all_quotes = [_build_arkim_quote_for_workflow(specs, opt, site, workflow, downtime_cost_per_day)
+                  for opt in options]
 
     # Pass 2 — inject grand_total context into TCA
     grand_totals = [q.grand_total for q in all_quotes]
@@ -186,15 +233,20 @@ def generate_arkim_quote(specs: AssetSpecs,
     max_gt = max(grand_totals)
     for q in all_quotes:
         q.tca_score = _compute_tca_score(q.chosen_option, q.grand_total, min_gt, max_gt)
+        q.tlv_score = compute_tlv(q, downtime_cost_per_day)
 
-    all_quotes.sort(key=lambda q: q.tca_score, reverse=True)
+    if workflow == "spare_parts":
+        all_quotes.sort(key=lambda q: q.tca_score, reverse=True)   # higher TCA = better
+    else:
+        all_quotes.sort(key=lambda q: q.tlv_score)                  # lower TLV  = better
+
     best = all_quotes[0]
-
+    metric_str = (f"TCA: {best.tca_score:.1f}" if workflow == "spare_parts"
+                  else f"TLV: ${best.tlv_score:,.2f}")
     print(
         f"[Quote Engine] Recommended: {best.chosen_option.vendor_name} "
-        f"| TCA: {best.tca_score} "
+        f"| {metric_str} "
         f"| Arkim Price: ${best.arkim_sale_price:.2f} "
-        f"| Tax: ${best.tax_amount:.2f} "
         f"| Grand Total: ${best.grand_total:.2f}"
         + (" +LTL freight" if best.shipping_ltl else "")
     )

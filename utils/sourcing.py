@@ -315,6 +315,9 @@ Return ONLY valid JSON — a list of objects with these exact keys:
                       false if found_part_number is a different model/PN (functional equivalent).
   lead_days         : integer (business days to ship; "In Stock"→2, unknown→5)
   url               : string (exact source URL — REQUIRED)
+  warranty_terms    : string or null — warranty period shown on the page (e.g. "12-month standard",
+                      "5-year limited", "90-day parts only"). null if not mentioned.
+  weight_lbs        : number or null — product weight in pounds if shown (used for freight guard). null if not visible.
 
 Rules:
 - Include entries where a real source URL is present EVEN IF no price is listed.
@@ -325,6 +328,8 @@ Rules:
 - If shipping cost is unclear / "subject to quote": shipping_terms = "S.F.Q.".
 - found_part_number: extract even if it differs from the searched PN — this is the cross-reference key.
 - exact_match: compare found_part_number to the searched PN; false if they differ.
+- warranty_terms: extract verbatim warranty language; standardize to "N-month standard", "N-year limited", etc.
+- weight_lbs: if weight is shown in kg, convert to lbs (×2.205). Any item >100 lbs likely needs freight.
 - One entry per vendor — prefer entries that have a price over those that don't.
 - Only SKIP entries with no URL at all.
 """
@@ -410,8 +415,75 @@ def _vendor_reliability(vendor_name: str) -> float:
     }.get(vendor_name, 78.0)
 
 
-def _is_heavy_item(specs: AssetSpecs) -> bool:
-    """True if the item is likely to require LTL freight (motors >10 HP, pumps, compressors)."""
+# ---------------------------------------------------------------------------
+# Market Confidence Score — interim reliability metric via web search
+# ---------------------------------------------------------------------------
+
+_RELIABILITY_SYSTEM = """You are an industrial reliability analyst.
+Given web search results about a specific component, assess its market reliability reputation.
+
+Return ONLY valid JSON (no prose):
+{
+  "market_confidence_score": <integer 1-10>,
+  "summary": "<one sentence>",
+  "common_failures": "<brief comma-separated list or null>"
+}
+
+Scoring guide:
+  10   : Outstanding MTBF, no documented failure patterns
+  8-9  : Very reliable, minor isolated issues
+  6-7  : Acceptable, some known failure patterns in the field
+  4-5  : Below average reliability, notable concerns
+  1-3  : Poor, widespread failures or product discontinuation
+
+If no reliability information is found, return:
+{"market_confidence_score": 6, "summary": "No reliability data found in web sources.", "common_failures": null}
+"""
+
+
+def _fetch_market_confidence(specs: AssetSpecs) -> Optional[float]:
+    """Search the web for reliability/MTBF data on this specific brand+model.
+    Returns a 1-10 Market Confidence Score, or None if unavailable.
+    """
+    if not _tavily or not ANTHROPIC_API_KEY:
+        return None
+    brand = specs.manufacturer if specs.manufacturer not in ("Unknown", "N/A", "null") else ""
+    model = specs.model        if specs.model        not in ("Unknown", "N/A", "null") else ""
+    if not (brand or model):
+        return None
+
+    query = f"{brand} {model} reliability MTBF common failures field reports".strip()
+    print(f"[Sourcing] Market confidence query: {query!r}")
+    try:
+        resp    = _tavily.search(query=query, search_depth="basic", max_results=5)
+        results = resp.get("results", [])
+        if not results:
+            return None
+        snippets = "\n---\n".join(
+            f"Title: {r.get('title','')}\nContent: {r.get('content','')}"
+            for r in results
+        )
+        raw = _anthropic_complete(
+            _RELIABILITY_SYSTEM,
+            f"Component: {brand} {model}\n\n{snippets}"
+        )
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            d = json.loads(m.group(0))
+            score = d.get("market_confidence_score")
+            if score is not None:
+                s = float(score)
+                print(f"[Sourcing] Market confidence {brand} {model}: {s:.1f}/10 — {d.get('summary','')}")
+                return s
+    except Exception as exc:
+        print(f"[Sourcing] Market confidence error: {exc}")
+    return None
+
+
+def _is_heavy_item(specs: AssetSpecs, weight_lbs: Optional[float] = None) -> bool:
+    """True if the item requires LTL freight: >100 lbs, >10 HP, or is a large Equipment category."""
+    if weight_lbs is not None and weight_lbs > 100:
+        return True
     if specs.category == "Equipment" and any(
         kw in (specs.description or "").lower()
         for kw in ("pump", "motor", "compressor", "blower")
@@ -467,23 +539,30 @@ def _call_enterprise_api(specs: AssetSpecs,
         print(f"[Sourcing] Tavily search for: {missing}")
         results = _search_vendor_prices(specs, search_mode=search_mode)
         parsed  = _llm_parse_results(specs, results)
-        heavy   = _is_heavy_item(specs)
         # URL → raw snippet map for suitability scoring
         snippet_map = {
             r.get("url", ""): (r.get("title", "") + " " + r.get("content", "")).strip()
             for r in results if r.get("url")
         }
+        # Market confidence — one search per pipeline run, applied to all options
+        mkt_conf = _fetch_market_confidence(specs)
+
         seen: set[str] = set()
         for item in parsed:
-            vendor       = item.get("vendor", "Unknown")
-            price        = item.get("price")            # None = hidden / CfQ
-            url          = item.get("url", "").strip()
-            lead         = item.get("lead_days", 5)
-            ship_fee     = item.get("shipping_fee")     # 0 = free, None = unknown
-            ship_terms   = item.get("shipping_terms")   # "Free Shipping", "LTL Freight Required", "S.F.Q.", etc.
-            is_freight   = bool(item.get("is_freight", False)) or (heavy and ship_fee is None and price is not None)
-            found_pn     = (item.get("found_part_number") or "").strip() or None
-            exact_match  = bool(item.get("exact_match", True))
+            vendor        = item.get("vendor", "Unknown")
+            price         = item.get("price")
+            url           = item.get("url", "").strip()
+            lead          = item.get("lead_days", 5)
+            ship_fee      = item.get("shipping_fee")
+            ship_terms    = item.get("shipping_terms")
+            warranty      = item.get("warranty_terms") or None
+            weight_lbs    = item.get("weight_lbs")
+            weight_lbs    = float(weight_lbs) if weight_lbs is not None else None
+            found_pn      = (item.get("found_part_number") or "").strip() or None
+            exact_match   = bool(item.get("exact_match", True))
+            # Freight guard: >100 lbs OR >10 HP OR category heavy → S.F.Q.
+            heavy         = _is_heavy_item(specs, weight_lbs)
+            is_freight    = bool(item.get("is_freight", False)) or (heavy and ship_fee is None and price is not None)
 
             # Cross-reference: if found PN is present and differs from searched PN → Alternative
             searched_pn = (specs.part_number or "").upper().strip()
@@ -529,48 +608,43 @@ def _call_enterprise_api(specs: AssetSpecs,
             suit    = _compute_suitability_score(specs, snippet, url, found_pn)
             pstat   = _partner_status(vendor, suit)
 
+            _common = dict(
+                lead_time_days=int(lead),
+                reliability_score=_vendor_reliability(vendor),
+                merchant_type=merchant_type,
+                source_url=url,
+                extracted_shipping_fee=float(ship_fee) if ship_fee is not None else None,
+                is_freight=is_freight,
+                match_type=match_type,
+                found_part_number=found_pn,
+                shipping_terms=resolved_terms,
+                is_collection_page=is_coll,
+                suitability_score=suit,
+                partner_status=pstat,
+                warranty_terms=warranty,
+                weight_lbs=weight_lbs,
+                market_confidence_score=mkt_conf,
+            )
             if price is not None:
                 save_price(specs.part_number, vendor, float(price), int(lead), source="live", url=url)
                 print(f"[Sourcing] Priced{tag} suit={suit:.0f}%: {vendor} @ ${price:.2f} | {url}")
                 options.append(SourcingOption(
                     vendor_name=vendor,
                     base_price=float(price),
-                    lead_time_days=int(lead),
-                    reliability_score=_vendor_reliability(vendor),
-                    merchant_type=merchant_type,
                     requires_rfq=False,
                     notes=f"Live{tag}",
-                    source_url=url,
                     price_tbd=False,
-                    extracted_shipping_fee=float(ship_fee) if ship_fee is not None else None,
-                    is_freight=is_freight,
-                    match_type=match_type,
-                    found_part_number=found_pn,
-                    shipping_terms=resolved_terms,
-                    is_collection_page=is_coll,
-                    suitability_score=suit,
-                    partner_status=pstat,
+                    **_common,
                 ))
             else:
                 print(f"[Sourcing] Inquiry Required{tag} suit={suit:.0f}%: {vendor} | {url}")
                 options.append(SourcingOption(
                     vendor_name=vendor,
                     base_price=0.0,
-                    lead_time_days=int(lead),
-                    reliability_score=_vendor_reliability(vendor),
-                    merchant_type=merchant_type,
                     requires_rfq=False,
                     notes=f"Price inquiry required{tag}",
-                    source_url=url,
                     price_tbd=True,
-                    extracted_shipping_fee=None,
-                    is_freight=is_freight,
-                    match_type=match_type,
-                    found_part_number=found_pn,
-                    shipping_terms=resolved_terms,
-                    is_collection_page=is_coll,
-                    suitability_score=suit,
-                    partner_status=pstat,
+                    **_common,
                 ))
 
     priced = sum(1 for o in options if not o.price_tbd)
@@ -807,18 +881,26 @@ procurement@arkim.ai
 def find_vendors(specs: AssetSpecs,
                  site: str = "La Mirada",
                  force_refresh: bool = False,
-                 search_mode: str = "exact") -> tuple[list[SourcingOption], Optional[str]]:
+                 search_mode: str = "exact",
+                 workflow: str = "spare_parts") -> tuple[list[SourcingOption], Optional[str]]:
     """
-    Run full multi-tier sourcing.
+    Run multi-tier sourcing.
 
-    search_mode: "exact" | "equivalents" — controls competitor injection in Equipment queries.
+    workflow:     "spare_parts" | "replacement" | "capex"
+                  CapEx skips Tier 1/2 price search and goes straight to specialist discovery.
+    search_mode:  "exact" | "equivalents" — controls competitor injection in Equipment queries.
     Returns: (all_options, None)
     """
-    print(f"\n[Sourcing] Tier 1/1.5 — Querying national vendors via Tavily (mode: {search_mode})...")
-    enterprise = _call_enterprise_api(specs, force_refresh=force_refresh, search_mode=search_mode)
-    for o in enterprise:
-        tag = " [INQUIRY REQUIRED]" if o.price_tbd else f" @ ${o.base_price:.2f}"
-        print(f"  {o.vendor_name} ({o.merchant_type}){tag} | {o.lead_time_days}d")
+    enterprise: list[SourcingOption] = []
+
+    if workflow != "capex":
+        print(f"\n[Sourcing] Tier 1/1.5 — Querying national vendors (mode: {search_mode})...")
+        enterprise = _call_enterprise_api(specs, force_refresh=force_refresh, search_mode=search_mode)
+        for o in enterprise:
+            tag = " [INQUIRY REQUIRED]" if o.price_tbd else f" @ ${o.base_price:.2f}"
+            print(f"  {o.vendor_name} ({o.merchant_type}){tag} | {o.lead_time_days}d")
+    else:
+        print(f"\n[Sourcing] CapEx workflow — skipping Tier 1/2, going direct to specialist outreach...")
 
     print(f"\n[Sourcing] Tier 2 — National specialist discovery...")
     tier2 = _discover_national_specialists(specs, enterprise)
