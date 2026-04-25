@@ -27,7 +27,7 @@ from utils.models import AssetSpecs, SourcingOption
 TAVILY_API_KEY    = os.environ.get("TAVILY_API_KEY")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
-_tavily = TavilyClient(api_key=TAVILY_API_KEY)
+_tavily = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
 TARGET_VENDORS = [
     # Tier 1: Generalist Enterprise
@@ -82,6 +82,17 @@ def _anthropic_complete(system: str, user: str) -> str:
 # Tier 1 — Real-time Tavily Search + LLM Parsing
 # ---------------------------------------------------------------------------
 
+# URL patterns that indicate a list/category page rather than a direct product page.
+# Results from these are flagged as low-reliability (collection_page = True).
+_COLLECTION_URL_PATTERNS = ("/collections/", "/search", "/catalog/", "/category/",
+                             "/browse/", "?q=", "&q=", "/results")
+
+
+def _is_collection_url(url: str) -> bool:
+    u = url.lower()
+    return any(p in u for p in _COLLECTION_URL_PATTERNS)
+
+
 # Known competitor brands per equipment type — injected into equipment queries so Tavily
 # surfaces alternatives that actually list "Add to Cart" prices even when the OEM doesn't.
 _EQUIP_COMPETITORS = {
@@ -92,10 +103,14 @@ _EQUIP_COMPETITORS = {
 }
 
 
-def _build_search_query(specs: AssetSpecs) -> str:
+def _build_search_query(specs: AssetSpecs, search_mode: str = "exact") -> str:
+    """Build the Tavily search query.
+
+    search_mode:
+      "exact"       — search only for the specific PN/model; no competitor injection.
+      "equivalents" — also inject competitor brands for functional-equivalent discovery.
+    """
     if specs.category == "Equipment":
-        # Equipment: description + compact tech specs + competitor brands.
-        # Part number intentionally excluded — OEM PN never finds competitor alternatives.
         parts: list[str] = []
 
         desc = (specs.description or "").strip()
@@ -111,7 +126,7 @@ def _build_search_query(specs: AssetSpecs) -> str:
             else:
                 parts.append("industrial equipment")
 
-        # Compact notation: "5GPM" / "250PSI" — no internal space for better search matching
+        # Compact notation: "5GPM" / "250PSI"
         if specs.gpm:
             parts.append(re.sub(r"\s+", "", specs.gpm).upper())
         if specs.psi:
@@ -121,22 +136,30 @@ def _build_search_query(specs: AssetSpecs) -> str:
         if specs.frame:
             parts.append(f"frame {specs.frame}")
 
-        # Competitor brands — forces results from vendors that DO list prices
-        desc_lower = (desc or specs.model or "").lower()
-        for equip_type, competitors in _EQUIP_COMPETITORS.items():
-            if equip_type in desc_lower:
-                parts.append(competitors)
-                break
-
         known = (specs.manufacturer not in ("Unknown", "N/A", "null") and
                  specs.model        not in ("Unknown", "N/A", "null"))
-        if known:
-            parts.append(f"equivalent to {specs.manufacturer} {specs.model}")
 
-        parts.append("price")
+        if search_mode == "equivalents":
+            # Inject competitor brands so vendors listing "Add to Cart" prices surface
+            desc_lower = (desc or specs.model or "").lower()
+            for equip_type, competitors in _EQUIP_COMPETITORS.items():
+                if equip_type in desc_lower:
+                    parts.append(competitors)
+                    break
+            if known:
+                parts.append(f"equivalent to {specs.manufacturer} {specs.model}")
+        else:
+            # Exact mode: include the specific PN in quotes
+            pn = specs.part_number
+            if pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown"):
+                parts.append(f'"{pn}"')
+            elif known:
+                parts.append(f"{specs.manufacturer} {specs.model}")
+
+        parts.append("price buy")
         return " ".join(filter(None, parts))
     else:
-        # Part: prioritise exact PN match — wrap PN in quotes for search-engine precision
+        # Part: always exact PN search
         pn  = specs.part_number
         mfg = specs.manufacturer if specs.manufacturer not in ("N/A", "Unknown") else ""
         mdl = specs.model        if specs.model        not in ("N/A", "Unknown") else ""
@@ -148,19 +171,23 @@ def _build_search_query(specs: AssetSpecs) -> str:
         return f"{base} distributor price buy"
 
 
-def _search_vendor_prices(specs: AssetSpecs) -> list[dict]:
+def _search_vendor_prices(specs: AssetSpecs, search_mode: str = "exact") -> list[dict]:
     """Tavily search for Tier 1 / 1.5 pricing.
 
-    Parts   → domain-restricted to known distributor sites (precision).
-    Equipment → open web search so competitor brands (Goulds, Lowara, …) appear;
-                those brands list 'Add to Cart' prices even when the OEM hides them.
+    Parts         → domain-restricted to known distributor sites (precision).
+    Equipment/exact → domain-restricted to find the specific PN on known sites.
+    Equipment/equivalents → open web so competitor brands surface.
     """
-    query = _build_search_query(specs)
-    print(f"[Sourcing] Tavily query: {query!r}")
+    query = _build_search_query(specs, search_mode=search_mode)
+    print(f"[Sourcing] Tavily query ({search_mode}): {query!r}")
 
+    if not _tavily:
+        print("[Sourcing] Tavily client not initialised — TAVILY_API_KEY missing.")
+        return []
     try:
         kwargs: dict = dict(search_depth="advanced", max_results=15)
-        if specs.category != "Equipment":
+        # Domain-restrict for exact searches and all parts; open web for equivalents
+        if specs.category != "Equipment" or search_mode == "exact":
             kwargs["include_domains"] = _VENDOR_DOMAINS
         response = _tavily.search(query=query, **kwargs)
         return response.get("results", [])
@@ -300,7 +327,8 @@ def _is_heavy_item(specs: AssetSpecs) -> bool:
 
 
 def _call_enterprise_api(specs: AssetSpecs,
-                          force_refresh: bool = False) -> list[SourcingOption]:
+                          force_refresh: bool = False,
+                          search_mode: str = "exact") -> list[SourcingOption]:
     """Tier 1 / 1.5: check JSON price DB first, then real-time Tavily search.
 
     Produces two kinds of SourcingOptions:
@@ -339,7 +367,7 @@ def _call_enterprise_api(specs: AssetSpecs,
     missing = [v for v in TARGET_VENDORS if v not in cached_vendors]
     if missing:
         print(f"[Sourcing] Tavily search for: {missing}")
-        results = _search_vendor_prices(specs)
+        results = _search_vendor_prices(specs, search_mode=search_mode)
         parsed  = _llm_parse_results(specs, results)
         heavy = _is_heavy_item(specs)
         seen: set[str] = set()
@@ -375,9 +403,23 @@ def _call_enterprise_api(specs: AssetSpecs,
                     print(f"[Sourcing] Skipping {vendor} — no URL")
                 continue
             seen.add(vendor)
+
+            # Collection/search page — low-reliability: flag as Alternative, lower trust
+            is_coll = _is_collection_url(url)
+            if is_coll:
+                exact_match = False
+                match_type  = "Alternative"
+                print(f"[Sourcing] Collection page detected — flagging as Alt: {url}")
+
+            # Heavy items with no explicit shipping → always S.F.Q., never flat-rate
+            if heavy and resolved_terms is None and ship_fee is None:
+                resolved_terms = "LTL Freight Required"
+                is_freight     = True
+
             merchant_type = _vendor_merchant_type(vendor)
             fn_tag  = f" [Found: {found_pn}]" if found_pn else ""
-            tag     = ("" if match_type == "Exact" else " [Alt]") + (" [LTL]" if is_freight else "") + fn_tag
+            coll_tag = " [LIST PAGE]" if is_coll else ""
+            tag     = ("" if match_type == "Exact" else " [Alt]") + (" [LTL]" if is_freight else "") + fn_tag + coll_tag
 
             if price is not None:
                 save_price(specs.part_number, vendor, float(price), int(lead), source="live", url=url)
@@ -397,6 +439,7 @@ def _call_enterprise_api(specs: AssetSpecs,
                     match_type=match_type,
                     found_part_number=found_pn,
                     shipping_terms=resolved_terms,
+                    is_collection_page=is_coll,
                 ))
             else:
                 print(f"[Sourcing] Inquiry Required{tag}: {vendor} | {url}")
@@ -415,6 +458,7 @@ def _call_enterprise_api(specs: AssetSpecs,
                     match_type=match_type,
                     found_part_number=found_pn,
                     shipping_terms=resolved_terms,
+                    is_collection_page=is_coll,
                 ))
 
     priced = sum(1 for o in options if not o.price_tbd)
@@ -610,15 +654,16 @@ VENDOR CONTACT ON FILE (from Arkim search)
 
 def find_vendors(specs: AssetSpecs,
                  site: str = "La Mirada",
-                 force_refresh: bool = False) -> tuple[list[SourcingOption], Optional[str]]:
+                 force_refresh: bool = False,
+                 search_mode: str = "exact") -> tuple[list[SourcingOption], Optional[str]]:
     """
     Run full multi-tier sourcing.
 
-    Returns:
-        (all_options, None)  — RFQ emails are generated per-vendor in the UI.
+    search_mode: "exact" | "equivalents" — controls competitor injection in Equipment queries.
+    Returns: (all_options, None)
     """
-    print(f"\n[Sourcing] Tier 1/1.5 — Querying national vendors via Tavily...")
-    enterprise = _call_enterprise_api(specs, force_refresh=force_refresh)
+    print(f"\n[Sourcing] Tier 1/1.5 — Querying national vendors via Tavily (mode: {search_mode})...")
+    enterprise = _call_enterprise_api(specs, force_refresh=force_refresh, search_mode=search_mode)
     for o in enterprise:
         tag = " [INQUIRY REQUIRED]" if o.price_tbd else f" @ ${o.base_price:.2f}"
         print(f"  {o.vendor_name} ({o.merchant_type}){tag} | {o.lead_time_days}d")

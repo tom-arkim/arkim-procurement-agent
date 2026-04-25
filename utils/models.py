@@ -46,6 +46,7 @@ class SourcingOption:
     match_type: str = "Exact"           # "Exact" | "Alternative" (PN match quality)
     found_part_number: Optional[str] = None   # actual PN shown on vendor page
     shipping_terms: Optional[str] = None      # human-readable: "Free Shipping", "LTL Freight Required", "S.F.Q.", etc.
+    is_collection_page: bool = False          # True when URL is a search/collection list, not a direct product page
 
 
 @dataclass

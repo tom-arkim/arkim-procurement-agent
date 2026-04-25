@@ -241,7 +241,7 @@ st.markdown("""
     padding: .75rem 1rem;
     margin-bottom: .5rem;
   }
-  /* ── Tier 3 header ── */
+  /* ── Tier headers ── */
   .tier3-hdr {
     font-size: .7rem;
     text-transform: uppercase;
@@ -252,6 +252,17 @@ st.markdown("""
     padding-bottom: .3rem;
     border-bottom: 1px solid #30363d;
   }
+  .tier-hdr {
+    font-size: .7rem;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    font-weight: 700;
+    margin: 1rem 0 .4rem;
+    padding-bottom: .3rem;
+    border-bottom: 1px solid #30363d;
+  }
+  .tier-hdr-1 { color: #3fb950; border-color: #3fb95040; }
+  .tier-hdr-2 { color: #58a6ff; border-color: #58a6ff40; }
   /* ── Misc ── */
   #MainMenu, footer, header { visibility: hidden; }
   code { background: #21262d; border-radius: 4px; padding: .1rem .3rem; }
@@ -283,6 +294,8 @@ _DEFAULTS: dict = {
     "force_refresh":              False, # bypass price cache on next pipeline run
     "pending_verification_specs": None,  # specs waiting for user to confirm missing fields
     "pending_verification_site":  None,
+    "pending_search_strategy":    None,  # {"specs": AssetSpecs, "site": str} — awaiting exact/equivalents choice
+    "search_mode":                "exact",  # "exact" | "equivalents" — carried into pipeline
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -408,7 +421,8 @@ def _patch_sourcing_keys(tavily_key: str, anthropic_key: str) -> None:
 
 def _execute_pipeline(specs, site: str,
                       tavily_key: str, anthropic_key: str,
-                      force_refresh: bool = False) -> None:
+                      force_refresh: bool = False,
+                      search_mode: str = "exact") -> None:
     from utils.inventory import check_internal
     from utils.sourcing  import find_vendors
     from utils.quoting   import generate_arkim_quote
@@ -427,8 +441,9 @@ def _execute_pipeline(specs, site: str,
         )
 
         src_label = "fetching fresh prices" if force_refresh else "checking price DB first"
-        st.write(f"🌐 **Sourcing** Grainger · McMaster-Carr · MSC ({src_label})…")
-        options, _ = find_vendors(specs, site=site, force_refresh=force_refresh)
+        mode_label = "exact PN match" if search_mode == "exact" else "exact + equivalents"
+        st.write(f"🌐 **Sourcing** Grainger · McMaster-Carr · MSC ({src_label} · {mode_label})…")
+        options, _ = find_vendors(specs, site=site, force_refresh=force_refresh, search_mode=search_mode)
         st.session_state.all_options = options
         st.session_state.rfq_draft   = None
         st.session_state.rfq_emails  = {}
@@ -652,6 +667,58 @@ def specs_from_classification(classified: dict):
     return extract_specs(str(classified))
 
 
+def _needs_search_strategy_confirm(specs) -> bool:
+    """True for high-HP motors / pumps where exact-vs-equivalents choice matters."""
+    if specs.category != "Equipment":
+        return False
+    desc_lower  = (specs.description or "").lower()
+    dtype_lower = (getattr(specs, "detected_type", "") or "").lower()
+    is_motor_pump = any(k in desc_lower or k in dtype_lower
+                        for k in ("motor", "pump", "compressor", "blower"))
+    if not is_motor_pump:
+        return False
+    hp_str = specs.hp or ""
+    m = re.search(r"(\d+(?:\.\d+)?)", hp_str)
+    if m and float(m.group(1)) >= 10:
+        return True
+    if getattr(specs, "frame", None):   # large frame size → industrial equipment
+        return True
+    return False
+
+
+def _build_search_strategy_question(specs) -> str:
+    """Compose the pre-search clarification question for high-value equipment."""
+    hp_str    = specs.hp or ""
+    frame_str = f"{specs.frame} Frame" if getattr(specs, "frame", None) else ""
+    tech      = " · ".join(filter(None, [hp_str, frame_str]))
+    dtype     = getattr(specs, "detected_type", None) or "industrial equipment"
+
+    brand = specs.manufacturer if specs.manufacturer not in ("Unknown", "N/A", "null") else None
+    pn    = specs.part_number  if specs.part_number  not in ("UNKNOWN-PN", "Unknown") else None
+    id_str = " · ".join(filter(None, [brand, pn]))
+
+    desc_lower = (specs.description or dtype).lower()
+    if "motor" in desc_lower:
+        competitors = "ABB, Baldor, or WEG"
+    elif "pump" in desc_lower:
+        competitors = "Goulds, Lowara, or Armstrong"
+    elif "compressor" in desc_lower:
+        competitors = "Ingersoll Rand or Atlas Copco"
+    else:
+        competitors = "functional equivalents"
+
+    exact_label = f"{brand} {pn}" if brand and pn else "the exact part number"
+    return (
+        f"I've identified this as a **{tech} {dtype}**"
+        + (f" ({id_str})" if id_str else "")
+        + ". Before I search, what's your priority?\n\n"
+        f"- **Exact match only** — search specifically for {exact_label}\n"
+        f"- **Include equivalents** — also search for functional equivalents from {competitors} "
+        f"with the same specs\n\n"
+        f"Reply **'exact'** or **'equivalents'**."
+    )
+
+
 def _missing_critical_specs(specs) -> list[str]:
     """Return human-readable names of critical specs that are missing/unknown."""
     _null = {"N/A", "Unknown", "null", "None", "UNKNOWN-PN", None, ""}
@@ -838,16 +905,38 @@ def render_vendor_cards() -> None:
         return
 
     cat = getattr(st.session_state.specs, "category", "Part") if st.session_state.specs else "Part"
-    cmp_label = "Equipment Alternatives — TCA Ranked" if cat == "Equipment" else "Vendor Comparison — TCA Ranked"
+    cmp_label = "Equipment Results — TCA Ranked by Tier" if cat == "Equipment" else "Vendor Comparison — TCA Ranked by Tier"
     st.markdown(f'<div class="a-label" style="margin:.4rem 0 .7rem;">{cmp_label}</div>', unsafe_allow_html=True)
 
-    for i, q in enumerate(quotes):
+    # Split into tiers for grouped display; global TCA rank preserved for best-badge
+    tier1_quotes = [q for q in quotes if q.chosen_option.merchant_type == "Enterprise"]
+    tier2_quotes = [q for q in quotes if q.chosen_option.merchant_type == "National Specialist"]
+    other_quotes = [q for q in quotes if q.chosen_option.merchant_type
+                    not in ("Enterprise", "National Specialist")]
+    ordered_quotes = tier1_quotes + tier2_quotes + other_quotes
+
+    _rendered_tier = None
+    for i, q in enumerate(ordered_quotes):
         o = q.chosen_option
-        is_best   = (i == 0)
+
+        # ── Tier section header (render once per tier) ──────────────────────
+        cur_tier = o.merchant_type
+        if cur_tier != _rendered_tier:
+            _rendered_tier = cur_tier
+            if cur_tier == "Enterprise":
+                st.markdown(
+                    '<div class="tier-hdr tier-hdr-1">&#9679; Tier 1 — Preferred National Distributors'
+                    ' &nbsp;<span style="font-weight:400;color:#8b949e;">(Grainger · McMaster-Carr · MSC)</span></div>',
+                    unsafe_allow_html=True)
+            elif cur_tier == "National Specialist":
+                st.markdown(
+                    '<div class="tier-hdr tier-hdr-2">&#9679; Tier 2 — National Specialists</div>',
+                    unsafe_allow_html=True)
+
+        is_best   = (q == quotes[0])          # global TCA best, regardless of tier order
         card_cls  = "q-card q-card-best" if is_best else "q-card"
         best_html = '<span class="best-badge">Best TCA Value</span>' if is_best else ""
         rfq_html  = '<div class="rfq-warning">&#9888; Requires 24-48h for manual outreach &middot; +$50 admin fee</div>' if o.requires_rfq else ""
-        cost_basis = o.base_price + q.admin_fee + q.shipping_cost
 
         # Price-source badge: Cached / Pre-Negotiated / Live
         notes = o.notes or ""
@@ -857,6 +946,13 @@ def render_vendor_cards() -> None:
             src_badge = '<span class="chip chip-a" style="font-size:.62rem;letter-spacing:.04em;">CACHED</span>'
         else:
             src_badge = '<span class="chip chip-b" style="font-size:.62rem;letter-spacing:.04em;">LIVE</span>'
+
+        # Collection / search-page warning badge
+        coll_badge = (
+            '<span class="chip chip-r" style="font-size:.62rem;" '
+            'title="URL is a list/search page — not a direct product page">&#9888; LIST PAGE</span>'
+            if getattr(o, "is_collection_page", False) else ""
+        )
 
         col_info, col_price, col_btn = st.columns([4, 3, 1.2])
         url_html = (
@@ -884,7 +980,7 @@ def render_vendor_cards() -> None:
               <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.35rem;">
                 <span style="font-size:1rem;font-weight:700;color:#e6edf3;">{o.vendor_name}</span>
                 {mt_badge}
-                {src_badge}{best_html}{alt_badge}
+                {src_badge}{best_html}{alt_badge}{coll_badge}
               </div>
               <div style="font-size:.77rem;color:#8b949e;">
                 Lead: <b style="color:#c9d1d9;">{o.lead_time_days}d</b> &nbsp;&middot;&nbsp;
@@ -1170,6 +1266,7 @@ with st.sidebar:
             "rfq_vendors_selected", "pipeline_error", "pending_run", "pending_image",
             "pending_verification_specs", "pending_verification_site", "force_refresh",
             "inventory_hit", "inventory_location", "messages",
+            "pending_search_strategy", "search_mode",
         ]
         for _ck in _clear_keys:
             st.session_state[_ck] = _DEFAULTS.get(_ck)
@@ -1247,7 +1344,8 @@ if st.session_state.pending_image:
 
 if st.session_state.pending_run:
     run_data = st.session_state.pending_run
-    # Spec verification — pause if critical specs are missing and not yet verified
+
+    # ── Stage 1: Spec verification ─────────────────────────────────────────
     if not run_data.get("verified"):
         missing = _missing_critical_specs(run_data["specs"])
         if missing:
@@ -1266,12 +1364,26 @@ if st.session_state.pending_run:
             st.session_state.pending_verification_site  = run_data["site"]
             st.rerun()
 
+    # ── Stage 2: Search strategy — exact vs. equivalents ──────────────────
+    if not run_data.get("search_strategy_confirmed"):
+        sp = run_data["specs"]
+        if _needs_search_strategy_confirm(sp):
+            st.session_state.pending_run = None
+            q = _build_search_strategy_question(sp)
+            st.session_state.messages.append({"role": "assistant", "content": q})
+            st.session_state.pending_search_strategy = {
+                "specs": sp, "site": run_data.get("site", site_sel), "verified": True
+            }
+            st.rerun()
+
     run_data = st.session_state.pending_run
     st.session_state.pending_run = None
     fr = st.session_state.force_refresh
     st.session_state.force_refresh = False
+    search_mode = run_data.get("search_mode", "exact")
     try:
-        _execute_pipeline(run_data["specs"], run_data["site"], tav_key, ant_key, force_refresh=fr)
+        _execute_pipeline(run_data["specs"], run_data["site"], tav_key, ant_key,
+                          force_refresh=fr, search_mode=search_mode)
         bq = st.session_state.best_quote
         sp = run_data["specs"]
         if bq:
@@ -1394,20 +1506,35 @@ elif active_tab == "🔍 Active Sourcing":
                 })
             else:
                 try:
-                    # If awaiting spec clarification, handle specially
-                    pv_specs = st.session_state.pending_verification_specs
-                    pv_site  = st.session_state.pending_verification_site or site_sel
-
-                    if pv_specs is not None:
+                    # ── Priority 1: awaiting search strategy choice ──────────
+                    pss = st.session_state.pending_search_strategy
+                    if pss is not None:
+                        if re.search(r"\bequiv\b|\bequivalent\b|\balt\b|\bsimilar\b|\binclude\b|\bopen\b", prompt, re.I):
+                            mode = "equivalents"
+                            mode_note = "equivalents included"
+                        else:
+                            mode = "exact"
+                            mode_note = "exact match only"
+                        st.session_state.pending_search_strategy = None
+                        st.session_state.search_mode = mode
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": f"Got it — searching **{mode_note}**. Running pipeline now…"
+                        })
+                        st.session_state.pending_run = {
+                            **pss, "search_strategy_confirmed": True, "search_mode": mode
+                        }
+                    # ── Priority 2: awaiting spec clarification ──────────────
+                    elif st.session_state.pending_verification_specs is not None:
+                        pv_specs = st.session_state.pending_verification_specs
+                        pv_site  = st.session_state.pending_verification_site or site_sel
                         if re.search(r"\bsearch anyway\b|\bproceed\b|\bskip\b", prompt, re.I):
-                            # User wants to proceed with partial specs
                             st.session_state.pending_verification_specs = None
                             st.session_state.pending_verification_site  = None
                             st.session_state.pending_run = {
                                 "specs": pv_specs, "site": pv_site, "verified": True
                             }
                         else:
-                            # Merge clarification into pending specs
                             classified = classify_message(
                                 f"Spec clarification for {pv_specs.manufacturer} {pv_specs.model}: {prompt}",
                                 ant_key
