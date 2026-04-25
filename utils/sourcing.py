@@ -10,6 +10,7 @@ Tier 3        : Managed RFQ Outreach — per-vendor email drafts from Tier 2 con
 import os
 import json
 import re
+import hashlib
 import requests
 from typing import Optional
 
@@ -91,6 +92,103 @@ _COLLECTION_URL_PATTERNS = ("/collections/", "/search", "/catalog/", "/category/
 def _is_collection_url(url: str) -> bool:
     u = url.lower()
     return any(p in u for p in _COLLECTION_URL_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# Suitability Scoring
+# ---------------------------------------------------------------------------
+
+_VERIFIED_PARTNERS: set[str] = set()   # populated from DB in production; empty = no Gold partners yet
+
+
+def _compute_suitability_score(specs, snippet: str, url: str,
+                                found_pn: Optional[str] = None) -> float:
+    """0-100 score: how well this vendor/page matches the sourcing requirement.
+
+    Primary key — PN mention (guardrail):
+      If neither the searched PN nor a functional equivalent appears in the snippet,
+      the total score is capped at 45 regardless of other signals.
+
+    Components
+      PN match        : 0 / 10 / 25 / 40 pts
+      Equipment type  : 0-15 pts  (detected_type words in snippet)
+      Manufacturer    : 0-10 pts
+      Authorized dist : 0-20 pts  (bonus for authorized distributor / service center)
+      Direct URL      : 0-10 pts  (product page vs list/search page)
+    """
+    s = (snippet or "").lower()
+
+    # ── PN match (primary key) ──────────────────────────────────────────────
+    searched_pn = (specs.part_number or "").upper().strip()
+    found_upper = (found_pn or "").upper().strip()
+    pn_exact   = bool(found_upper and found_upper == searched_pn)
+    pn_in_snip = bool(searched_pn and searched_pn.lower() in s)
+    pn_alt     = bool(found_pn and not pn_exact)   # different PN found = functional equiv
+
+    if pn_exact:
+        pn_pts = 40
+    elif pn_in_snip:
+        pn_pts = 25
+    elif pn_alt:
+        pn_pts = 10
+    else:
+        pn_pts = 0   # guardrail will cap total at 45
+
+    # ── Equipment type match ────────────────────────────────────────────────
+    detected = (getattr(specs, "detected_type", "") or "").lower()
+    type_pts  = 0
+    if detected:
+        words = [w for w in detected.split() if len(w) > 3]
+        if words:
+            matched  = sum(1 for w in words if w in s)
+            type_pts = round(15 * matched / len(words))
+
+    # ── Manufacturer match ──────────────────────────────────────────────────
+    mfg     = (specs.manufacturer or "").lower()
+    mfg_pts = 10 if (mfg and mfg not in ("unknown", "n/a", "null") and mfg in s) else 0
+
+    # ── Authorized distributor / service center bonus ───────────────────────
+    auth_phrases = ("authorized distributor", "authorized dealer", "factory authorized",
+                    "authorized reseller", "authorized service center")
+    svc_phrases  = ("service center", "repair center", "factory service")
+    if any(p in s for p in auth_phrases):
+        auth_pts = 20
+    elif "authorized" in s:
+        auth_pts = 8
+    elif "distributor" in s or "distributor" in url.lower():
+        auth_pts = 5
+    else:
+        auth_pts = 0
+    if any(p in s for p in svc_phrases):
+        auth_pts = min(20, auth_pts + 10)
+
+    # ── URL quality ─────────────────────────────────────────────────────────
+    url_pts = 0 if _is_collection_url(url) else 10
+
+    total = pn_pts + type_pts + mfg_pts + auth_pts + url_pts
+
+    # Guardrail: PN not mentioned at all → cap at 45
+    if pn_pts == 0:
+        total = min(total, 45)
+
+    return min(100.0, max(0.0, round(float(total), 1)))
+
+
+def _partner_status(vendor_name: str, suitability: float) -> str:
+    """Return Arkim network tier: Gold (verified partner), Silver (high-suitability target), or ''."""
+    if vendor_name in _VERIFIED_PARTNERS:
+        return "Gold"
+    if suitability >= 75:
+        return "Silver"
+    return ""
+
+
+def _onboarding_url(vendor_name: str, specs) -> str:
+    """Generate a deterministic partner onboarding link for this vendor."""
+    token = hashlib.sha256(vendor_name.lower().encode()).hexdigest()[:16]
+    slug  = re.sub(r"[^a-z0-9]+", "-", vendor_name.lower()).strip("-")
+    rfq   = re.sub(r"[^a-z0-9]+", "-", (specs.part_number or "rfq").lower())
+    return f"https://partners.arkim.ai/claim?v={slug}&t={token}&rfq={rfq}"
 
 
 # Known competitor brands per equipment type — injected into equipment queries so Tavily
@@ -369,7 +467,12 @@ def _call_enterprise_api(specs: AssetSpecs,
         print(f"[Sourcing] Tavily search for: {missing}")
         results = _search_vendor_prices(specs, search_mode=search_mode)
         parsed  = _llm_parse_results(specs, results)
-        heavy = _is_heavy_item(specs)
+        heavy   = _is_heavy_item(specs)
+        # URL → raw snippet map for suitability scoring
+        snippet_map = {
+            r.get("url", ""): (r.get("title", "") + " " + r.get("content", "")).strip()
+            for r in results if r.get("url")
+        }
         seen: set[str] = set()
         for item in parsed:
             vendor       = item.get("vendor", "Unknown")
@@ -417,13 +520,18 @@ def _call_enterprise_api(specs: AssetSpecs,
                 is_freight     = True
 
             merchant_type = _vendor_merchant_type(vendor)
-            fn_tag  = f" [Found: {found_pn}]" if found_pn else ""
+            fn_tag   = f" [Found: {found_pn}]" if found_pn else ""
             coll_tag = " [LIST PAGE]" if is_coll else ""
-            tag     = ("" if match_type == "Exact" else " [Alt]") + (" [LTL]" if is_freight else "") + fn_tag + coll_tag
+            tag      = ("" if match_type == "Exact" else " [Alt]") + (" [LTL]" if is_freight else "") + fn_tag + coll_tag
+
+            # Suitability scoring using raw Tavily snippet
+            snippet = snippet_map.get(url, "")
+            suit    = _compute_suitability_score(specs, snippet, url, found_pn)
+            pstat   = _partner_status(vendor, suit)
 
             if price is not None:
                 save_price(specs.part_number, vendor, float(price), int(lead), source="live", url=url)
-                print(f"[Sourcing] Priced{tag}: {vendor} @ ${price:.2f} | {url}")
+                print(f"[Sourcing] Priced{tag} suit={suit:.0f}%: {vendor} @ ${price:.2f} | {url}")
                 options.append(SourcingOption(
                     vendor_name=vendor,
                     base_price=float(price),
@@ -440,9 +548,11 @@ def _call_enterprise_api(specs: AssetSpecs,
                     found_part_number=found_pn,
                     shipping_terms=resolved_terms,
                     is_collection_page=is_coll,
+                    suitability_score=suit,
+                    partner_status=pstat,
                 ))
             else:
-                print(f"[Sourcing] Inquiry Required{tag}: {vendor} | {url}")
+                print(f"[Sourcing] Inquiry Required{tag} suit={suit:.0f}%: {vendor} | {url}")
                 options.append(SourcingOption(
                     vendor_name=vendor,
                     base_price=0.0,
@@ -459,6 +569,8 @@ def _call_enterprise_api(specs: AssetSpecs,
                     found_part_number=found_pn,
                     shipping_terms=resolved_terms,
                     is_collection_page=is_coll,
+                    suitability_score=suit,
+                    partner_status=pstat,
                 ))
 
     priced = sum(1 for o in options if not o.price_tbd)
@@ -520,6 +632,10 @@ def _discover_national_specialists(specs: AssetSpecs,
     query = _build_tier2_query(specs)
     print(f"[Sourcing] Tier 2 national query: {query!r}")
 
+    if not _tavily:
+        print("[Sourcing] Tier 2 skipped — Tavily not initialised.")
+        return []
+
     try:
         response = _tavily.search(query=query, search_depth="advanced", max_results=10)
         results  = response.get("results", [])
@@ -529,6 +645,12 @@ def _discover_national_specialists(specs: AssetSpecs,
 
     if not results or not ANTHROPIC_API_KEY:
         return []
+
+    # URL → raw snippet for suitability scoring
+    snippet_map = {
+        r.get("url", ""): (r.get("title", "") + " " + r.get("content", "")).strip()
+        for r in results if r.get("url")
+    }
 
     snippets = [
         f"URL: {r.get('url', '')}\nTitle: {r.get('title', '')}\nSnippet: {r.get('content', '')}\n"
@@ -566,21 +688,35 @@ def _discover_national_specialists(specs: AssetSpecs,
         tbd        = price is None
         base_price = float(price) if price is not None else 0.0
 
+        # Suitability: match url to best snippet (vendor may not match exactly, use first found)
+        snippet = snippet_map.get(url or "", "")
+        if not snippet:
+            # fallback: search snippet_map for any URL containing the vendor name fragment
+            slug = re.sub(r"[^a-z0-9]", "", name.lower())
+            for surl, stext in snippet_map.items():
+                if slug[:6] in surl.lower():
+                    snippet = stext
+                    break
+        suit  = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
+        pstat = _partner_status(name, suit)
+
         options.append(SourcingOption(
             vendor_name=name,
             base_price=base_price,
             lead_time_days=lead,
             reliability_score=78.0,
             merchant_type="Direct Buy via Arkim",
-            requires_rfq=tbd,     # TBD options → Tier 3 email RFQ workflow
+            requires_rfq=tbd,
             contact_email=email,
             admin_fee=50.0 if tbd else 0.0,
             notes=f"National specialist — {url}" if url else "National specialist",
             source_url=url,
             price_tbd=tbd,
+            suitability_score=suit,
+            partner_status=pstat,
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Tier 2: {name} — {tag} | {lead}d")
+        print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {pstat or 'no partner'}")
 
     if not options:
         print("[Sourcing] Tier 2: no qualifying national specialists found")
@@ -592,59 +728,75 @@ def _discover_national_specialists(specs: AssetSpecs,
 # ---------------------------------------------------------------------------
 
 def draft_rfq_email(specs: AssetSpecs, vendor: SourcingOption) -> str:
-    """Generate a professional RFQ email using real contact details from Tier 2 search."""
-    to_address = vendor.contact_email or "[ vendor email — see contact details below ]"
+    """Generate a Partner Invitation email for Tier 3 / TBD vendors.
 
-    # Parse contact block out of notes (format: "Address: ... | Phone: ... | Web: ...")
-    contact_lines = []
-    if vendor.notes:
-        for part in vendor.notes.split(" | "):
-            part = part.strip()
-            if part and not part.startswith("Local supplier") and not part.startswith("Generic"):
-                contact_lines.append(f"  {part}")
-    contact_block = "\n".join(contact_lines) if contact_lines else "  (Verify contact details before sending)"
+    Combines an immediate RFQ (specific part, 48-hour intent) with an Arkim
+    Partner Network onboarding offer (Merchant of Record value prop + unique claim link).
+    """
+    to_address   = vendor.contact_email or "[ vendor email — see contact details below ]"
+    onboard_url  = _onboarding_url(vendor.vendor_name, specs)
+    suit_pct     = f"{vendor.suitability_score:.0f}%" if vendor.suitability_score else "—"
+
+    part_line = f"{specs.manufacturer} {specs.model}"
+    if specs.part_number and specs.part_number not in ("N/A", "UNKNOWN-PN", "Unknown"):
+        part_line += f" (PN: {specs.part_number})"
+    if specs.hp and specs.hp not in ("N/A", "None", "null"):
+        part_line += f" — {specs.hp} HP"
+    if specs.description:
+        part_line += f" — {specs.description}"
 
     return f"""To: {to_address}
-Subject: Request for Quote — {specs.manufacturer} {specs.model} | Arkim Procurement
+Subject: Sourcing Inquiry + Arkim Partner Invitation — {specs.manufacturer} {specs.model}
 
-Dear {vendor.vendor_name} Sales Team,
+Dear {vendor.vendor_name} Team,
 
-My name is [Arkim Agent], and I represent Arkim Industrial Procurement Services.
-We are sourcing the following component on behalf of a client and would like to
-request your best available pricing and lead time.
+I represent Arkim Industrial Procurement Services. We have an active client requirement
+for the following item and believe you may be well-positioned to fulfil it:
+
+  {part_line}
 
 ──────────────────────────────────────────
-PART DETAILS
+IMMEDIATE SOURCING REQUEST
 ──────────────────────────────────────────
   Manufacturer  : {specs.manufacturer}
   Model         : {specs.model}
   Part Number   : {specs.part_number}
   Voltage       : {specs.voltage}
-  Horsepower    : {specs.hp}
-  Description   : {specs.description}
-  Serial Ref.   : {specs.serial_number}
+  Horsepower    : {specs.hp or "—"}
+  Description   : {specs.description or "—"}
+  Quantity      : 1 unit (first order)
+
+Please reply with:
+  • Your best unit price and lead time
+  • Shipping terms (FOB origin or destination)
+  • Availability / stock status
+
+We aim to place an order within 48 hours of receiving a complete quote.
 
 ──────────────────────────────────────────
-REQUESTED INFORMATION
+ARKIM PARTNER NETWORK — INVITATION
 ──────────────────────────────────────────
-  1. Unit price (quantity: 1 and 5)
-  2. Lead time (standard and expedited)
-  3. Warranty / return policy
-  4. Shipping terms (FOB origin or destination)
+Arkim acts as Merchant of Record for all transactions, which means:
 
-Please reply to this email with your quote at your earliest convenience.
-We aim to make a purchasing decision within 48 hours.
+  ✓ Instant payment — no net terms or collections risk
+  ✓ Zero corporate onboarding — sell through our platform immediately
+  ✓ Regional RFQ access — see live sourcing requests from industrial clients
+    in your area as soon as you claim your Partner profile
 
-Thank you for your time,
+Our system flagged {vendor.vendor_name} as a {suit_pct} match for this equipment type.
+Claiming your profile takes under 5 minutes:
 
-[Arkim Procurement Agent]
-Arkim Industrial Services
-procurement@arkim.ai | (800) 555-ARKIM
+  → {onboard_url}
+
+Once verified, you will be promoted to the top of our local sourcing queue for
+{specs.detected_type or specs.description or "this equipment category"} requests.
 
 ──────────────────────────────────────────
-VENDOR CONTACT ON FILE (from Arkim search)
-──────────────────────────────────────────
-{contact_block}
+
+Thank you — we look forward to working with you.
+
+Arkim Procurement Team
+procurement@arkim.ai
 ──────────────────────────────────────────""".strip()
 
 

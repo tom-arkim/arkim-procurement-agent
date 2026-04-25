@@ -47,6 +47,8 @@ class SourcingOption:
     found_part_number: Optional[str] = None   # actual PN shown on vendor page
     shipping_terms: Optional[str] = None      # human-readable: "Free Shipping", "LTL Freight Required", "S.F.Q.", etc.
     is_collection_page: bool = False          # True when URL is a search/collection list, not a direct product page
+    suitability_score: float = 0.0            # 0-100 fit score for Tier 2/3 vendors (PN + type + auth status)
+    partner_status: str = ""                  # "Gold" | "Silver" | "" — Arkim network tier
 
 
 @dataclass

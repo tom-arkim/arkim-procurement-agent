@@ -263,6 +263,69 @@ st.markdown("""
   }
   .tier-hdr-1 { color: #3fb950; border-color: #3fb95040; }
   .tier-hdr-2 { color: #58a6ff; border-color: #58a6ff40; }
+  /* ── Partner badges ── */
+  .badge-gold {
+    display: inline-block;
+    background: rgba(210,153,34,.18);
+    border: 1px solid #d29922;
+    border-radius: 4px;
+    padding: .04rem .38rem;
+    font-size: .62rem;
+    font-weight: 700;
+    color: #d29922;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    vertical-align: middle;
+    margin-left: .3rem;
+  }
+  .badge-silver {
+    display: inline-block;
+    background: rgba(139,148,158,.15);
+    border: 1px solid #8b949e;
+    border-radius: 4px;
+    padding: .04rem .38rem;
+    font-size: .62rem;
+    font-weight: 700;
+    color: #8b949e;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    vertical-align: middle;
+    margin-left: .3rem;
+  }
+  /* ── Suitability score pill ── */
+  .suit-hi  { color: #3fb950; font-weight: 700; font-size: .78rem; }
+  .suit-mid { color: #d29922; font-weight: 700; font-size: .78rem; }
+  .suit-lo  { color: #8b949e; font-weight: 700; font-size: .78rem; }
+  /* ── Tier 3 vendor cards ── */
+  .t3-card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    padding: .7rem 1rem;
+    margin-bottom: .45rem;
+    display: flex;
+    align-items: flex-start;
+    gap: .9rem;
+  }
+  .t3-suit-col {
+    min-width: 54px;
+    text-align: center;
+    padding-top: .1rem;
+  }
+  .t3-suit-num {
+    font-size: 1.1rem;
+    font-weight: 800;
+    line-height: 1;
+  }
+  .t3-suit-lbl {
+    font-size: .58rem;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    color: #8b949e;
+  }
+  .t3-body { flex: 1; min-width: 0; }
+  .t3-name { font-size: .92rem; font-weight: 700; color: #e6edf3; }
+  .t3-meta { font-size: .74rem; color: #8b949e; margin-top: .2rem; }
   /* ── Misc ── */
   #MainMenu, footer, header { visibility: hidden; }
   code { background: #21262d; border-radius: 4px; padding: .1rem .3rem; }
@@ -1146,7 +1209,6 @@ def render_purchase_confirmed() -> None:
 
 def render_tier3_outreach() -> None:
     all_options = st.session_state.all_options
-    # Tier 3 = ALL vendors with price_tbd=True (national inquiry-required + local RFQ)
     rfq_options = [o for o in all_options if getattr(o, "price_tbd", False)]
     if not rfq_options:
         return
@@ -1159,63 +1221,113 @@ def render_tier3_outreach() -> None:
     no_buy_now = len(priced_national) == 0
     header_note = (
         '<span style="color:#f85149;font-size:.72rem;font-weight:600;margin-left:.5rem;">'
-        '&#9888; No Tier 1 / 1.5 Buy Now pricing found</span>'
+        '&#9888; No Tier 1/1.5 Buy Now pricing found</span>'
         if no_buy_now else ""
     )
 
-    st.markdown(f'<div class="tier3-hdr">Tier 3: Managed RFQ Outreach{header_note}</div>',
+    st.markdown(f'<div class="tier3-hdr">Tier 3: Partner Outreach Network{header_note}</div>',
                 unsafe_allow_html=True)
     body = (
         '<b style="color:#e6edf3;">No immediate Buy Now pricing was returned by national distributors.</b> '
-        'Managed RFQ Outreach is your next step — Arkim contacts these local suppliers on your behalf '
+        'Partner Outreach is your next step — Arkim contacts these specialists on your behalf '
         'and returns a binding quote within 24–48 h. '
         if no_buy_now else
         'National distributors returned Buy Now pricing above. '
-        'These local vendors may offer better terms — Arkim contacts them on your behalf. '
+        'These specialists may offer better terms — Arkim contacts them on your behalf. '
     )
     st.markdown(
         f'<div style="font-size:.78rem;color:#8b949e;margin-bottom:.75rem;">'
         f'{body}'
-        f'All vendors below are pre-selected. Deselect any you do not want contacted. '
-        f'Each outreach adds a <b style="color:#d29922;">$50 admin fee</b>.</div>',
+        f'Select vendors to contact. Each outreach includes a Partner Invitation '
+        f'and adds a <b style="color:#d29922;">$50 admin fee</b>.</div>',
         unsafe_allow_html=True,
     )
 
     from utils.sourcing import draft_rfq_email
 
+    # Sort: highest suitability first
+    rfq_options_sorted = sorted(rfq_options,
+                                 key=lambda o: getattr(o, "suitability_score", 0),
+                                 reverse=True)
+
     any_checked = False
-    for o in rfq_options:
-        chk_key  = f"rfq_chk_{o.vendor_name}"
-        mt_note  = f" [{o.merchant_type}]" if o.merchant_type != "Local" else ""
+    for o in rfq_options_sorted:
+        suit  = getattr(o, "suitability_score", 0.0)
+        pstat = getattr(o, "partner_status", "")
+
+        # Suitability colour class
+        if suit >= 75:
+            suit_cls = "suit-hi"
+        elif suit >= 50:
+            suit_cls = "suit-mid"
+        else:
+            suit_cls = "suit-lo"
+
+        # Partner badge HTML
+        if pstat == "Gold":
+            badge_html = '<span class="badge-gold">&#9733; Gold Partner</span>'
+        elif pstat == "Silver":
+            badge_html = '<span class="badge-silver">&#9651; Silver Target</span>'
+        else:
+            badge_html = ""
+
+        alt_badge = (
+            '<span class="best-badge" style="border-color:#f85149;color:#f85149;margin-left:.3rem;">'
+            'Alt Rec</span>'
+            if getattr(o, "match_type", "Exact") == "Alternative" else ""
+        )
+
         found_pn = getattr(o, "found_part_number", None)
-        pn_note  = f" | Found PN: **{found_pn}**" if found_pn else ""
-        alt_note = " | ⚠ Alt Recommendation" if getattr(o, "match_type", "Exact") == "Alternative" else ""
-        checked  = st.checkbox(
-            f"**{o.vendor_name}**{mt_note} — Price: TBD (Inquiry Required){pn_note}{alt_note} | "
-            f"{o.lead_time_days}d lead | Reliability {o.reliability_score:.0f}% | +$50 admin fee",
+        pn_note  = f'<span style="color:#8b949e;font-size:.72rem;"> · PN found: {found_pn}</span>' if found_pn else ""
+        url_note = (f'<a href="{o.source_url}" target="_blank" '
+                    f'style="color:#58a6ff;font-size:.72rem;margin-left:.4rem;">↗ View</a>'
+                    if o.source_url else "")
+
+        card_html = (
+            f'<div class="t3-card">'
+            f'  <div class="t3-suit-col">'
+            f'    <div class="t3-suit-num {suit_cls}">{suit:.0f}%</div>'
+            f'    <div class="t3-suit-lbl">Match</div>'
+            f'  </div>'
+            f'  <div class="t3-body">'
+            f'    <div class="t3-name">{o.vendor_name}{badge_html}{alt_badge}</div>'
+            f'    <div class="t3-meta">'
+            f'      Price: TBD (Inquiry Required) · {o.lead_time_days}d lead · '
+            f'      Reliability {o.reliability_score:.0f}%'
+            f'      {pn_note}{url_note}'
+            f'    </div>'
+            f'  </div>'
+            f'</div>'
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
+
+        chk_key = f"rfq_chk_{o.vendor_name}"
+        checked = st.checkbox(
+            f"Include {o.vendor_name} in outreach (+$50 admin fee)",
             key=chk_key,
+            value=True,
         )
         if checked:
             any_checked = True
             if o.vendor_name not in st.session_state.rfq_emails and specs:
                 st.session_state.rfq_emails[o.vendor_name] = draft_rfq_email(specs, o)
             if o.vendor_name in st.session_state.rfq_emails:
-                with st.expander(f"RFQ Email — {o.vendor_name}", expanded=False):
+                with st.expander(f"Partner Invitation — {o.vendor_name}", expanded=False):
                     st.code(st.session_state.rfq_emails[o.vendor_name], language="text")
                     st.caption("Copy and send via your email client · reply-to: procurement@arkim.ai")
 
     if any_checked:
-        selected = [o.vendor_name for o in rfq_options
+        selected = [o.vendor_name for o in rfq_options_sorted
                     if st.session_state.get(f"rfq_chk_{o.vendor_name}", False)]
         st.markdown("<div style='margin-top:.5rem'></div>", unsafe_allow_html=True)
-        if st.button("Initiate RFQ Campaign", type="primary"):
-            st.session_state.rfq_campaign_sent  = True
+        if st.button("Initiate Partner Outreach Campaign", type="primary"):
+            st.session_state.rfq_campaign_sent   = True
             st.session_state.rfq_vendors_selected = selected
             st.rerun()
 
     if st.session_state.rfq_campaign_sent and st.session_state.rfq_vendors_selected:
         st.success(
-            f"RFQ campaign initiated — outreach queued for: "
+            f"Partner outreach initiated — queued for: "
             f"{', '.join(st.session_state.rfq_vendors_selected)}"
         )
 
