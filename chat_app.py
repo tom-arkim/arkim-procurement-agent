@@ -1182,19 +1182,15 @@ with st.sidebar:
 
     st.markdown("<div style='flex:1'></div>", unsafe_allow_html=True)
 
-    with st.expander("⚙ Settings / API Keys", expanded=False):
-        ant_key = st.text_input(
-            "Anthropic Key",
-            value=os.environ.get("ANTHROPIC_API_KEY", ""),
-            type="password",
-            placeholder="sk-ant-…",
-        )
-        tav_key = st.text_input(
-            "Tavily Key",
-            value=os.environ.get("TAVILY_API_KEY", ""),
-            type="password",
-            placeholder="tvly-…",
-        )
+# ── API keys: Streamlit Secrets → environment variable → empty ────────────────
+def _get_secret(key: str) -> str:
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key, "")
+
+ant_key = _get_secret("ANTHROPIC_API_KEY")
+tav_key = _get_secret("TAVILY_API_KEY")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
