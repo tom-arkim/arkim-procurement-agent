@@ -1122,10 +1122,25 @@ def render_vendor_cards() -> None:
             if _wt else ""
         )
 
+        # High Replacement Risk badge (spare parts only, MCS < 5)
+        _labor = getattr(q, "labor_impact_cost", 0.0)
+        if _labor > 0:
+            _risk_html = (
+                f'<div style="margin-top:.3rem;background:rgba(248,81,73,.1);border:1px solid '
+                f'rgba(248,81,73,.4);border-radius:4px;padding:.18rem .5rem;font-size:.7rem;color:#f85149;">'
+                f'&#9888; High Replacement Risk — low market confidence (MCS {_mcs:.0f}/10) '
+                f'adds est. <b>${_labor:,.0f}</b> in labor. '
+                f'Lower purchase price may be offset by higher TCO.</div>'
+            )
+        else:
+            _risk_html = ""
+
         # Score display row: TCA for spare parts, TLV for replacement
         _wf_mode = st.session_state.workflow_mode
         if _wf_mode == "spare_parts":
             _score_html = f'TCA: <b style="color:#58a6ff;">{q.tca_score:.1f}/100</b>'
+            if _labor > 0:
+                _score_html += f' &nbsp;<span style="color:#f85149;font-size:.7rem;">(+${_labor:,.0f} labor est.)</span>'
         else:
             _score_html = f'TLV: <b style="color:#d29922;">${q.tlv_score:,.2f}</b>'
 
@@ -1143,7 +1158,7 @@ def render_vendor_cards() -> None:
                 {_score_html}
               </div>
               <div style="margin-top:.25rem;">{_mcs_html}{_wt_html}</div>
-              {rfq_html}{url_html}
+              {_risk_html}{rfq_html}{url_html}
             </div>""", unsafe_allow_html=True)
 
         with col_price:
@@ -1398,12 +1413,33 @@ def render_tier3_outreach() -> None:
         )
         st.markdown(card_html, unsafe_allow_html=True)
 
-        chk_key = f"rfq_chk_{o.vendor_name}"
-        checked = st.checkbox(
-            f"Include {o.vendor_name} in outreach (+$50 admin fee)",
-            key=chk_key,
-            value=True,
-        )
+        # "Invite to Partner Network" button for high-suitability non-Gold vendors
+        from utils.sourcing import _onboarding_url as _ourl, _VERIFIED_PARTNERS as _vp
+        if suit >= 75 and pstat != "Gold":
+            _invite_url = _ourl(o.vendor_name, specs) if specs else "#"
+            _inv_col1, _inv_col2 = st.columns([3, 1])
+            with _inv_col1:
+                chk_key = f"rfq_chk_{o.vendor_name}"
+                checked = st.checkbox(
+                    f"Include {o.vendor_name} in outreach (+$50 admin fee)",
+                    key=chk_key,
+                    value=True,
+                )
+            with _inv_col2:
+                st.link_button(
+                    "Invite to Partner Network →",
+                    url=_invite_url,
+                    use_container_width=True,
+                    help=f"Open onboarding link for {o.vendor_name} ({suit:.0f}% match)",
+                )
+        else:
+            chk_key = f"rfq_chk_{o.vendor_name}"
+            checked = st.checkbox(
+                f"Include {o.vendor_name} in outreach (+$50 admin fee)",
+                key=chk_key,
+                value=True,
+            )
+
         if checked:
             any_checked = True
             if o.vendor_name not in st.session_state.rfq_emails and specs:
@@ -1951,30 +1987,44 @@ elif active_tab == "📋 History & Drafts":
         </div>""", unsafe_allow_html=True)
     else:
         for i, d in enumerate(st.session_state.sourcing_history):
-            best = d["all_quotes"][0] if d["all_quotes"] else None
+            best    = d["all_quotes"][0] if d["all_quotes"] else None
+            d_wf    = d.get("workflow", "spare_parts")
+            _wf_tag = {"spare_parts": "OpEx", "replacement": "Replacement", "capex": "CapEx"}.get(d_wf, d_wf)
             dc1, dc2 = st.columns([5, 1])
             with dc1:
-                price_txt = f" — best: **{best.chosen_option.vendor_name}** ${best.grand_total:,.2f} | TCA {best.tca_score:.0f}/100" if best else ""
+                if best:
+                    _metric = (f"TCA {best.tca_score:.0f}/100"
+                               if d_wf == "spare_parts" else
+                               f"TLV ${best.tlv_score:,.2f}")
+                    price_txt = f" — best: **{best.chosen_option.vendor_name}** ${best.grand_total:,.2f} | {_metric}"
+                else:
+                    price_txt = ""
                 st.markdown(f"""
                 <div class="draft-card">
                   <div style="font-size:.92rem;font-weight:700;color:#e6edf3;">{d['label']}</div>
                   <div style="font-size:.76rem;color:#8b949e;margin-top:.2rem;">
-                    Site: {d['site']} &nbsp;&middot;&nbsp; Sourced: {d['saved_at']}{price_txt}
+                    Site: {d['site']} &nbsp;&middot;&nbsp;
+                    Workflow: <b style="color:#c9d1d9;">{_wf_tag}</b> &nbsp;&middot;&nbsp;
+                    Sourced: {d['saved_at']}{price_txt}
                   </div>
                 </div>""", unsafe_allow_html=True)
             with dc2:
                 st.markdown("<div style='padding-top:.55rem'></div>", unsafe_allow_html=True)
                 if st.button("Load", key=f"load_hist_{i}", use_container_width=True, type="primary"):
-                    st.session_state.specs             = d["specs"]
-                    st.session_state.all_quotes        = d["all_quotes"]
-                    st.session_state.all_options       = d["all_options"]
-                    st.session_state.rfq_draft         = None
-                    st.session_state.rfq_emails        = {}
-                    st.session_state.site              = d["site"]
-                    st.session_state.pipeline_ran      = True
-                    st.session_state.accepted_quote    = None
-                    st.session_state.rfq_campaign_sent = False
-                    st.session_state.active_tab        = "🔍 Active Sourcing"
+                    st.session_state.specs                = d["specs"]
+                    st.session_state.all_quotes           = d["all_quotes"]
+                    st.session_state.all_options          = d["all_options"]
+                    st.session_state.rfq_draft            = None
+                    st.session_state.rfq_emails           = {}
+                    st.session_state.site                 = d["site"]
+                    st.session_state.pipeline_ran         = True
+                    st.session_state.accepted_quote       = None
+                    st.session_state.rfq_campaign_sent    = False
+                    st.session_state.active_tab           = "🔍 Active Sourcing"
+                    # Restore workflow context
+                    st.session_state.workflow_mode        = d.get("workflow", "spare_parts")
+                    # Restore suitability/reliability — these live on the options objects
+                    # (no separate key needed; objects carry the data)
                     # Pre-check Tier 3 checkboxes for loaded run
                     for _k in list(st.session_state.keys()):
                         if _k.startswith("rfq_chk_"):

@@ -83,6 +83,7 @@ class ArkimQuote:
     )
     tlv_score: float = 0.0             # Total Life Cycle Value (Purchase + Downtime Risk + Shipping + Tax)
     workflow: str = "spare_parts"      # "spare_parts" | "replacement" | "capex"
+    labor_impact_cost: float = 0.0    # Projected labor cost for low-MCS spare parts ($200/hr × hours)
 
 
 @dataclass

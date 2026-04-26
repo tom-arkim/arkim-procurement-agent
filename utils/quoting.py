@@ -25,6 +25,8 @@ COST_WEIGHT        = 0.20
 MAX_LEAD_TIME = 14  # days — normalisation ceiling
 
 DEFAULT_DOWNTIME_COST_PER_DAY = 500.0  # USD/day — override via generate_arkim_quote param
+LABOR_RATE_PER_HOUR           = 200.0  # USD/hr — labor cost for low-MCS spare parts
+MCS_LABOR_THRESHOLD           = 5.0    # market_confidence_score < this triggers labor surcharge
 
 
 # ---------------------------------------------------------------------------
@@ -49,29 +51,35 @@ def get_tax_rate(site: str) -> float:
 def estimate_shipping(option: SourcingOption) -> tuple[float, bool, str]:
     """Return (shipping_cost_usd, is_ltl_freight, shipping_label).
 
-    Priority order:
-      1. Extracted page fee (0 = Free Shipping).
-      2. LLM-extracted shipping_terms (S.F.Q., LTL Freight Required, etc.).
-      3. If is_freight flag is set → LTL, cost unknown.
-      4. Standard fallback: $40 flat for Local/Discovery, 5% min $15 for Enterprise.
-         Heavy items (HP > 10, Motor/Pump category) never get flat-rate estimates.
+    Freight guard takes absolute priority — if the item is flagged as freight
+    (is_freight=True, HP>10, or weight>100 lbs), the cost is always 0.0 and the
+    label is always S.F.Q. / LTL Freight Required.  No flat-rate or page-extracted
+    fee can override this guard.
+
+    Priority order for non-freight items:
+      1. Extracted page fee (0 = Free Shipping, >0 = stated fee).
+      2. LLM-extracted shipping_terms token.
+      3. Flat-rate fallback ($40 Local/Discovery; 5% min $15 Enterprise).
     """
+    # ── Freight guard: absolute priority — zero cost, always S.F.Q. ─────────
+    if getattr(option, "is_freight", False):
+        terms = getattr(option, "shipping_terms", None)
+        label = terms if terms in ("LTL Freight Required", "S.F.Q.", "TBA - Freight") else "S.F.Q."
+        return (0.0, True, label)
+
+    # ── Extracted page fee (non-freight items only) ───────────────────────────
     extracted = getattr(option, "extracted_shipping_fee", None)
     if extracted is not None:
         if extracted == 0.0:
             return (0.0, False, "Free Shipping")
         return (float(extracted), False, f"${extracted:,.2f}")
 
-    # LLM-extracted shipping terms take precedence over inferred freight
+    # ── LLM-extracted shipping term ───────────────────────────────────────────
     terms = getattr(option, "shipping_terms", None)
     if terms in ("LTL Freight Required", "S.F.Q.", "TBA - Freight"):
         return (0.0, True, terms)
 
-    if getattr(option, "is_freight", False):
-        label = terms or "LTL Freight Required"
-        return (0.0, True, label)
-
-    # Flat-rate fallback — only for non-heavy items
+    # ── Flat-rate fallback (unreachable for any freight-flagged item) ─────────
     if option.merchant_type in ("Local", "Direct Buy via Arkim"):
         return (40.00, False, "$40.00 (est.)")
     fee = max(15.00, round(option.base_price * 0.05, 2))
@@ -139,6 +147,20 @@ def compute_tlv(quote: "ArkimQuote", downtime_cost_per_day: float = DEFAULT_DOWN
     shipping       = quote.shipping_cost
     tax            = quote.tax_amount
     return round(quote.vendor_base_price + downtime_cost + shipping + tax, 2)
+
+
+def _compute_labor_impact(option: SourcingOption) -> float:
+    """Projected extra labor cost when market_confidence_score < MCS_LABOR_THRESHOLD.
+
+    Each point below the threshold represents ~2 additional hours of replacement labour.
+    e.g. MCS=4 → 2 h × $200 = $400 | MCS=2 → 6 h × $200 = $1,200
+    Returns 0.0 for high-confidence parts or when MCS is unknown.
+    """
+    mcs = getattr(option, "market_confidence_score", None)
+    if mcs is None or mcs >= MCS_LABOR_THRESHOLD:
+        return 0.0
+    labor_hours = (MCS_LABOR_THRESHOLD - mcs) * 2.0
+    return round(labor_hours * LABOR_RATE_PER_HOUR, 2)
 
 
 def _markup_for(option: SourcingOption) -> float:
@@ -227,12 +249,16 @@ def generate_arkim_quote(specs: AssetSpecs,
     all_quotes = [_build_arkim_quote_for_workflow(specs, opt, site, workflow, downtime_cost_per_day)
                   for opt in options]
 
-    # Pass 2 — inject grand_total context into TCA
-    grand_totals = [q.grand_total for q in all_quotes]
-    min_gt = min(grand_totals)
-    max_gt = max(grand_totals)
+    # Pass 2 — inject grand_total context into TCA; add labor impact for spare_parts
     for q in all_quotes:
-        q.tca_score = _compute_tca_score(q.chosen_option, q.grand_total, min_gt, max_gt)
+        q.labor_impact_cost = _compute_labor_impact(q.chosen_option) if workflow == "spare_parts" else 0.0
+
+    # Effective cost for TCA ranking = grand_total + labor surcharge (spare parts only)
+    effective_costs = [q.grand_total + q.labor_impact_cost for q in all_quotes]
+    min_gt = min(effective_costs)
+    max_gt = max(effective_costs)
+    for q, eff in zip(all_quotes, effective_costs):
+        q.tca_score = _compute_tca_score(q.chosen_option, eff, min_gt, max_gt)
         q.tlv_score = compute_tlv(q, downtime_cost_per_day)
 
     if workflow == "spare_parts":

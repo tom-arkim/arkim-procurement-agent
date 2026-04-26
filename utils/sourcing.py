@@ -163,13 +163,22 @@ def _compute_suitability_score(specs, snippet: str, url: str,
         auth_pts = min(20, auth_pts + 10)
 
     # ── URL quality ─────────────────────────────────────────────────────────
-    url_pts = 0 if _is_collection_url(url) else 10
+    is_coll = _is_collection_url(url)
+    url_pts = 0 if is_coll else 10
 
-    total = pn_pts + type_pts + mfg_pts + auth_pts + url_pts
+    # ── PN mismatch penalty: a different PN found = functional equiv, not exact ──
+    pn_mismatch_penalty = 30 if pn_alt else 0   # pn_alt = found_pn present but ≠ searched_pn
 
-    # Guardrail: PN not mentioned at all → cap at 45
+    total = pn_pts + type_pts + mfg_pts + auth_pts + url_pts - pn_mismatch_penalty
+
+    # Guardrail 1: PN not mentioned at all → cap at 45
     if pn_pts == 0:
         total = min(total, 45)
+
+    # Guardrail 2: collection/catalog URL → hard cap at 40 (prevents catalog links
+    #              from ranking as direct product matches regardless of other signals)
+    if is_coll:
+        total = min(total, 40)
 
     return min(100.0, max(0.0, round(float(total), 1)))
 
@@ -819,16 +828,31 @@ def draft_rfq_email(specs: AssetSpecs, vendor: SourcingOption) -> str:
     if specs.description:
         part_line += f" — {specs.description}"
 
+    # CapEx extras
+    use_case   = getattr(specs, "use_case",   None)
+    duty_cycle = getattr(specs, "duty_cycle",  None)
+    budget_max = getattr(specs, "budget_max",  None)
+    capex_block = ""
+    if use_case or duty_cycle or budget_max:
+        capex_block = (
+            "\n──────────────────────────────────────────\n"
+            "APPLICATION CONTEXT\n"
+            "──────────────────────────────────────────\n"
+            + (f"  Use Case     : {use_case}\n"   if use_case   else "")
+            + (f"  Duty Cycle   : {duty_cycle}\n"  if duty_cycle else "")
+            + (f"  Max Budget   : {budget_max}\n"  if budget_max else "")
+        )
+
     return f"""To: {to_address}
 Subject: Sourcing Inquiry + Arkim Partner Invitation — {specs.manufacturer} {specs.model}
 
 Dear {vendor.vendor_name} Team,
 
-I represent Arkim Industrial Procurement Services. We have an active client requirement
-for the following item and believe you may be well-positioned to fulfil it:
+I represent Arkim Industrial Procurement Services. We have an active requirement
+for the following item and believe you are well-positioned to fulfil it:
 
   {part_line}
-
+{capex_block}
 ──────────────────────────────────────────
 IMMEDIATE SOURCING REQUEST
 ──────────────────────────────────────────
@@ -841,36 +865,37 @@ IMMEDIATE SOURCING REQUEST
   Quantity      : 1 unit (first order)
 
 Please reply with:
-  • Your best unit price and lead time
+  • Unit price and lead time
   • Shipping terms (FOB origin or destination)
   • Availability / stock status
 
-We aim to place an order within 48 hours of receiving a complete quote.
+We aim to place an order within 48 hours of a complete quote.
 
 ──────────────────────────────────────────
-ARKIM PARTNER NETWORK — INVITATION
+ARKIM MERCHANT OF RECORD — HOW IT WORKS
 ──────────────────────────────────────────
-Arkim acts as Merchant of Record for all transactions, which means:
+Arkim acts as the Merchant of Record on every transaction:
 
-  ✓ Instant payment — no net terms or collections risk
-  ✓ Zero corporate onboarding — sell through our platform immediately
-  ✓ Regional RFQ access — see live sourcing requests from industrial clients
-    in your area as soon as you claim your Partner profile
+  ✓ Net-0 instant payment — ACH wired upon order confirmation, zero
+    collections risk, no invoice chasing
+  ✓ No corporate onboarding — bypass the 4-6 week AP/vendor setup
+    that blocks most industrial buyers; sell immediately
+  ✓ Guaranteed volume — Arkim aggregates demand across multiple facilities;
+    partners in our network see 3-8× more repeat orders per year
+  ✓ Regional RFQ priority — once verified, you appear first in our
+    sourcing queue for {specs.detected_type or specs.description or "this equipment category"}
 
-Our system flagged {vendor.vendor_name} as a {suit_pct} match for this equipment type.
-Claiming your profile takes under 5 minutes:
+Our matching algorithm rated {vendor.vendor_name} at {suit_pct} compatibility
+for this category. Claim your Partner profile (under 5 minutes):
 
   → {onboard_url}
 
-Once verified, you will be promoted to the top of our local sourcing queue for
-{specs.detected_type or specs.description or "this equipment category"} requests.
-
 ──────────────────────────────────────────
 
-Thank you — we look forward to working with you.
+Thank you — we look forward to working together.
 
 Arkim Procurement Team
-procurement@arkim.ai
+procurement@arkim.ai  |  partners.arkim.ai
 ──────────────────────────────────────────""".strip()
 
 
