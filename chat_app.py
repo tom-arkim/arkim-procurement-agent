@@ -995,7 +995,9 @@ def render_vendor_cards() -> None:
                     '<div class="tier-hdr tier-hdr-2">&#9679; Tier 2 — National Specialists</div>',
                     unsafe_allow_html=True)
 
-        is_best   = (q == quotes[0])
+        _suit_score = getattr(o, "suitability_score", 100.0)
+        _suit_ok    = _suit_score >= 60   # gate: must meet minimum relevance threshold
+        is_best   = (q == quotes[0]) and _suit_ok
         card_cls  = "q-card q-card-best" if is_best else "q-card"
         _wf       = st.session_state.workflow_mode
         _best_lbl = "Best TLV" if _wf != "spare_parts" else "Best TCA"
@@ -1003,14 +1005,15 @@ def render_vendor_cards() -> None:
         rfq_html  = '<div class="rfq-warning">&#9888; Requires 24-48h for manual outreach &middot; +$50 admin fee</div>' if o.requires_rfq else ""
 
         # "Preferred" badge: 100% PN exact match across all workflows — differentiates
-        # the original from functional equivalents returned by dual-search
+        # the original from functional equivalents returned by dual-search.
+        # Requires suitability ≥ 60 to prevent low-confidence results from claiming Preferred.
         _searched_pn_raw  = (st.session_state.specs.part_number or "") if st.session_state.specs else ""
         _found_pn_raw     = getattr(o, "found_part_number", None) or ""
         _pn_100_match     = (_searched_pn_raw and _found_pn_raw and
                              _found_pn_raw.upper().strip() == _searched_pn_raw.upper().strip())
         _preferred_html   = (
             '<span class="best-badge" style="border-color:#3fb950;color:#3fb950;margin-left:.3rem;">&#10003; Preferred</span>'
-            if _pn_100_match
+            if (_pn_100_match and _suit_ok)
             else ""
         )
 
@@ -1115,7 +1118,7 @@ def render_vendor_cards() -> None:
             _ship_label  = getattr(q, "shipping_label", "") or ("LTL Freight Required" if _is_ltl else f"${q.shipping_cost:,.2f}")
             _is_freight_label = _is_ltl or _ship_label in ("LTL Freight Required", "S.F.Q.", "TBA - Freight")
 
-            # Part Number Found row
+            # Part Number Found row — always visible; red UNVERIFIED when absent
             _found_pn    = getattr(o, "found_part_number", None)
             _searched_pn = (st.session_state.specs.part_number or "") if st.session_state.specs else ""
             _pn_match    = _found_pn and _found_pn.upper().strip() == _searched_pn.upper().strip()
@@ -1125,7 +1128,7 @@ def render_vendor_cards() -> None:
                 if not _pn_match:
                     _pn_val += ' <span style="color:#8b949e;font-size:.65rem;">(alt)</span>'
             else:
-                _pn_val = '<span style="color:#8b949e;">—</span>'
+                _pn_val = '<span style="color:#f85149;font-weight:600;">UNVERIFIED</span>'
             _pn_row = (
                 f'<tr><td style="color:#8b949e;padding:.04rem 0;">PN Found</td>'
                 f'<td style="text-align:right;font-size:.72rem;">{_pn_val}</td></tr>'

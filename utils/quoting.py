@@ -61,6 +61,12 @@ def estimate_shipping(option: SourcingOption) -> tuple[float, bool, str]:
       2. LLM-extracted shipping_terms token.
       3. Flat-rate fallback ($40 Local/Discovery; 5% min $15 Enterprise).
     """
+    # ── Weight guard: >100 lbs is always freight — checked before any other logic
+    #    so no extracted fee or flat-rate fallback can override it.
+    _weight = getattr(option, "weight_lbs", None)
+    if _weight is not None and _weight > 100:
+        return (0.0, True, "S.F.Q.")
+
     # ── Freight guard: absolute priority — zero cost, always S.F.Q. ─────────
     if getattr(option, "is_freight", False):
         terms = getattr(option, "shipping_terms", None)

@@ -180,6 +180,16 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     if is_coll:
         total = min(total, 40)
 
+    # Guardrail 3: wrong-niche vendor — penalise -50 so cross-category shops
+    # (e.g. a hydraulics distributor returned for a motor search) rank near zero.
+    dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
+    u_lower     = url.lower()
+    for equip_type, bad_terms in _NICHE_WRONG_TERMS.items():
+        if equip_type in dtype_lower:
+            if any(t in s or t in u_lower for t in bad_terms):
+                total -= 50
+                break
+
     return min(100.0, max(0.0, round(float(total), 1)))
 
 
@@ -199,6 +209,21 @@ def _onboarding_url(vendor_name: str, specs) -> str:
     rfq   = re.sub(r"[^a-z0-9]+", "-", (specs.part_number or "rfq").lower())
     return f"https://partners.arkim.ai/claim?v={slug}&t={token}&rfq={rfq}"
 
+
+# Wrong-niche terms per searched equipment type.
+# If a vendor's snippet/URL contains these terms when we are searching for a DIFFERENT
+# type of asset, the suitability score is penalised by 50 points to prevent irrelevant
+# shops (e.g. a hydraulics-only distributor) from surfacing for motor or pump searches.
+_NICHE_WRONG_TERMS: dict[str, tuple[str, ...]] = {
+    "motor":      ("hydraulic pump", "hydraulic cylinder", "hydraulic distributor",
+                   "pneumatic cylinder", "hvac unit", "hvac system", "hvac distributor"),
+    "pump":       ("motor rewind", "motor winding", "hydraulic cylinder",
+                   "electrical panel", "circuit breaker distributor"),
+    "compressor": ("hydraulic press", "pump seal kit", "plumbing fixture",
+                   "motor rewind", "hvac coil"),
+    "blower":     ("hydraulic cylinder", "pneumatic cylinder", "pump seal kit",
+                   "plumbing supply", "motor rewind"),
+}
 
 # Known competitor brands per equipment type — injected into equipment queries so Tavily
 # surfaces alternatives that actually list "Add to Cart" prices even when the OEM doesn't.
@@ -387,6 +412,31 @@ def _llm_parse_results(specs: AssetSpecs, results: list[dict]) -> list[dict]:
         return _regex_fallback_parse(results)
 
 
+def _apply_price_sanity(items: list[dict]) -> list[dict]:
+    """Strip prices that are >70% below the peer average — likely hallucinations.
+
+    Flagged items become price_tbd=True (Inquiry Required) and are marked with
+    price_sanity_flagged=True so _call_enterprise_api can zero their suitability score.
+    Requires at least 2 priced results to have enough context.
+    """
+    prices = [float(it["price"]) for it in items
+              if it.get("price") is not None and float(it.get("price", 0)) > 0]
+    if len(prices) < 2:
+        return items
+
+    avg       = sum(prices) / len(prices)
+    threshold = avg * 0.30   # 70% below average = less than 30% of average
+
+    for item in items:
+        p = item.get("price")
+        if p is not None and float(p) > 0 and float(p) < threshold:
+            print(f"[Sourcing] Price sanity FAIL: {item.get('vendor','?')} "
+                  f"@ ${float(p):.2f} vs peer avg ${avg:.2f} — stripping price")
+            item["price"]               = None
+            item["price_sanity_flagged"] = True
+    return items
+
+
 def _regex_fallback_parse(results: list[dict]) -> list[dict]:
     """Simple regex price extraction when LLM is unavailable."""
     extracted = []
@@ -554,7 +604,7 @@ def _call_enterprise_api(specs: AssetSpecs,
     if missing:
         print(f"[Sourcing] Tavily search for: {missing}")
         results = _search_vendor_prices(specs, search_mode=search_mode)
-        parsed  = _llm_parse_results(specs, results)
+        parsed  = _apply_price_sanity(_llm_parse_results(specs, results))
         # URL → raw snippet map for suitability scoring
         snippet_map = {
             r.get("url", ""): (r.get("title", "") + " " + r.get("content", "")).strip()
@@ -565,17 +615,18 @@ def _call_enterprise_api(specs: AssetSpecs,
 
         seen: set[str] = set()
         for item in parsed:
-            vendor        = item.get("vendor", "Unknown")
-            price         = item.get("price")
-            url           = item.get("url", "").strip()
-            lead          = item.get("lead_days", 5)
-            ship_fee      = item.get("shipping_fee")
-            ship_terms    = item.get("shipping_terms")
-            warranty      = item.get("warranty_terms") or None
-            weight_lbs    = item.get("weight_lbs")
-            weight_lbs    = float(weight_lbs) if weight_lbs is not None else None
-            found_pn      = (item.get("found_part_number") or "").strip() or None
-            exact_match   = bool(item.get("exact_match", True))
+            vendor          = item.get("vendor", "Unknown")
+            price           = item.get("price")
+            url             = item.get("url", "").strip()
+            lead            = item.get("lead_days", 5)
+            ship_fee        = item.get("shipping_fee")
+            ship_terms      = item.get("shipping_terms")
+            warranty        = item.get("warranty_terms") or None
+            weight_lbs      = item.get("weight_lbs")
+            weight_lbs      = float(weight_lbs) if weight_lbs is not None else None
+            found_pn        = (item.get("found_part_number") or "").strip() or None
+            sanity_flagged  = bool(item.get("price_sanity_flagged", False))
+            exact_match     = bool(item.get("exact_match", True))
             # Freight guard: >100 lbs OR >10 HP OR category heavy → S.F.Q.
             heavy         = _is_heavy_item(specs, weight_lbs)
             is_freight    = bool(item.get("is_freight", False)) or (heavy and ship_fee is None and price is not None)
@@ -619,9 +670,21 @@ def _call_enterprise_api(specs: AssetSpecs,
             coll_tag = " [LIST PAGE]" if is_coll else ""
             tag      = ("" if match_type == "Exact" else " [Alt]") + (" [LTL]" if is_freight else "") + fn_tag + coll_tag
 
+            # PN Enforcement: no verified part number → cannot confirm product identity
+            # → demote to Inquiry Required regardless of stated price.
+            if found_pn is None and price is not None:
+                print(f"[Sourcing] PN Enforcement: {vendor} has no found_part_number "
+                      f"— stripping price, demoting to Inquiry Required")
+                price = None
+
             # Suitability scoring using raw Tavily snippet
             snippet = snippet_map.get(url, "")
             suit    = _compute_suitability_score(specs, snippet, url, found_pn)
+
+            # Price sanity flag → zero suitability (unreliable result, keep as Inquiry Required)
+            if sanity_flagged:
+                suit = 0.0
+
             pstat   = _partner_status(vendor, suit)
 
             _common = dict(
@@ -698,17 +761,47 @@ Rules:
 """
 
 
+# Asset-type niche terms for Tier 2 discovery.
+# Using specific industry vocabulary surfaces specialist shops instead of generalists.
+_TIER2_NICHE_TERMS: dict[str, str] = {
+    "motor":      "electric motor distributor service center repair authorized",
+    "pump":       "industrial pump distributor authorized service center",
+    "compressor": "air compressor distributor service repair authorized",
+    "blower":     "industrial blower fan distributor service",
+    "vfd":        "variable frequency drive VFD distributor industrial",
+    "starter":    "motor starter contactor distributor industrial",
+    "bearing":    "industrial bearing distributor authorized",
+    "seal":       "mechanical seal industrial distributor",
+    "conveyor":   "conveyor equipment distributor industrial",
+}
+
+
 def _build_tier2_query(specs: AssetSpecs) -> str:
-    """Build a national specialist discovery query using detected_type."""
-    detected = getattr(specs, "detected_type", None) or ""
-    desc     = (specs.description or "").strip()
-    equip_term = detected or desc or "industrial equipment"
+    """Build an asset-specific national specialist discovery query.
+
+    Uses detected_type to inject niche vocabulary so Tier 2 results are
+    specialists (e.g. motor service centers) rather than generalist shops.
+    """
+    detected = (getattr(specs, "detected_type", None) or "").lower()
+    desc     = (specs.description or "").lower()
+    ctx      = detected or desc or ""
+
+    # Match asset type → niche search terms
+    niche = ""
+    for equip_type, terms in _TIER2_NICHE_TERMS.items():
+        if equip_type in ctx:
+            niche = terms
+            break
+
+    if not niche:
+        equip_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
+        niche = f"{equip_term} distributor USA buy online"
 
     known = (specs.manufacturer not in ("Unknown", "N/A", "null") and
              specs.model        not in ("Unknown", "N/A", "null"))
     suffix = f"{specs.manufacturer} {specs.model} equivalent" if known else ""
 
-    return f"{equip_term} distributor USA buy online {suffix}".strip()
+    return f"{niche} USA {suffix}".strip()
 
 
 def _discover_national_specialists(specs: AssetSpecs,
@@ -827,6 +920,10 @@ def draft_rfq_email(specs: AssetSpecs, vendor: SourcingOption) -> str:
     onboard_url  = _onboarding_url(vendor.vendor_name, specs)
     suit_pct     = f"{vendor.suitability_score:.0f}%" if vendor.suitability_score else "—"
 
+    # Asset-type label for the "why selected" paragraph
+    asset_type = (getattr(specs, "detected_type", None) or specs.description
+                  or f"{specs.manufacturer} {specs.model}")
+
     part_line = f"{specs.manufacturer} {specs.model}"
     if specs.part_number and specs.part_number not in ("N/A", "UNKNOWN-PN", "Unknown"):
         part_line += f" (PN: {specs.part_number})"
@@ -855,8 +952,10 @@ Subject: Sourcing Inquiry + Arkim Partner Invitation — {specs.manufacturer} {s
 
 Dear {vendor.vendor_name} Team,
 
-I represent Arkim Industrial Procurement Services. We have an active requirement
-for the following item and believe you are well-positioned to fulfil it:
+I represent Arkim Industrial Procurement Services. Our sourcing system identified
+{vendor.vendor_name} as a specialist in {asset_type} equipment (match score: {suit_pct}).
+We have an active, time-sensitive requirement for the item below and believe your
+expertise makes you the right supplier:
 
   {part_line}
 {capex_block}
