@@ -247,14 +247,21 @@ def _build_search_query(specs: AssetSpecs, search_mode: str = "exact") -> str:
                  specs.model        not in ("Unknown", "N/A", "null"))
 
         if search_mode == "equivalents":
-            # Inject competitor brands so vendors listing "Add to Cart" prices surface
+            # Always anchor to the exact PN/model first so the original is found,
+            # then inject competitors so functional equivalents also surface.
+            pn = specs.part_number
+            if pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown"):
+                parts.append(f'"{pn}"')
+            elif known:
+                parts.append(f"{specs.manufacturer} {specs.model}")
+            # Competitor brands — surfaces "Add to Cart" alternatives on open web
             desc_lower = (desc or specs.model or "").lower()
             for equip_type, competitors in _EQUIP_COMPETITORS.items():
                 if equip_type in desc_lower:
                     parts.append(competitors)
                     break
             if known:
-                parts.append(f"equivalent to {specs.manufacturer} {specs.model}")
+                parts.append(f"OR equivalent to {specs.manufacturer} {specs.model}")
         else:
             # Exact mode: include the specific PN in quotes
             pn = specs.part_number

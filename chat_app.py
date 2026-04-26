@@ -391,7 +391,6 @@ _DEFAULTS: dict = {
     "force_refresh":              False, # bypass price cache on next pipeline run
     "pending_verification_specs": None,  # specs waiting for user to confirm missing fields
     "pending_verification_site":  None,
-    "pending_search_strategy":    None,  # {"specs": AssetSpecs, "site": str} — awaiting exact/equivalents choice
     "search_mode":                "exact",  # "exact" | "equivalents" — carried into pipeline
     "workflow_mode":              "spare_parts",  # "spare_parts" | "replacement" | "capex"
     "downtime_cost_per_day":      500.0,   # USD/day — used for TLV calculation
@@ -775,57 +774,6 @@ def specs_from_classification(classified: dict):
     return extract_specs(str(classified))
 
 
-def _needs_search_strategy_confirm(specs) -> bool:
-    """True for high-HP motors / pumps where exact-vs-equivalents choice matters."""
-    if specs.category != "Equipment":
-        return False
-    desc_lower  = (specs.description or "").lower()
-    dtype_lower = (getattr(specs, "detected_type", "") or "").lower()
-    is_motor_pump = any(k in desc_lower or k in dtype_lower
-                        for k in ("motor", "pump", "compressor", "blower"))
-    if not is_motor_pump:
-        return False
-    hp_str = specs.hp or ""
-    m = re.search(r"(\d+(?:\.\d+)?)", hp_str)
-    if m and float(m.group(1)) >= 10:
-        return True
-    if getattr(specs, "frame", None):   # large frame size → industrial equipment
-        return True
-    return False
-
-
-def _build_search_strategy_question(specs) -> str:
-    """Compose the pre-search clarification question for high-value equipment."""
-    hp_str    = specs.hp or ""
-    frame_str = f"{specs.frame} Frame" if getattr(specs, "frame", None) else ""
-    tech      = " · ".join(filter(None, [hp_str, frame_str]))
-    dtype     = getattr(specs, "detected_type", None) or "industrial equipment"
-
-    brand = specs.manufacturer if specs.manufacturer not in ("Unknown", "N/A", "null") else None
-    pn    = specs.part_number  if specs.part_number  not in ("UNKNOWN-PN", "Unknown") else None
-    id_str = " · ".join(filter(None, [brand, pn]))
-
-    desc_lower = (specs.description or dtype).lower()
-    if "motor" in desc_lower:
-        competitors = "ABB, Baldor, or WEG"
-    elif "pump" in desc_lower:
-        competitors = "Goulds, Lowara, or Armstrong"
-    elif "compressor" in desc_lower:
-        competitors = "Ingersoll Rand or Atlas Copco"
-    else:
-        competitors = "functional equivalents"
-
-    exact_label = f"{brand} {pn}" if brand and pn else "the exact part number"
-    return (
-        f"I've identified this as a **{tech} {dtype}**"
-        + (f" ({id_str})" if id_str else "")
-        + ". Before I search, what's your priority?\n\n"
-        f"- **Exact match only** — search specifically for {exact_label}\n"
-        f"- **Include equivalents** — also search for functional equivalents from {competitors} "
-        f"with the same specs\n\n"
-        f"Reply **'exact'** or **'equivalents'**."
-    )
-
 
 def _missing_critical_specs(specs) -> list[str]:
     """Return human-readable names of critical specs that are missing/unknown."""
@@ -1054,14 +1002,15 @@ def render_vendor_cards() -> None:
         best_html = f'<span class="best-badge">{_best_lbl}</span>' if is_best else ""
         rfq_html  = '<div class="rfq-warning">&#9888; Requires 24-48h for manual outreach &middot; +$50 admin fee</div>' if o.requires_rfq else ""
 
-        # "Preferred" badge: only for 100% PN exact match (Spare Parts) or best value (Replacement)
+        # "Preferred" badge: 100% PN exact match across all workflows — differentiates
+        # the original from functional equivalents returned by dual-search
         _searched_pn_raw  = (st.session_state.specs.part_number or "") if st.session_state.specs else ""
         _found_pn_raw     = getattr(o, "found_part_number", None) or ""
         _pn_100_match     = (_searched_pn_raw and _found_pn_raw and
                              _found_pn_raw.upper().strip() == _searched_pn_raw.upper().strip())
         _preferred_html   = (
             '<span class="best-badge" style="border-color:#3fb950;color:#3fb950;margin-left:.3rem;">&#10003; Preferred</span>'
-            if (_wf == "spare_parts" and _pn_100_match)
+            if _pn_100_match
             else ""
         )
 
@@ -1511,7 +1460,7 @@ with st.sidebar:
             "rfq_vendors_selected", "pipeline_error", "pending_run", "pending_image",
             "pending_verification_specs", "pending_verification_site", "force_refresh",
             "inventory_hit", "inventory_location", "messages",
-            "pending_search_strategy", "search_mode", "workflow_mode",
+            "search_mode", "workflow_mode",
         ]
         for _ck in _clear_keys:
             st.session_state[_ck] = _DEFAULTS.get(_ck)
@@ -1581,7 +1530,15 @@ if st.session_state.pending_image:
             specs = specs_from_image(img_data["bytes"], img_data["filename"], ant_key)
             st.write(f"Identified: **{specs.manufacturer} {specs.model}** — PN: `{specs.part_number}`")
             _img_status.update(label="Nameplate read successfully", state="complete", expanded=False)
-            st.session_state.pending_run = {"specs": specs, "site": img_data["site"]}
+            _img_mode = ("exact"
+                         if getattr(specs, "category", "Part") == "Part"
+                         and st.session_state.workflow_mode == "spare_parts"
+                         else "equivalents")
+            st.session_state.pending_run = {
+                "specs": specs, "site": img_data["site"],
+                "search_mode": _img_mode,
+                "workflow": st.session_state.workflow_mode,
+            }
         except Exception as e:
             st.error(f"Image processing failed: {e}")
             _img_status.update(label="Image read failed", state="error", expanded=True)
@@ -1607,18 +1564,6 @@ if st.session_state.pending_run:
             st.session_state.messages.append({"role": "assistant", "content": q})
             st.session_state.pending_verification_specs = sp
             st.session_state.pending_verification_site  = run_data["site"]
-            st.rerun()
-
-    # ── Stage 2: Search strategy — exact vs. equivalents ──────────────────
-    if not run_data.get("search_strategy_confirmed"):
-        sp = run_data["specs"]
-        if _needs_search_strategy_confirm(sp):
-            st.session_state.pending_run = None
-            q = _build_search_strategy_question(sp)
-            st.session_state.messages.append({"role": "assistant", "content": q})
-            st.session_state.pending_search_strategy = {
-                "specs": sp, "site": run_data.get("site", site_sel), "verified": True
-            }
             st.rerun()
 
     run_data = st.session_state.pending_run
@@ -1881,25 +1826,7 @@ elif active_tab == "🔍 Active Sourcing":
                     })
                 else:
                     try:
-                        pss = st.session_state.pending_search_strategy
-                        if pss is not None:
-                            if re.search(r"\bequiv\b|\bequivalent\b|\balt\b|\bsimilar\b|\binclude\b|\bopen\b", prompt, re.I):
-                                mode = "equivalents"
-                                mode_note = "equivalents included"
-                            else:
-                                mode = "exact"
-                                mode_note = "exact match only"
-                            st.session_state.pending_search_strategy = None
-                            st.session_state.search_mode = mode
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": f"Got it — searching **{mode_note}**. Running pipeline now…"
-                            })
-                            st.session_state.pending_run = {
-                                **pss, "search_strategy_confirmed": True, "search_mode": mode,
-                                "workflow": st.session_state.workflow_mode,
-                            }
-                        elif st.session_state.pending_verification_specs is not None:
+                        if st.session_state.pending_verification_specs is not None:
                             pv_specs = st.session_state.pending_verification_specs
                             pv_site  = st.session_state.pending_verification_site or site_sel
                             if re.search(r"\bsearch anyway\b|\bproceed\b|\bskip\b", prompt, re.I):
@@ -1933,10 +1860,11 @@ elif active_tab == "🔍 Active Sourcing":
                                 st.session_state.accepted_quote = None
                                 st.session_state.rfq_campaign_sent = False
                                 specs = specs_from_classification(classified)
-                                # Replacement mode defaults to equivalents search
-                                default_mode = ("equivalents"
-                                               if st.session_state.workflow_mode == "replacement"
-                                               else "exact")
+                                # Equipment always runs dual-search (exact + equivalents)
+                                default_mode = ("exact"
+                                               if getattr(specs, "category", "Part") == "Part"
+                                               and st.session_state.workflow_mode == "spare_parts"
+                                               else "equivalents")
                                 st.session_state.pending_run = {
                                     "specs": specs, "site": req_site,
                                     "workflow": st.session_state.workflow_mode,
@@ -1962,10 +1890,15 @@ elif active_tab == "🔍 Active Sourcing":
                     st.session_state.force_refresh = True
                     st.session_state.accepted_quote = None
                     st.session_state.rfq_campaign_sent = False
+                    _refresh_cat = getattr(st.session_state.specs, "category", "Part") if st.session_state.specs else "Part"
+                    _refresh_mode = ("exact"
+                                    if _refresh_cat == "Part" and st.session_state.workflow_mode == "spare_parts"
+                                    else "equivalents")
                     st.session_state.pending_run = {
-                        "specs":    st.session_state.specs,
-                        "site":     st.session_state.site,
-                        "workflow": st.session_state.workflow_mode,
+                        "specs":       st.session_state.specs,
+                        "site":        st.session_state.site,
+                        "workflow":    st.session_state.workflow_mode,
+                        "search_mode": _refresh_mode,
                     }
                     st.rerun()
             render_vendor_cards()
