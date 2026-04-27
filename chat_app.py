@@ -556,7 +556,7 @@ def _execute_pipeline(specs, site: str,
         else:
             src_label  = "fetching fresh prices" if force_refresh else "checking price DB first"
             mode_label = "exact PN" if search_mode == "exact" else "exact + equivalents + cross-reference"
-            st.write(f"🌐 **Sourcing specialized distributors and authorized service centers** ({src_label} · {mode_label})…")
+            st.write(f"🌐 **Sourcing specialized stockists and aftermarket alternatives** ({src_label} · {mode_label})…")
 
         st.write("📦 **Batching Snippets** — parsing vendor results…")
         options, _ = find_vendors(specs, site=site, force_refresh=force_refresh,
@@ -786,15 +786,39 @@ def specs_from_classification(classified: dict):
 
 
 def _missing_critical_specs(specs) -> list[str]:
-    """Return human-readable names of critical specs that are missing/unknown."""
+    """Return human-readable names of critical specs that are missing/unknown.
+
+    Category-aware: Parts only need Manufacturer + PN to run a search.
+    Equipment needs Voltage, Phase, and at least one performance spec.
+    """
     _null = {"N/A", "Unknown", "null", "None", "UNKNOWN-PN", None, ""}
     missing = []
-    if specs.voltage in _null:
-        missing.append("Voltage")
-    if getattr(specs, "phase", None) in _null and specs.category == "Equipment":
-        missing.append("Phase (single-phase or 3-phase)")
-    # For Equipment, at least one performance spec must be known
-    if specs.category == "Equipment":
+
+    if specs.category == "Part":
+        # Parts: Voltage/Phase/HP/GPM/PSI belong to the parent machine, not the part.
+        # We only need enough to identify the part — Manufacturer + PN is sufficient.
+        if specs.manufacturer in _null:
+            missing.append("Manufacturer (needed to find cross-reference alternatives)")
+        if specs.part_number in _null:
+            missing.append("Part Number or dimensions (needed to locate the exact part)")
+        # Seal-specific: shaft size and material help find aftermarket alternatives
+        dtype_l = (getattr(specs, "detected_type", "") or "").lower()
+        if "seal" in dtype_l:
+            desc_l = (specs.description or "").lower()
+            has_dim_info = any(kw in desc_l for kw in
+                               ("inch", "mm", "viton", "epdm", "buna", "teflon",
+                                "shaft", "sleeve", "carbon", "ceramic", "tungsten"))
+            if not has_dim_info:
+                missing.append(
+                    'shaft size or elastomer material (e.g. "1.5 inch shaft, Viton") '
+                    '— helps find aftermarket alternatives'
+                )
+    else:
+        # Equipment: Voltage, Phase, and at least one performance spec required
+        if specs.voltage in _null:
+            missing.append("Voltage")
+        if getattr(specs, "phase", None) in _null:
+            missing.append("Phase (single-phase or 3-phase)")
         has_perf = any([
             specs.hp    and specs.hp    not in _null,
             getattr(specs, "gpm",   None) not in _null,
@@ -803,9 +827,9 @@ def _missing_critical_specs(specs) -> list[str]:
         ])
         if not has_perf:
             missing.append("at least one performance spec (HP, GPM, PSI, or Frame)")
-    # Motor-specific: flag missing Frame + RPM together (needed for equivalence search)
-    if getattr(specs, "missing_critical_specs", False):
-        missing.append("Frame size and RPM (required for motor equivalence matching)")
+        # Motor-specific: flag missing Frame + RPM together
+        if getattr(specs, "missing_critical_specs", False):
+            missing.append("Frame size and RPM (required for motor equivalence matching)")
     return missing
 
 
@@ -1140,15 +1164,25 @@ def render_vendor_cards() -> None:
             _ship_label  = getattr(q, "shipping_label", "") or ("LTL Freight Required" if _is_ltl else f"${q.shipping_cost:,.2f}")
             _is_freight_label = _is_ltl or _ship_label in ("LTL Freight Required", "S.F.Q.", "TBA - Freight")
 
-            # Part Number Found row — always visible; red UNVERIFIED when absent
+            # Part Number Found row — always visible
             _found_pn    = getattr(o, "found_part_number", None)
             _searched_pn = (st.session_state.specs.part_number or "") if st.session_state.specs else ""
             _pn_match    = _found_pn and _found_pn.upper().strip() == _searched_pn.upper().strip()
             if _found_pn:
-                _pn_color = "#3fb950" if _pn_match else "#d29922"
-                _pn_val   = f'<span style="color:{_pn_color};font-weight:600;">{_found_pn}</span>'
-                if not _pn_match:
-                    _pn_val += ' <span style="color:#8b949e;font-size:.65rem;">(alt)</span>'
+                if _pn_match:
+                    _pn_val = f'<span style="color:#3fb950;font-weight:600;">{_found_pn}</span>'
+                else:
+                    # Different PN found — show it as a cross-reference with original for context
+                    _orig_brand = (st.session_state.specs.manufacturer or "") if st.session_state.specs else ""
+                    _alt_label  = f'<span style="color:#d29922;font-weight:600;">{_found_pn}</span>'
+                    if _orig_brand and _orig_brand not in ("Unknown", "N/A"):
+                        _alt_label += (
+                            f' <span style="color:#8b949e;font-size:.65rem;">'
+                            f'(alt — replaces {_orig_brand} {_searched_pn or ""})</span>'
+                        )
+                    else:
+                        _alt_label += ' <span style="color:#8b949e;font-size:.65rem;">(cross-reference)</span>'
+                    _pn_val = _alt_label
             else:
                 _pn_val = '<span style="color:#f85149;font-weight:600;">UNVERIFIED</span>'
             _pn_row = (
@@ -1183,24 +1217,41 @@ def render_vendor_cards() -> None:
         # ── Spec Comparison Table (non-OEM matches only) ─────────────────────
         _is_non_oem = _mt in ("Aftermarket Compatible", "Functional Alternative")
         if _is_non_oem and st.session_state.specs:
-            _orig = st.session_state.specs
+            _orig          = st.session_state.specs
             _found_pn_disp = getattr(o, "found_part_number", None) or "—"
-            _orig_rows = [
-                ("Manufacturer",  _orig.manufacturer),
-                ("Model / PN",    f"{_orig.model} / {_orig.part_number}"),
-                ("Voltage",       _orig.voltage or "—"),
-                ("Phase",         getattr(_orig, "phase", None) or "—"),
-                ("HP",            _orig.hp or "—"),
-                ("Frame",         getattr(_orig, "frame", None) or "—"),
-                ("RPM",           getattr(_orig, "rpm", None) or "—"),
-                ("GPM",           getattr(_orig, "gpm", None) or "—"),
-                ("PSI",           getattr(_orig, "psi", None) or "—"),
-            ]
-            rows_html = "".join(
+            _orig_cat      = getattr(_orig, "category", "Part")
+
+            if _orig_cat == "Part":
+                # Parts: show PN identity and description/material — omit electrical specs
+                _orig_rows = [
+                    ("Manufacturer",   _orig.manufacturer),
+                    ("Original PN",    _orig.part_number),
+                    ("Found PN",       _found_pn_disp),
+                    ("Description",    _orig.description or "—"),
+                ]
+                _footer = ("Verify dimensional fit, material compatibility, and shaft size "
+                           "against manufacturer datasheet before installing.")
+            else:
+                # Equipment: show electrical and performance specs
+                _orig_rows = [
+                    ("Manufacturer",  _orig.manufacturer),
+                    ("Model / PN",    f"{_orig.model} / {_orig.part_number}"),
+                    ("Voltage",       _orig.voltage or "—"),
+                    ("Phase",         getattr(_orig, "phase", None) or "—"),
+                    ("HP",            _orig.hp or "—"),
+                    ("Frame",         getattr(_orig, "frame", None) or "—"),
+                    ("RPM",           getattr(_orig, "rpm", None) or "—"),
+                    ("GPM",           getattr(_orig, "gpm", None) or "—"),
+                    ("PSI",           getattr(_orig, "psi", None) or "—"),
+                ]
+                _footer = ("Cross-reference data may differ — confirm fit with "
+                           "manufacturer datasheet before installing.")
+
+            _rows_html = "".join(
                 f'<tr>'
                 f'<td style="color:#8b949e;font-size:.72rem;padding:.1rem .4rem;">{lbl}</td>'
                 f'<td style="font-size:.72rem;padding:.1rem .4rem;color:#c9d1d9;">{val}</td>'
-                f'<td style="font-size:.72rem;padding:.1rem .4rem;color:#d29922;">{'?' if val == '—' else '✓'}</td>'
+                f'<td style="font-size:.72rem;padding:.1rem .4rem;color:{"#d29922" if val == "—" else "#3fb950"};">{"?" if val == "—" else "✓"}</td>'
                 f'</tr>'
                 for lbl, val in _orig_rows
             )
@@ -1216,22 +1267,33 @@ def render_vendor_cards() -> None:
                       <th style="font-size:.65rem;color:#8b949e;padding:.1rem .4rem;text-align:left;">Original</th>
                       <th style="font-size:.65rem;color:#8b949e;padding:.1rem .4rem;text-align:left;">Alt PN: {_found_pn_disp}</th>
                     </tr></thead>
-                    <tbody>{rows_html}</tbody>
+                    <tbody>{_rows_html}</tbody>
                   </table>
-                  <div style="font-size:.67rem;color:#8b949e;margin-top:.3rem;">
-                    Cross-reference data may differ — confirm fit with manufacturer datasheet before installing.
-                  </div>
+                  <div style="font-size:.67rem;color:#8b949e;margin-top:.3rem;">{_footer}</div>
                 </div>""", unsafe_allow_html=True)
 
         with col_btn:
             st.markdown("<div style='padding-top:.7rem'></div>", unsafe_allow_html=True)
 
-            # Acceptance gate: non-OEM results require explicit engineer sign-off
+            # Acceptance gate: non-OEM results require explicit sign-off
+            # Checkbox text is category-aware — seals/parts ask about dimensional/material fit
             _accept_enabled = True
             if _is_non_oem:
-                _chk_key = f"alt_confirm_{q.quote_id}"
+                _chk_key  = f"alt_confirm_{q.quote_id}"
+                _orig_cat = getattr(st.session_state.specs, "category", "Part") if st.session_state.specs else "Part"
+                _dtype_l  = (getattr(st.session_state.specs, "detected_type", "") or "").lower() if st.session_state.specs else ""
+                if _orig_cat == "Part" and "seal" in _dtype_l:
+                    _chk_label = ("I have verified the dimensional and material specifications "
+                                  "(shaft size, elastomer type) and confirm this is a suitable "
+                                  "functional replacement for this seal.")
+                elif _orig_cat == "Part":
+                    _chk_label = ("I have verified the dimensional and material specifications "
+                                  "and confirm this is a suitable functional replacement.")
+                else:
+                    _chk_label = ("I have verified the technical specifications and performance "
+                                  "rating and confirm this is a suitable functional replacement.")
                 _confirmed = st.checkbox(
-                    "I have verified the technical specifications and confirm this is a suitable functional replacement",
+                    _chk_label,
                     key=_chk_key,
                     value=st.session_state.get(_chk_key, False),
                 )
@@ -1637,13 +1699,33 @@ if st.session_state.pending_run:
             st.session_state.pending_run = None
             sp = run_data["specs"]
             fields = " · ".join(f"**{f}**" for f in missing)
-            q = (
-                f"I identified **{sp.manufacturer} {sp.model}**"
-                + (f" ({sp.detected_type})" if getattr(sp, "detected_type", None) else "")
-                + f", but I'm missing {fields} before I can run an accurate search. "
-                f"Could you confirm these details? (e.g. *'460V 3-phase, 5 HP, 56C frame'*) "
-                f"Or reply **'search anyway'** to proceed with what I have."
-            )
+            dtype_l = (getattr(sp, "detected_type", "") or "").lower()
+            if sp.category == "Part" and "seal" in dtype_l:
+                # Seal-specific clarification question
+                q = (
+                    f"I've identified this as a **{sp.detected_type or 'mechanical seal'}**"
+                    + (f" (PN: {sp.part_number})" if sp.part_number not in ("UNKNOWN-PN", "Unknown", None) else "")
+                    + ". Do you have the **shaft size** or **elastomer/material type** "
+                    f"(e.g. *'1.5 inch shaft, Viton'* or *'EPDM, 1-1/4 inch'*)? "
+                    f"This helps me find aftermarket alternatives like U.S. Seal or equivalent. "
+                    f"Or reply **'search anyway'** to proceed with what I have."
+                )
+            elif sp.category == "Part":
+                q = (
+                    f"I identified this as a **{sp.detected_type or 'replacement part'}**"
+                    + (f" from **{sp.manufacturer}**" if sp.manufacturer not in ("Unknown", None) else "")
+                    + f", but I'm missing {fields} to find the right cross-reference. "
+                    f"Could you confirm the part number or dimensions? "
+                    f"Or reply **'search anyway'** to proceed."
+                )
+            else:
+                q = (
+                    f"I identified **{sp.manufacturer} {sp.model}**"
+                    + (f" ({sp.detected_type})" if getattr(sp, "detected_type", None) else "")
+                    + f", but I'm missing {fields} before I can run an accurate search. "
+                    f"Could you confirm these details? (e.g. *'460V 3-phase, 5 HP, 56C frame'*) "
+                    f"Or reply **'search anyway'** to proceed with what I have."
+                )
             st.session_state.messages.append({"role": "assistant", "content": q})
             st.session_state.pending_verification_specs = sp
             st.session_state.pending_verification_site  = run_data["site"]

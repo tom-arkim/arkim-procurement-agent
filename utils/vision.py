@@ -57,6 +57,15 @@ Technical requirement rules:
 - Set any field to null if not found — do not invent values.
 - For description: one concise line, e.g. "3 HP TEFC induction motor, 3-phase, 56C frame, 1750 RPM".
 
+CRITICAL — Parts category extraction rule:
+  When category == "Part" (bearing, seal, contactor, relay, VFD, belt, coupling, sensor, etc.),
+  you MUST set voltage, hp, rpm, gpm, psi, and phase to null.
+  These numbers on a nameplate describe the parent equipment, NOT the part itself.
+  A mechanical seal does not have a voltage. A bearing does not have HP.
+  Extract ONLY: manufacturer, model, part_number, description, physical_magnitude.
+  The description for a Part should include dimensional or material info if visible,
+  e.g. "1.5 inch shaft mechanical seal, Viton elastomers" or "6205-2RS deep groove ball bearing".
+
 physical_magnitude rules (shipping size classification — required, never null):
 - "LTL_freight"  : Motor > 10 HP, OR Pump > 15 HP, OR compressor/blower/conveyor of any size,
                    OR weight clearly > 100 lbs — requires truck/freight shipment.

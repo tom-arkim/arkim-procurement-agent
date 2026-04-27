@@ -169,20 +169,33 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     mfg     = (specs.manufacturer or "").lower()
     mfg_pts = 10 if (mfg and mfg not in ("unknown", "n/a", "null") and mfg in s) else 0
 
-    # ── Authorized distributor / service center bonus ───────────────────────
-    auth_phrases = ("authorized distributor", "authorized dealer", "factory authorized",
-                    "authorized reseller", "authorized service center")
-    svc_phrases  = ("service center", "repair center", "factory service")
-    if any(p in s for p in auth_phrases):
-        auth_pts = 20
-    elif "authorized" in s:
-        auth_pts = 8
-    elif "distributor" in s or "distributor" in url.lower():
-        auth_pts = 5
+    # ── Distributor / stockist bonus (category-aware) ──────────────────────
+    if specs.category == "Part":
+        # For Parts the right signal is: stocking distributor or cross-reference catalogue.
+        # "Service center" is irrelevant (and misleading) for seals/bearings/contactors.
+        stockist_phrases = ("in stock", "available", "ships today", "ready to ship",
+                            "cross-reference", "interchange", "aftermarket")
+        if any(p in s for p in stockist_phrases):
+            auth_pts = 20   # high-probability stockist
+        elif "distributor" in s or "distributor" in url.lower() or "supply" in url.lower():
+            auth_pts = 10
+        else:
+            auth_pts = 0
     else:
-        auth_pts = 0
-    if any(p in s for p in svc_phrases):
-        auth_pts = min(20, auth_pts + 10)
+        # Equipment: authorized distributor / service center bonus
+        auth_phrases = ("authorized distributor", "authorized dealer", "factory authorized",
+                        "authorized reseller", "authorized service center")
+        svc_phrases  = ("service center", "repair center", "factory service")
+        if any(p in s for p in auth_phrases):
+            auth_pts = 20
+        elif "authorized" in s:
+            auth_pts = 8
+        elif "distributor" in s or "distributor" in url.lower():
+            auth_pts = 5
+        else:
+            auth_pts = 0
+        if any(p in s for p in svc_phrases):
+            auth_pts = min(20, auth_pts + 10)
 
     # ── URL quality ─────────────────────────────────────────────────────────
     is_coll = _is_collection_url(url)
@@ -816,30 +829,35 @@ Rules:
 # Asset-type niche terms for Tier 2 discovery.
 # Using specific industry vocabulary surfaces specialist shops instead of generalists.
 _TIER2_NICHE_TERMS: dict[str, str] = {
+    # Equipment — service centers and authorized distributors are the right channel
     "motor":      "electric motor distributor service center repair authorized",
     "pump":       "industrial pump distributor authorized service center",
     "compressor": "air compressor distributor service repair authorized",
     "blower":     "industrial blower fan distributor service",
-    "vfd":        "variable frequency drive VFD distributor industrial",
-    "starter":    "motor starter contactor distributor industrial",
-    "bearing":    "industrial bearing distributor authorized",
-    "seal":       "mechanical seal industrial distributor",
     "conveyor":   "conveyor equipment distributor industrial",
+    # Parts — stockists and cross-reference catalogues are the right channel
+    "vfd":        "variable frequency drive VFD distributor in stock",
+    "starter":    "motor starter contactor distributor in stock",
+    "bearing":    "industrial bearing distributor in stock cross-reference",
+    "seal":       "mechanical seal cross-reference interchange in stock aftermarket",
+    "coupling":   "shaft coupling distributor in stock industrial",
+    "belt":       "industrial belt cross-reference interchange in stock",
+    "contactor":  "contactor relay distributor in stock",
+    "sensor":     "industrial sensor distributor in stock",
 }
 
 
 def _build_tier2_query(specs: AssetSpecs) -> str:
     """Build an asset-specific national specialist discovery query.
 
-    Uses explicit boolean AND/OR operators so Tavily surfaces authorized
-    distributors and service centers rather than generic industrial shops.
-    Format: (authorized OR distributor OR "service center") AND "<type>" AND "<mfg>" AND "<spec>"
+    Equipment: boolean AND/OR targeting authorized distributors and service centers.
+    Parts: cross-reference and stockist focused — no "service center" requirement.
     """
     detected = (getattr(specs, "detected_type", None) or "").lower()
     desc     = (specs.description or "").lower()
     ctx      = detected or desc or ""
 
-    # Determine the primary niche term (quoted for precision)
+    # Determine primary niche term
     niche_term = None
     for equip_type in _TIER2_NICHE_TERMS:
         if equip_type in ctx:
@@ -848,24 +866,38 @@ def _build_tier2_query(specs: AssetSpecs) -> str:
     if not niche_term:
         niche_term = (getattr(specs, "detected_type", None) or specs.description or "industrial equipment")
 
-    # Build boolean AND chain
     known_mfg = specs.manufacturer not in ("Unknown", "N/A", "null", None)
-    parts = [
-        '(authorized OR distributor OR "service center")',
-        f'"{niche_term}"',
-    ]
-    if known_mfg:
-        parts.append(f'"{specs.manufacturer}"')
+    pn        = specs.part_number
+    known_pn  = pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown", None)
 
-    # Inject primary performance spec (HP for motors, GPM for pumps, PSI for compressors)
-    if specs.hp and specs.hp not in ("N/A", "None", "null"):
-        hp_val = re.sub(r"\s+", "", specs.hp).upper()
-        parts.append(f'"{hp_val}"')
-    elif getattr(specs, "gpm", None):
-        gpm_val = re.sub(r"\s+", "", specs.gpm).upper()
-        parts.append(f'"{gpm_val}"')
-
-    return " AND ".join(parts)
+    if specs.category == "Part":
+        # Parts: anchor to PN + cross-reference vocabulary so stockists surface
+        q_parts = [
+            '(distributor OR stockist OR "in stock" OR "cross-reference" OR interchange)',
+            f'"{niche_term}"',
+        ]
+        if known_pn:
+            q_parts.append(f'"{pn}"')
+        if known_mfg:
+            q_parts.append(f'"{specs.manufacturer}"')
+        # For seals: add aftermarket-specific terms
+        if "seal" in ctx:
+            q_parts.append('("aftermarket" OR "equivalent" OR "interchange")')
+        return " AND ".join(q_parts)
+    else:
+        # Equipment: authorized distributor / service center format
+        q_parts = [
+            '(authorized OR distributor OR "service center")',
+            f'"{niche_term}"',
+        ]
+        if known_mfg:
+            q_parts.append(f'"{specs.manufacturer}"')
+        # Inject primary performance spec
+        if specs.hp and specs.hp not in ("N/A", "None", "null"):
+            q_parts.append(f'"{re.sub(r"\\s+", "", specs.hp).upper()}"')
+        elif getattr(specs, "gpm", None):
+            q_parts.append(f'"{re.sub(r"\\s+", "", specs.gpm).upper()}"')
+        return " AND ".join(q_parts)
 
 
 def _discover_national_specialists(specs: AssetSpecs,
