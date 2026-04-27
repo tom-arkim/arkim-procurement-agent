@@ -48,19 +48,24 @@ def get_tax_rate(site: str) -> float:
 # Dynamic Shipping Estimate
 # ---------------------------------------------------------------------------
 
-def estimate_shipping(option: SourcingOption) -> tuple[float, bool, str]:
+def estimate_shipping(option: SourcingOption,
+                      specs: "AssetSpecs" = None) -> tuple[float, bool, str]:
     """Return (shipping_cost_usd, is_ltl_freight, shipping_label).
 
-    Freight guard takes absolute priority — if the item is flagged as freight
-    (is_freight=True, HP>10, or weight>100 lbs), the cost is always 0.0 and the
-    label is always S.F.Q. / LTL Freight Required.  No flat-rate or page-extracted
-    fee can override this guard.
+    Freight guard takes absolute priority — if the item is classified LTL_freight,
+    flagged as freight (is_freight=True), or weighs >100 lbs, the cost is always
+    0.0 and the label is always S.F.Q. The flat-rate fallback is strictly unreachable
+    for any of these conditions.
 
     Priority order for non-freight items:
       1. Extracted page fee (0 = Free Shipping, >0 = stated fee).
       2. LLM-extracted shipping_terms token.
       3. Flat-rate fallback ($40 Local/Discovery; 5% min $15 Enterprise).
     """
+    # ── Magnitude guard: physical_magnitude classification takes first priority ─
+    if specs is not None and getattr(specs, "physical_magnitude", None) == "LTL_freight":
+        return (0.0, True, "S.F.Q.")
+
     # ── Weight guard: >100 lbs is always freight — checked before any other logic
     #    so no extracted fee or flat-rate fallback can override it.
     _weight = getattr(option, "weight_lbs", None)
@@ -184,7 +189,7 @@ def _build_arkim_quote(specs: AssetSpecs, option: SourcingOption,
                        site: str = "La Mirada") -> ArkimQuote:
     markup_pct                    = _markup_for(option)
     admin_fee                     = option.admin_fee
-    shipping_cost, is_ltl, s_label = estimate_shipping(option)
+    shipping_cost, is_ltl, s_label = estimate_shipping(option, specs)
     tax_rate                      = get_tax_rate(site)
 
     # Line-item sequence (shipping excluded from basis when LTL — unknown cost)

@@ -403,8 +403,12 @@ for _k, _v in _DEFAULTS.items():
 # LLM helpers — direct HTTP (no Anthropic SDK needed)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+_APP_EXTRACTION_MODEL = os.environ.get("OS_EXTRACTION_MODEL", "claude-haiku-4-5-20251001")
+_APP_VISION_MODEL     = os.environ.get("OS_VISION_MODEL",     "claude-sonnet-4-6")
+
+
 def _claude(system: str, user: str, api_key: str,
-            model: str = "claude-haiku-4-5-20251001",
+            model: str = _APP_EXTRACTION_MODEL,
             max_tokens: int = 1024) -> str:
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
@@ -479,7 +483,7 @@ def _claude_vision(image_bytes: bytes, media_type: str,
             "content-type": "application/json",
         },
         json={
-            "model": "claude-haiku-4-5-20251001",
+            "model": _APP_VISION_MODEL,
             "max_tokens": 1024,
             "messages": [{"role": "user", "content": [
                 {
@@ -552,8 +556,10 @@ def _execute_pipeline(specs, site: str,
             mode_label = "exact PN" if search_mode == "exact" else "exact + equivalents"
             st.write(f"🌐 **Sourcing** Grainger · McMaster-Carr · MSC ({src_label} · {mode_label})…")
 
+        st.write("📦 **Batching Snippets** — parsing vendor results…")
         options, _ = find_vendors(specs, site=site, force_refresh=force_refresh,
                                   search_mode=search_mode, workflow=workflow)
+        st.write("🔒 **Validating Magnitude** — applying freight & weight guards…")
         st.session_state.all_options = options
         st.session_state.rfq_draft   = None
         st.session_state.rfq_emails  = {}
@@ -587,7 +593,7 @@ def _execute_pipeline(specs, site: str,
             st.session_state.pipeline_error = None
         else:
             metric = "TCA" if workflow == "spare_parts" else "TLV"
-            st.write(f"📊 **Calculating** {metric} scores, shipping, tax, and Arkim markup…")
+            st.write(f"📊 **Calculating TLV** — purchase price + downtime risk + shipping + tax…")
             all_quotes, best = generate_arkim_quote(
                 specs, priced_options, site=site,
                 workflow=workflow, downtime_cost_per_day=downtime_cost_per_day,
@@ -1059,12 +1065,17 @@ def render_vendor_cards() -> None:
             if getattr(o, "match_type", "Exact") == "Alternative" else ""
         )
 
-        # Market confidence score chip
+        # Market confidence score chip + Verified Reliability badge
         _mcs = getattr(o, "market_confidence_score", None)
         _mcs_html = (
             f'<span class="chip" title="Market Confidence Score (web reliability data)" '
             f'style="font-size:.62rem;border-color:#58a6ff;color:#58a6ff;">MCS {_mcs:.0f}/10</span>'
             if _mcs is not None else ""
+        )
+        _reliability_html = (
+            '<span style="color:#3fb950;font-weight:700;">&#10003; Verified Reliability</span>'
+            if (_mcs is not None and _mcs > 8)
+            else f'Reliability: <b style="color:#c9d1d9;">{o.reliability_score:.0f}%</b>'
         )
 
         # Warranty chip
@@ -1106,7 +1117,7 @@ def render_vendor_cards() -> None:
               </div>
               <div style="font-size:.77rem;color:#8b949e;">
                 Lead: <b style="color:#c9d1d9;">{o.lead_time_days}d</b> &nbsp;&middot;&nbsp;
-                Reliability: <b style="color:#c9d1d9;">{o.reliability_score:.0f}%</b> &nbsp;&middot;&nbsp;
+                {_reliability_html} &nbsp;&middot;&nbsp;
                 {_score_html}
               </div>
               <div style="margin-top:.25rem;">{_mcs_html}{_wt_html}</div>

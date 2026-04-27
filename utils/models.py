@@ -30,6 +30,9 @@ class AssetSpecs:
     use_case: Optional[str] = None      # application context (e.g. "cooling water recirculation")
     duty_cycle: Optional[str] = None    # "Continuous" | "Intermittent" | "Standby"
     budget_max: Optional[str] = None    # maximum budget for CapEx requests
+    # Freight magnitude classification (set by vision extraction)
+    # "parcel" | "heavy_parcel" | "LTL_freight"
+    physical_magnitude: Optional[str] = None
 
 
 @dataclass

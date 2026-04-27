@@ -11,25 +11,27 @@ import requests
 from utils.models import AssetSpecs
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+_VISION_MODEL     = os.environ.get("OS_VISION_MODEL", "claude-sonnet-4-6")
 
 _SYSTEM = """You are an industrial equipment data extractor.
 Given raw nameplate text or a text description of industrial equipment, extract all specifications.
 
 Return ONLY valid JSON with these exact keys:
 {
-  "category":      "Part" or "Equipment",
-  "detected_type": string or null,
-  "manufacturer":  string or null,
-  "model":         string or null,
-  "part_number":   string or null,
-  "voltage":       string or null,
-  "phase":         string or null,
-  "hp":            string or null,
-  "serial_number": string or null,
-  "description":   string,
-  "gpm":           string or null,
-  "psi":           string or null,
-  "frame":         string or null
+  "category":           "Part" or "Equipment",
+  "detected_type":      string or null,
+  "manufacturer":       string or null,
+  "model":              string or null,
+  "part_number":        string or null,
+  "voltage":            string or null,
+  "phase":              string or null,
+  "hp":                 string or null,
+  "serial_number":      string or null,
+  "description":        string,
+  "gpm":                string or null,
+  "psi":                string or null,
+  "frame":              string or null,
+  "physical_magnitude": "parcel" | "heavy_parcel" | "LTL_freight"
 }
 
 Category rules:
@@ -52,6 +54,15 @@ Technical requirement rules:
 - Extract phase / gpm / psi / frame even when the brand is unknown or unreadable.
 - Set any field to null if not found — do not invent values.
 - For description: one concise line, e.g. "3 HP TEFC induction motor, 3-phase, 56C frame".
+
+physical_magnitude rules (shipping size classification — required, never null):
+- "LTL_freight"  : full Equipment (motor, pump, compressor, blower, conveyor) OR HP > 10
+                   OR weight clearly > 100 lbs — requires truck/freight shipment.
+- "heavy_parcel" : Equipment 1-10 HP, or Parts > ~30 lbs (large bearings, gearboxes,
+                   large VFDs, starters ≥ NEMA Size 4).
+- "parcel"       : small Parts — relays, sensors, small bearings, belts, seals,
+                   contactors, small VFDs/starters — ships standard ground.
+- When in doubt for Equipment, default to "LTL_freight".
 """
 
 
@@ -64,7 +75,7 @@ def _sonnet_extract(text: str) -> dict:
             "content-type": "application/json",
         },
         json={
-            "model": "claude-sonnet-4-6",
+            "model": _VISION_MODEL,
             "max_tokens": 600,
             "system": _SYSTEM,
             "messages": [{"role": "user", "content": text}],
@@ -97,6 +108,9 @@ def extract_specs(image_description: str) -> AssetSpecs:
             f"{d.get('manufacturer')} {d.get('model')} | PN: {d.get('part_number')} | "
             f"Phase: {d.get('phase')} | GPM: {d.get('gpm')} | PSI: {d.get('psi')}"
         )
+        mag = d.get("physical_magnitude", "")
+        if mag not in ("parcel", "heavy_parcel", "LTL_freight"):
+            mag = "LTL_freight" if cat == "Equipment" else "parcel"
         return AssetSpecs(
             manufacturer=d.get("manufacturer") or "Unknown",
             model=d.get("model") or "Unknown",
@@ -112,6 +126,7 @@ def extract_specs(image_description: str) -> AssetSpecs:
             frame=d.get("frame"),
             phase=d.get("phase"),
             detected_type=d.get("detected_type"),
+            physical_magnitude=mag,
         )
     except Exception as exc:
         print(f"[Vision] Sonnet call failed ({exc}) — using regex fallback")

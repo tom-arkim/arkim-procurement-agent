@@ -10,7 +10,7 @@ Tier 3        : Managed RFQ Outreach — per-vendor email drafts from Tier 2 con
 import os
 import json
 import re
-import hashlib
+import uuid
 import requests
 from typing import Optional
 
@@ -25,8 +25,9 @@ from utils.models import AssetSpecs, SourcingOption
 # Clients
 # ---------------------------------------------------------------------------
 
-TAVILY_API_KEY    = os.environ.get("TAVILY_API_KEY")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+TAVILY_API_KEY      = os.environ.get("TAVILY_API_KEY")
+ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY")
+_EXTRACTION_MODEL   = os.environ.get("OS_EXTRACTION_MODEL", "claude-haiku-4-5-20251001")
 
 _tavily = TavilyClient(api_key=TAVILY_API_KEY) if TAVILY_API_KEY else None
 
@@ -68,7 +69,7 @@ def _anthropic_complete(system: str, user: str) -> str:
             "content-type": "application/json",
         },
         json={
-            "model": "claude-haiku-4-5-20251001",
+            "model": _EXTRACTION_MODEL,
             "max_tokens": 1024,
             "system": system,
             "messages": [{"role": "user", "content": user}],
@@ -116,7 +117,15 @@ def _compute_suitability_score(specs, snippet: str, url: str,
       Authorized dist : 0-20 pts  (bonus for authorized distributor / service center)
       Direct URL      : 0-10 pts  (product page vs list/search page)
     """
-    s = (snippet or "").lower()
+    s       = (snippet or "").lower()
+    u_lower = url.lower()
+
+    # ── Guardrail 0: niche mismatch — hard 0.0 regardless of PN or other signals ──
+    dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
+    for equip_type, bad_terms in _NICHE_WRONG_TERMS.items():
+        if equip_type in dtype_lower:
+            if any(t in s or t in u_lower for t in bad_terms):
+                return 0.0
 
     # ── PN match (primary key) ──────────────────────────────────────────────
     searched_pn = (specs.part_number or "").upper().strip()
@@ -180,16 +189,6 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     if is_coll:
         total = min(total, 40)
 
-    # Guardrail 3: wrong-niche vendor — penalise -50 so cross-category shops
-    # (e.g. a hydraulics distributor returned for a motor search) rank near zero.
-    dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
-    u_lower     = url.lower()
-    for equip_type, bad_terms in _NICHE_WRONG_TERMS.items():
-        if equip_type in dtype_lower:
-            if any(t in s or t in u_lower for t in bad_terms):
-                total -= 50
-                break
-
     return min(100.0, max(0.0, round(float(total), 1)))
 
 
@@ -202,9 +201,21 @@ def _partner_status(vendor_name: str, suitability: float) -> str:
     return ""
 
 
+# Per-vendor UUID4 tokens — stable within a session; production: load/persist from DB.
+_VENDOR_TOKENS: dict[str, str] = {}
+
+
+def _get_vendor_token(vendor_name: str) -> str:
+    """Return a stable UUID4 token for this vendor, creating one on first access."""
+    key = vendor_name.lower()
+    if key not in _VENDOR_TOKENS:
+        _VENDOR_TOKENS[key] = str(uuid.uuid4())
+    return _VENDOR_TOKENS[key]
+
+
 def _onboarding_url(vendor_name: str, specs) -> str:
-    """Generate a deterministic partner onboarding link for this vendor."""
-    token = hashlib.sha256(vendor_name.lower().encode()).hexdigest()[:16]
+    """Generate a partner onboarding link using a random UUID4 token (not vendor-name-derived)."""
+    token = _get_vendor_token(vendor_name)
     slug  = re.sub(r"[^a-z0-9]+", "-", vendor_name.lower()).strip("-")
     rfq   = re.sub(r"[^a-z0-9]+", "-", (specs.part_number or "rfq").lower())
     return f"https://partners.arkim.ai/claim?v={slug}&t={token}&rfq={rfq}"
@@ -279,11 +290,12 @@ def _build_search_query(specs: AssetSpecs, search_mode: str = "exact") -> str:
                 parts.append(f'"{pn}"')
             elif known:
                 parts.append(f"{specs.manufacturer} {specs.model}")
-            # Competitor brands — surfaces "Add to Cart" alternatives on open web
+            # Boolean OR competitor group — explicit operator for search precision
             desc_lower = (desc or specs.model or "").lower()
             for equip_type, competitors in _EQUIP_COMPETITORS.items():
                 if equip_type in desc_lower:
-                    parts.append(competitors)
+                    brands = competitors.split()
+                    parts.append(f"({' OR '.join(brands)})")
                     break
             if known:
                 parts.append(f"OR equivalent to {specs.manufacturer} {specs.model}")
@@ -338,7 +350,9 @@ def _search_vendor_prices(specs: AssetSpecs, search_mode: str = "exact") -> list
 _PARSE_SYSTEM = """You are a procurement data extractor for industrial parts and equipment.
 Given web search result snippets, extract pricing and shipping information.
 
+Input snippets are wrapped in <snippet id="N"> tags.
 Return ONLY valid JSON — a list of objects with these exact keys:
+  original_snippet_id : integer — the id attribute of the <snippet> tag this item was extracted from
   vendor            : string — normalize to one of: "Grainger", "McMaster-Carr", "MSC Industrial",
                       "Motion Industries", "Applied Industrial", "Pumpman", "Pump Products",
                       "Pump Catalog", "Zoro", "Global Industrial", "Fastenal",
@@ -382,103 +396,116 @@ def _llm_parse_results(specs: AssetSpecs, results: list[dict]) -> list[dict]:
         return []
 
     if not ANTHROPIC_API_KEY:
-        print("[Sourcing] No Anthropic API key — using regex fallback.")
-        return _regex_fallback_parse(results)
+        print("[Sourcing] No Anthropic API key — cannot parse results.")
+        return []
 
-    snippets = []
-    for r in results:
-        snippets.append(
-            f"URL: {r.get('url', '')}\n"
-            f"Title: {r.get('title', '')}\n"
-            f"Snippet: {r.get('content', '')}\n"
+    _BATCH_SIZE = 5
+    all_items: list[dict] = []
+
+    for batch_num, batch_start in enumerate(range(0, len(results), _BATCH_SIZE)):
+        batch = results[batch_start:batch_start + _BATCH_SIZE]
+        # Wrap each snippet in XML tags for source-traceability
+        snippets_xml = ""
+        for local_i, r in enumerate(batch):
+            gid = batch_start + local_i
+            snippets_xml += (
+                f'<snippet id="{gid}">\n'
+                f'URL: {r.get("url", "")}\n'
+                f'Title: {r.get("title", "")}\n'
+                f'Content: {r.get("content", "")}\n'
+                f'</snippet>\n\n'
+            )
+        user_msg = (
+            f"Part being searched: {specs.manufacturer} {specs.model} — {specs.part_number}\n\n"
+            + snippets_xml.strip()
         )
+        print(f"[Sourcing] Parsing batch {batch_num + 1} ({len(batch)} snippets)…")
+        try:
+            raw = _anthropic_complete(_PARSE_SYSTEM, user_msg)
+            m = re.search(r"\[.*\]", raw, re.DOTALL)
+            if not m:
+                print(f"[Sourcing] Batch {batch_num + 1}: no JSON array in response")
+                continue
+            items = json.loads(m.group(0))
+            if isinstance(items, list):
+                all_items.extend(items)
+        except Exception as exc:
+            print(f"[Sourcing] Batch {batch_num + 1} parse error: {exc}")
 
-    user_msg = (
-        f"Part being searched: {specs.manufacturer} {specs.model} — {specs.part_number}\n\n"
-        + "\n---\n".join(snippets)
-    )
-
-    try:
-        raw = _anthropic_complete(_PARSE_SYSTEM, user_msg)
-        match = re.search(r"\[.*\]", raw, re.DOTALL)
-        if not match:
-            raise ValueError("No JSON array in LLM response")
-        parsed = json.loads(match.group(0))
-        items = parsed if isinstance(parsed, list) else []
-        print(f"[Sourcing] LLM extracted {len(items)} price(s) from {len(results)} snippets")
-        return items
-    except Exception as exc:
-        print(f"[Sourcing] LLM parse error: {exc} — falling back to regex")
-        return _regex_fallback_parse(results)
+    print(f"[Sourcing] LLM extracted {len(all_items)} entries from {len(results)} snippets")
+    return all_items
 
 
-def _apply_price_sanity(items: list[dict]) -> list[dict]:
+def _apply_price_sanity(items: list[dict],
+                        specs: "AssetSpecs" = None) -> list[dict]:
     """Strip prices that are >70% below the peer average — likely hallucinations.
 
-    Flagged items become price_tbd=True (Inquiry Required) and are marked with
-    price_sanity_flagged=True so _call_enterprise_api can zero their suitability score.
-    Requires at least 2 priced results to have enough context.
+    Single-price case: fetch a Tavily market-reference query first; only accept
+    the price if it is within 70% of the reference average.
+    Multi-price case: compare within the peer set (existing logic).
+    Flagged items → price stripped, price_sanity_flagged=True, suitability zeroed later.
     """
     prices = [float(it["price"]) for it in items
               if it.get("price") is not None and float(it.get("price", 0)) > 0]
-    if len(prices) < 2:
+
+    if len(prices) == 0:
         return items
 
+    if len(prices) == 1 and specs is not None and _tavily:
+        # Single price — validate against a quick market reference search
+        ref_q = (f"{specs.manufacturer} {specs.model} {specs.part_number} "
+                 f"price market distributor").strip()
+        print(f"[Sourcing] Single-price market reference lookup: {ref_q!r}")
+        try:
+            resp = _tavily.search(query=ref_q, search_depth="basic", max_results=3)
+            ref_prices: list[float] = []
+            for r in resp.get("results", []):
+                text = r.get("title", "") + " " + r.get("content", "")
+                for m in re.finditer(r"\$\s*([\d,]+(?:\.\d{2})?)", text):
+                    p = float(m.group(1).replace(",", ""))
+                    if p > 10:
+                        ref_prices.append(p)
+            if ref_prices:
+                ref_avg   = sum(ref_prices) / len(ref_prices)
+                threshold = ref_avg * 0.30
+                if prices[0] < threshold:
+                    for item in items:
+                        p = item.get("price")
+                        if p is not None and float(p) > 0:
+                            print(f"[Sourcing] Single-price sanity FAIL: "
+                                  f"{item.get('vendor','?')} @ ${float(p):.2f} "
+                                  f"vs market ref ${ref_avg:.2f} — stripping price")
+                            item["price"]                = None
+                            item["price_sanity_flagged"] = True
+        except Exception as exc:
+            print(f"[Sourcing] Market reference lookup error: {exc}")
+        return items
+
+    # Multi-price: peer comparison
     avg       = sum(prices) / len(prices)
-    threshold = avg * 0.30   # 70% below average = less than 30% of average
+    threshold = avg * 0.30
 
     for item in items:
         p = item.get("price")
         if p is not None and float(p) > 0 and float(p) < threshold:
             print(f"[Sourcing] Price sanity FAIL: {item.get('vendor','?')} "
                   f"@ ${float(p):.2f} vs peer avg ${avg:.2f} — stripping price")
-            item["price"]               = None
+            item["price"]                = None
             item["price_sanity_flagged"] = True
     return items
 
 
-def _regex_fallback_parse(results: list[dict]) -> list[dict]:
-    """Simple regex price extraction when LLM is unavailable."""
-    extracted = []
-    vendor_map = {
-        "grainger.com":          "Grainger",
-        "mcmaster.com":          "McMaster-Carr",
-        "mscdirect.com":         "MSC Industrial",
-        "motionindustries.com":  "Motion Industries",
-        "applied.com":           "Applied Industrial",
-        "pumpman.com":           "Pumpman",
-        "pumpproducts.com":      "Pump Products",
-        "pumpcatalog.com":       "Pump Catalog",
-        "zoro.com":              "Zoro",
-        "globalindustrial.com":  "Global Industrial",
-        "fastenal.com":          "Fastenal",
-    }
-    for r in results:
-        url    = r.get("url", "")
-        vendor = next((v for k, v in vendor_map.items() if k in url), None)
-        if not vendor or not url:
-            continue
-        text = r.get("title", "") + " " + r.get("content", "")
-        m = re.search(r"\$\s*([\d,]+(?:\.\d{2})?)", text)
-        price = float(m.group(1).replace(",", "")) if m else None
-        extracted.append({"vendor": vendor, "price": price, "lead_days": 5, "url": url})
-    return extracted
+
+# Reliability by merchant tier — no per-vendor hardcoding; MCS refines at quote time.
+_MERCHANT_RELIABILITY: dict[str, float] = {
+    "Enterprise":           90.0,
+    "National Specialist":  82.0,
+    "Direct Buy via Arkim": 78.0,
+}
 
 
-def _vendor_reliability(vendor_name: str) -> float:
-    return {
-        "Grainger":            95.0,
-        "McMaster-Carr":       92.0,
-        "MSC Industrial":      88.0,
-        "Motion Industries":   87.0,
-        "Applied Industrial":  86.0,
-        "Pumpman":             83.0,
-        "Pump Products":       82.0,
-        "Pump Catalog":        80.0,
-        "Zoro":                80.0,
-        "Global Industrial":   79.0,
-        "Fastenal":            85.0,
-    }.get(vendor_name, 78.0)
+def _base_reliability(merchant_type: str) -> float:
+    return _MERCHANT_RELIABILITY.get(merchant_type, 78.0)
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +574,9 @@ def _fetch_market_confidence(specs: AssetSpecs) -> Optional[float]:
 
 
 def _is_heavy_item(specs: AssetSpecs, weight_lbs: Optional[float] = None) -> bool:
-    """True if the item requires LTL freight: >100 lbs, >10 HP, or is a large Equipment category."""
+    """True if the item requires LTL freight: LTL_freight magnitude, >100 lbs, >10 HP, or large Equipment."""
+    if getattr(specs, "physical_magnitude", None) == "LTL_freight":
+        return True
     if weight_lbs is not None and weight_lbs > 100:
         return True
     if specs.category == "Equipment" and any(
@@ -589,7 +618,7 @@ def _call_enterprise_api(specs: AssetSpecs,
                 vendor_name=vendor_name,
                 base_price=float(data["price"]),
                 lead_time_days=int(data.get("lead_days") or 5),
-                reliability_score=_vendor_reliability(vendor_name),
+                reliability_score=_base_reliability(_vendor_merchant_type(vendor_name)),
                 merchant_type=_vendor_merchant_type(vendor_name),
                 requires_rfq=False,
                 notes=f"{label} Price — fetched {fetched}",
@@ -604,7 +633,7 @@ def _call_enterprise_api(specs: AssetSpecs,
     if missing:
         print(f"[Sourcing] Tavily search for: {missing}")
         results = _search_vendor_prices(specs, search_mode=search_mode)
-        parsed  = _apply_price_sanity(_llm_parse_results(specs, results))
+        parsed  = _apply_price_sanity(_llm_parse_results(specs, results), specs)
         # URL → raw snippet map for suitability scoring
         snippet_map = {
             r.get("url", ""): (r.get("title", "") + " " + r.get("content", "")).strip()
@@ -689,7 +718,7 @@ def _call_enterprise_api(specs: AssetSpecs,
 
             _common = dict(
                 lead_time_days=int(lead),
-                reliability_score=_vendor_reliability(vendor),
+                reliability_score=_base_reliability(merchant_type),
                 merchant_type=merchant_type,
                 source_url=url,
                 extracted_shipping_fee=float(ship_fee) if ship_fee is not None else None,
