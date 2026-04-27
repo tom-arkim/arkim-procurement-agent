@@ -747,6 +747,7 @@ def specs_from_image(image_bytes: bytes, filename: str, api_key: str):
             frame=d.get("frame"),
             phase=d.get("phase"),
             detected_type=d.get("detected_type"),
+            rpm=d.get("rpm"),
         )
     from utils.vision import extract_specs
     return extract_specs(filename)
@@ -775,6 +776,7 @@ def specs_from_classification(classified: dict):
             frame=classified.get("frame"),
             phase=classified.get("phase"),
             detected_type=classified.get("detected_type"),
+            rpm=classified.get("rpm"),
         )
     from utils.vision import extract_specs
     return extract_specs(str(classified))
@@ -799,6 +801,9 @@ def _missing_critical_specs(specs) -> list[str]:
         ])
         if not has_perf:
             missing.append("at least one performance spec (HP, GPM, PSI, or Frame)")
+    # Motor-specific: flag missing Frame + RPM together (needed for equivalence search)
+    if getattr(specs, "missing_critical_specs", False):
+        missing.append("Frame size and RPM (required for motor equivalence matching)")
     return missing
 
 
@@ -827,6 +832,7 @@ def _build_context() -> str:
             f"{s.gpm} GPM" if getattr(s,"gpm",None) else None,
             f"{s.psi} PSI" if getattr(s,"psi",None) else None,
             f"Frame {s.frame}" if getattr(s,"frame",None) else None,
+            getattr(s,"rpm",None) if getattr(s,"rpm",None) else None,
         ]))
         lines.append(f"Current {cat}: {s.manufacturer} {s.model} ({s.part_number}) | {tech}")
     lines.append(
@@ -1933,10 +1939,35 @@ elif active_tab == "📋 History & Drafts":
           <div class="es-body">No sourcing history yet. Run the pipeline for a part and it will appear here automatically.</div>
         </div>""", unsafe_allow_html=True)
     else:
+        from datetime import timedelta as _td
         for i, d in enumerate(st.session_state.sourcing_history):
             best    = d["all_quotes"][0] if d["all_quotes"] else None
             d_wf    = d.get("workflow", "spare_parts")
             _wf_tag = {"spare_parts": "OpEx", "replacement": "Replacement", "capex": "CapEx"}.get(d_wf, d_wf)
+
+            # Check if any option in this run has warranty expiring within 60 days
+            _hist_expiring = False
+            for _ho in d.get("all_options", []):
+                _hwt = getattr(_ho, "warranty_terms", None)
+                if _hwt:
+                    _hm = _parse_warranty_months(_hwt)
+                    # Use saved_at date as purchase proxy
+                    try:
+                        _hdt  = _dt.strptime(d["saved_at"][:10], "%Y-%m-%d")
+                        _hexp = _hdt + _td(days=(_hm or 0) * 30.44)
+                        if 0 < (_hexp - _dt.now()).days <= 60:
+                            _hist_expiring = True
+                            break
+                    except Exception:
+                        pass
+
+            _expiry_badge = (
+                ' &nbsp;<span style="background:rgba(210,153,34,.15);border:1px solid '
+                'rgba(210,153,34,.5);border-radius:4px;padding:.1rem .35rem;font-size:.64rem;'
+                'color:#d29922;">&#9888; Warranty Expiring</span>'
+                if _hist_expiring else ""
+            )
+
             dc1, dc2 = st.columns([5, 1])
             with dc1:
                 if best:
@@ -1948,7 +1979,7 @@ elif active_tab == "📋 History & Drafts":
                     price_txt = ""
                 st.markdown(f"""
                 <div class="draft-card">
-                  <div style="font-size:.92rem;font-weight:700;color:#e6edf3;">{d['label']}</div>
+                  <div style="font-size:.92rem;font-weight:700;color:#e6edf3;">{d['label']}{_expiry_badge}</div>
                   <div style="font-size:.76rem;color:#8b949e;margin-top:.2rem;">
                     Site: {d['site']} &nbsp;&middot;&nbsp;
                     Workflow: <b style="color:#c9d1d9;">{_wf_tag}</b> &nbsp;&middot;&nbsp;
@@ -2050,7 +2081,12 @@ elif active_tab == "📋 History & Drafts":
             return "Unknown"
         from datetime import timedelta
         expiry = accepted_dt + timedelta(days=months * 30.44)
-        return "Active" if expiry > _dt.now() else "Expired"
+        now    = _dt.now()
+        if expiry <= now:
+            return "Expired"
+        if (expiry - now).days <= 60:
+            return "Expiring Soon"
+        return "Active"
 
     # Collect warranty data from accepted orders + options
     _w_rows = []
@@ -2097,12 +2133,16 @@ elif active_tab == "📋 History & Drafts":
     if _all_warranties:
         _wdf = pd.DataFrame(_all_warranties)
 
-        def _cov_color(v: str) -> str:
-            if v == "Active":
-                return "color: #3fb950; font-weight: 700"
-            if v == "Expired":
-                return "color: #f85149; font-weight: 700"
-            return "color: #8b949e"
+        # Proactive expiry alert
+        _expiring = [r for r in _all_warranties if r.get("Coverage") == "Expiring Soon"]
+        if _expiring:
+            _exp_names = ", ".join(r["Asset"] for r in _expiring)
+            st.markdown(
+                f'<div style="background:rgba(210,153,34,.12);border:1px solid rgba(210,153,34,.4);'
+                f'border-radius:6px;padding:.45rem .75rem;font-size:.78rem;color:#d29922;margin-bottom:.6rem;">'
+                f'&#9888; <b>Warranty expiring within 60 days:</b> {_exp_names}</div>',
+                unsafe_allow_html=True,
+            )
 
         st.dataframe(
             _wdf,

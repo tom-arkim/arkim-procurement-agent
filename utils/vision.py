@@ -26,6 +26,7 @@ Return ONLY valid JSON with these exact keys:
   "voltage":            string or null,
   "phase":              string or null,
   "hp":                 string or null,
+  "rpm":                string or null,
   "serial_number":      string or null,
   "description":        string,
   "gpm":                string or null,
@@ -51,18 +52,19 @@ Technical requirement rules:
 - gpm   : flow rate in gallons per minute (pumps). Include unit, e.g. "45 GPM".
 - psi   : pressure rating (pumps, compressors). Include unit, e.g. "175 PSI".
 - frame : NEMA frame designation, e.g. "56C", "182T", "213T".
-- Extract phase / gpm / psi / frame even when the brand is unknown or unreadable.
+- rpm   : motor shaft speed, e.g. "1750 RPM", "3450 RPM". Motors only; null for pumps/parts.
+- Extract phase / gpm / psi / frame / rpm even when the brand is unknown or unreadable.
 - Set any field to null if not found — do not invent values.
-- For description: one concise line, e.g. "3 HP TEFC induction motor, 3-phase, 56C frame".
+- For description: one concise line, e.g. "3 HP TEFC induction motor, 3-phase, 56C frame, 1750 RPM".
 
 physical_magnitude rules (shipping size classification — required, never null):
-- "LTL_freight"  : full Equipment (motor, pump, compressor, blower, conveyor) OR HP > 10
+- "LTL_freight"  : Motor > 10 HP, OR Pump > 15 HP, OR compressor/blower/conveyor of any size,
                    OR weight clearly > 100 lbs — requires truck/freight shipment.
-- "heavy_parcel" : Equipment 1-10 HP, or Parts > ~30 lbs (large bearings, gearboxes,
-                   large VFDs, starters ≥ NEMA Size 4).
+- "heavy_parcel" : Motor 1-10 HP, or Pump ≤ 15 HP, or Parts > ~30 lbs (large bearings,
+                   gearboxes, large VFDs, starters ≥ NEMA Size 4).
 - "parcel"       : small Parts — relays, sensors, small bearings, belts, seals,
                    contactors, small VFDs/starters — ships standard ground.
-- When in doubt for Equipment, default to "LTL_freight".
+- When in doubt for a motor or pump with unknown HP, default to "LTL_freight".
 """
 
 
@@ -111,6 +113,20 @@ def extract_specs(image_description: str) -> AssetSpecs:
         mag = d.get("physical_magnitude", "")
         if mag not in ("parcel", "heavy_parcel", "LTL_freight"):
             mag = "LTL_freight" if cat == "Equipment" else "parcel"
+
+        rpm_val   = d.get("rpm")
+        frame_val = d.get("frame")
+        dtype_str = (d.get("detected_type") or "").lower()
+
+        # Flag motors missing both Frame and RPM — these are critical for equivalence search
+        _null_vals = {None, "", "null", "N/A", "Unknown"}
+        missing_crit = (
+            cat == "Equipment"
+            and "motor" in dtype_str
+            and (frame_val in _null_vals)
+            and (rpm_val in _null_vals)
+        )
+
         return AssetSpecs(
             manufacturer=d.get("manufacturer") or "Unknown",
             model=d.get("model") or "Unknown",
@@ -123,10 +139,12 @@ def extract_specs(image_description: str) -> AssetSpecs:
             raw_text=image_description,
             gpm=d.get("gpm"),
             psi=d.get("psi"),
-            frame=d.get("frame"),
+            frame=frame_val,
             phase=d.get("phase"),
             detected_type=d.get("detected_type"),
             physical_magnitude=mag,
+            rpm=rpm_val,
+            missing_critical_specs=missing_crit,
         )
     except Exception as exc:
         print(f"[Vision] Sonnet call failed ({exc}) — using regex fallback")

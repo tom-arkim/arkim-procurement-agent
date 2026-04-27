@@ -120,11 +120,15 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     s       = (snippet or "").lower()
     u_lower = url.lower()
 
-    # ── Guardrail 0: niche mismatch — hard 0.0 regardless of PN or other signals ──
+    # ── Guardrail 0: niche mismatch — hard 0.0 when ≥2 wrong-category terms appear ──
+    # A single cross-category term can appear in generic distributor snippets; requiring
+    # at least 2 distinct hits avoids false positives while still eliminating pure
+    # hydraulics/HVAC/plumbing shops returned for motor or pump searches.
     dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
     for equip_type, bad_terms in _NICHE_WRONG_TERMS.items():
         if equip_type in dtype_lower:
-            if any(t in s or t in u_lower for t in bad_terms):
+            hit_count = sum(1 for t in bad_terms if t in s or t in u_lower)
+            if hit_count >= 2:
                 return 0.0
 
     # ── PN match (primary key) ──────────────────────────────────────────────
@@ -184,10 +188,10 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     if pn_pts == 0:
         total = min(total, 45)
 
-    # Guardrail 2: collection/catalog URL → hard cap at 40 (prevents catalog links
-    #              from ranking as direct product matches regardless of other signals)
+    # Guardrail 2: collection/catalog URL → hard cap at 15 and treated as Alternative
+    # (prevents category/search pages from ranking as direct product matches)
     if is_coll:
-        total = min(total, 40)
+        total = min(total, 15)
 
     return min(100.0, max(0.0, round(float(total), 1)))
 

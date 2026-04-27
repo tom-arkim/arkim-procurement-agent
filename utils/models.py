@@ -33,6 +33,10 @@ class AssetSpecs:
     # Freight magnitude classification (set by vision extraction)
     # "parcel" | "heavy_parcel" | "LTL_freight"
     physical_magnitude: Optional[str] = None
+    # Motor-specific specs (extracted by vision module)
+    rpm: Optional[str] = None
+    # True when critical specs (Frame + RPM) are absent for a motor — triggers chat pause
+    missing_critical_specs: bool = False
 
 
 @dataclass
