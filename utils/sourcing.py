@@ -131,6 +131,15 @@ def _compute_suitability_score(specs, snippet: str, url: str,
             if hit_count >= 2:
                 return 0.0
 
+    # ── Guardrail 0b: motor-without-electric verification ──────────────────────
+    # Snippets that mention pump/hydraulic but NEVER mention motor/electric are
+    # wrong-niche pages (e.g. Hydradyne returned for an electric motor search).
+    if "motor" in dtype_lower:
+        has_motor_signal  = "motor" in s or "electric" in s
+        has_wrong_signal  = "pump" in s or "hydraulic" in s
+        if has_wrong_signal and not has_motor_signal:
+            return 0.0
+
     # ── PN match (primary key) ──────────────────────────────────────────────
     searched_pn = (specs.part_number or "").upper().strip()
     found_upper = (found_pn or "").upper().strip()
@@ -188,10 +197,10 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     if pn_pts == 0:
         total = min(total, 45)
 
-    # Guardrail 2: collection/catalog URL → hard cap at 15 and treated as Alternative
-    # (prevents category/search pages from ranking as direct product matches)
+    # Guardrail 2: collection/catalog URL → hard cap at 5 — landing pages without a
+    # specific product match cannot confirm price or availability; rank near zero.
     if is_coll:
-        total = min(total, 15)
+        total = min(total, 5)
 
     return min(100.0, max(0.0, round(float(total), 1)))
 
@@ -303,6 +312,8 @@ def _build_search_query(specs: AssetSpecs, search_mode: str = "exact") -> str:
                     break
             if known:
                 parts.append(f"OR equivalent to {specs.manufacturer} {specs.model}")
+            # Cross-reference / interchange terms surface aftermarket parts and OEM alternates
+            parts.append('(OR "cross-reference" OR "interchange" OR "drop-in replacement")')
         else:
             # Exact mode: include the specific PN in quotes
             pn = specs.part_number
@@ -664,11 +675,19 @@ def _call_enterprise_api(specs: AssetSpecs,
             heavy         = _is_heavy_item(specs, weight_lbs)
             is_freight    = bool(item.get("is_freight", False)) or (heavy and ship_fee is None and price is not None)
 
-            # Cross-reference: if found PN is present and differs from searched PN → Alternative
+            # Assign granular match tier:
+            #   Exact OEM           — found PN matches searched PN exactly
+            #   Aftermarket Compatible — different PN found (cross-reference / alternate brand)
+            #   Functional Alternative — no PN confirmed (spec-based match only)
             searched_pn = (specs.part_number or "").upper().strip()
             if found_pn and searched_pn and found_pn.upper().strip() != searched_pn:
                 exact_match = False
-            match_type = "Exact" if exact_match else "Alternative"
+            if exact_match:
+                match_type = "Exact OEM"
+            elif found_pn:
+                match_type = "Aftermarket Compatible"   # different PN confirmed in snippet
+            else:
+                match_type = "Functional Alternative"   # no PN to compare
 
             # Freight label: use extracted shipping_terms if present, else infer from flags
             if ship_fee is not None and ship_fee == 0:
@@ -686,12 +705,12 @@ def _call_enterprise_api(specs: AssetSpecs,
                 continue
             seen.add(vendor)
 
-            # Collection/search page — low-reliability: flag as Alternative, lower trust
+            # Collection/search page — cannot confirm product; demote to Functional Alternative
             is_coll = _is_collection_url(url)
             if is_coll:
                 exact_match = False
-                match_type  = "Alternative"
-                print(f"[Sourcing] Collection page detected — flagging as Alt: {url}")
+                match_type  = "Functional Alternative"
+                print(f"[Sourcing] Collection page detected — flagging as Functional Alternative: {url}")
 
             # Heavy items with no explicit shipping → always S.F.Q., never flat-rate
             if heavy and resolved_terms is None and ship_fee is None:
@@ -701,7 +720,7 @@ def _call_enterprise_api(specs: AssetSpecs,
             merchant_type = _vendor_merchant_type(vendor)
             fn_tag   = f" [Found: {found_pn}]" if found_pn else ""
             coll_tag = " [LIST PAGE]" if is_coll else ""
-            tag      = ("" if match_type == "Exact" else " [Alt]") + (" [LTL]" if is_freight else "") + fn_tag + coll_tag
+            tag      = ("" if match_type == "Exact OEM" else f" [{match_type}]") + (" [LTL]" if is_freight else "") + fn_tag + coll_tag
 
             # PN Enforcement: no verified part number → cannot confirm product identity
             # → demote to Inquiry Required regardless of stated price.
@@ -812,29 +831,41 @@ _TIER2_NICHE_TERMS: dict[str, str] = {
 def _build_tier2_query(specs: AssetSpecs) -> str:
     """Build an asset-specific national specialist discovery query.
 
-    Uses detected_type to inject niche vocabulary so Tier 2 results are
-    specialists (e.g. motor service centers) rather than generalist shops.
+    Uses explicit boolean AND/OR operators so Tavily surfaces authorized
+    distributors and service centers rather than generic industrial shops.
+    Format: (authorized OR distributor OR "service center") AND "<type>" AND "<mfg>" AND "<spec>"
     """
     detected = (getattr(specs, "detected_type", None) or "").lower()
     desc     = (specs.description or "").lower()
     ctx      = detected or desc or ""
 
-    # Match asset type → niche search terms
-    niche = ""
-    for equip_type, terms in _TIER2_NICHE_TERMS.items():
+    # Determine the primary niche term (quoted for precision)
+    niche_term = None
+    for equip_type in _TIER2_NICHE_TERMS:
         if equip_type in ctx:
-            niche = terms
+            niche_term = equip_type
             break
+    if not niche_term:
+        niche_term = (getattr(specs, "detected_type", None) or specs.description or "industrial equipment")
 
-    if not niche:
-        equip_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
-        niche = f"{equip_term} distributor USA buy online"
+    # Build boolean AND chain
+    known_mfg = specs.manufacturer not in ("Unknown", "N/A", "null", None)
+    parts = [
+        '(authorized OR distributor OR "service center")',
+        f'"{niche_term}"',
+    ]
+    if known_mfg:
+        parts.append(f'"{specs.manufacturer}"')
 
-    known = (specs.manufacturer not in ("Unknown", "N/A", "null") and
-             specs.model        not in ("Unknown", "N/A", "null"))
-    suffix = f"{specs.manufacturer} {specs.model} equivalent" if known else ""
+    # Inject primary performance spec (HP for motors, GPM for pumps, PSI for compressors)
+    if specs.hp and specs.hp not in ("N/A", "None", "null"):
+        hp_val = re.sub(r"\s+", "", specs.hp).upper()
+        parts.append(f'"{hp_val}"')
+    elif getattr(specs, "gpm", None):
+        gpm_val = re.sub(r"\s+", "", specs.gpm).upper()
+        parts.append(f'"{gpm_val}"')
 
-    return f"{niche} USA {suffix}".strip()
+    return " AND ".join(parts)
 
 
 def _discover_national_specialists(specs: AssetSpecs,

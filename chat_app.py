@@ -57,6 +57,8 @@ st.markdown("""
   .chip-g { border-color: #3fb950; color: #3fb950; }
   .chip-r { border-color: #f85149; color: #f85149; }
   .chip-a { border-color: #d29922; color: #d29922; }
+  .chip-p { border-color: #a855f7; color: #a855f7; }  /* purple — Aftermarket Savings */
+  .chip-o { border-color: #fb923c; color: #fb923c; }  /* orange — Alternative Brand */
   /* ── Metrics ── */
   .price-xl  { font-size: 2rem;   font-weight: 800; color: #3fb950; line-height: 1.1; }
   .tca-xl    { font-size: 2.4rem; font-weight: 800; color: #58a6ff; line-height: 1.1; }
@@ -539,22 +541,22 @@ def _execute_pipeline(specs, site: str,
         "capex":        "New Equipment (CapEx) — Proposal Requests",
     }
     with st.status(f"Running Arkim Pipeline · {wf_labels.get(workflow, workflow)}…", expanded=True) as status:
-        st.write("🔍 **Scanning** internal inventory…")
+        st.write("🗂 **Checking AVL (Approved Vendor List) and Internal Stock**…")
         hit, location, _ = check_internal(specs)
         st.session_state.inventory_hit      = hit
         st.session_state.inventory_location = location
         st.write(
-            f"✅ In-stock at **{location}** — will compare"
+            f"✅ In-stock at **{location}** (AVL) — will compare vs external"
             if hit else
-            "❌ Not in inventory — proceeding to external sourcing"
+            "❌ Not in AVL / internal stock — proceeding to specialist sourcing"
         )
 
         if workflow == "capex":
-            st.write("📋 **CapEx Mode** — skipping Tier 1/2 price search, discovering specialist vendors…")
+            st.write("📋 **CapEx Mode** — discovering specialist vendors and authorized distributors…")
         else:
             src_label  = "fetching fresh prices" if force_refresh else "checking price DB first"
-            mode_label = "exact PN" if search_mode == "exact" else "exact + equivalents"
-            st.write(f"🌐 **Sourcing** Grainger · McMaster-Carr · MSC ({src_label} · {mode_label})…")
+            mode_label = "exact PN" if search_mode == "exact" else "exact + equivalents + cross-reference"
+            st.write(f"🌐 **Sourcing specialized distributors and authorized service centers** ({src_label} · {mode_label})…")
 
         st.write("📦 **Batching Snippets** — parsing vendor results…")
         options, _ = find_vendors(specs, site=site, force_refresh=force_refresh,
@@ -1066,10 +1068,13 @@ def render_vendor_cards() -> None:
             if mt not in ("Enterprise",) else ""
         )
 
-        alt_badge = (
-            '<span class="chip chip-a" style="font-size:.62rem;letter-spacing:.03em;">ALT RECOMMENDATION</span>'
-            if getattr(o, "match_type", "Exact") == "Alternative" else ""
-        )
+        _mt = getattr(o, "match_type", "Exact OEM")
+        if _mt == "Aftermarket Compatible":
+            alt_badge = '<span class="chip chip-p" style="font-size:.62rem;letter-spacing:.03em;">&#9733; Aftermarket Savings</span>'
+        elif _mt == "Functional Alternative":
+            alt_badge = '<span class="chip chip-o" style="font-size:.62rem;letter-spacing:.03em;">&#8645; Alternative Brand</span>'
+        else:
+            alt_badge = ""
 
         # Market confidence score chip + Verified Reliability badge
         _mcs = getattr(o, "market_confidence_score", None)
@@ -1175,13 +1180,69 @@ def render_vendor_cards() -> None:
               </table>
             </div>""", unsafe_allow_html=True)
 
+        # ── Spec Comparison Table (non-OEM matches only) ─────────────────────
+        _is_non_oem = _mt in ("Aftermarket Compatible", "Functional Alternative")
+        if _is_non_oem and st.session_state.specs:
+            _orig = st.session_state.specs
+            _found_pn_disp = getattr(o, "found_part_number", None) or "—"
+            _orig_rows = [
+                ("Manufacturer",  _orig.manufacturer),
+                ("Model / PN",    f"{_orig.model} / {_orig.part_number}"),
+                ("Voltage",       _orig.voltage or "—"),
+                ("Phase",         getattr(_orig, "phase", None) or "—"),
+                ("HP",            _orig.hp or "—"),
+                ("Frame",         getattr(_orig, "frame", None) or "—"),
+                ("RPM",           getattr(_orig, "rpm", None) or "—"),
+                ("GPM",           getattr(_orig, "gpm", None) or "—"),
+                ("PSI",           getattr(_orig, "psi", None) or "—"),
+            ]
+            rows_html = "".join(
+                f'<tr>'
+                f'<td style="color:#8b949e;font-size:.72rem;padding:.1rem .4rem;">{lbl}</td>'
+                f'<td style="font-size:.72rem;padding:.1rem .4rem;color:#c9d1d9;">{val}</td>'
+                f'<td style="font-size:.72rem;padding:.1rem .4rem;color:#d29922;">{'?' if val == '—' else '✓'}</td>'
+                f'</tr>'
+                for lbl, val in _orig_rows
+            )
+            with col_info:
+                st.markdown(f"""
+                <div style="margin-top:.5rem;background:#0d1117;border:1px solid rgba(210,153,34,.35);
+                border-radius:6px;padding:.5rem .75rem;">
+                  <div style="font-size:.65rem;text-transform:uppercase;letter-spacing:.08em;
+                  color:#d29922;margin-bottom:.3rem;">&#9998; Spec Comparison — verify before accepting</div>
+                  <table style="width:100%;border-collapse:collapse;">
+                    <thead><tr>
+                      <th style="font-size:.65rem;color:#8b949e;padding:.1rem .4rem;text-align:left;">Field</th>
+                      <th style="font-size:.65rem;color:#8b949e;padding:.1rem .4rem;text-align:left;">Original</th>
+                      <th style="font-size:.65rem;color:#8b949e;padding:.1rem .4rem;text-align:left;">Alt PN: {_found_pn_disp}</th>
+                    </tr></thead>
+                    <tbody>{rows_html}</tbody>
+                  </table>
+                  <div style="font-size:.67rem;color:#8b949e;margin-top:.3rem;">
+                    Cross-reference data may differ — confirm fit with manufacturer datasheet before installing.
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
         with col_btn:
             st.markdown("<div style='padding-top:.7rem'></div>", unsafe_allow_html=True)
+
+            # Acceptance gate: non-OEM results require explicit engineer sign-off
+            _accept_enabled = True
+            if _is_non_oem:
+                _chk_key = f"alt_confirm_{q.quote_id}"
+                _confirmed = st.checkbox(
+                    "I have verified the technical specifications and confirm this is a suitable functional replacement",
+                    key=_chk_key,
+                    value=st.session_state.get(_chk_key, False),
+                )
+                _accept_enabled = _confirmed
+
             if st.button(
                 "Accept Offer",
                 key=f"accept_{q.quote_id}",
                 type="primary" if is_best else "secondary",
                 use_container_width=True,
+                disabled=not _accept_enabled,
             ):
                 from datetime import datetime as _dt
                 st.session_state.accepted_quote = q
@@ -1352,11 +1413,13 @@ def render_tier3_outreach() -> None:
         else:
             badge_html = ""
 
-        alt_badge = (
-            '<span class="best-badge" style="border-color:#f85149;color:#f85149;margin-left:.3rem;">'
-            'Alt Rec</span>'
-            if getattr(o, "match_type", "Exact") == "Alternative" else ""
-        )
+        _t3_mt = getattr(o, "match_type", "Exact OEM")
+        if _t3_mt == "Aftermarket Compatible":
+            alt_badge = '<span class="best-badge" style="border-color:#a855f7;color:#a855f7;margin-left:.3rem;">&#9733; Aftermarket</span>'
+        elif _t3_mt == "Functional Alternative":
+            alt_badge = '<span class="best-badge" style="border-color:#fb923c;color:#fb923c;margin-left:.3rem;">&#8645; Alternative</span>'
+        else:
+            alt_badge = ""
 
         found_pn = getattr(o, "found_part_number", None)
         pn_note  = f'<span style="color:#8b949e;font-size:.72rem;"> · PN found: {found_pn}</span>' if found_pn else ""

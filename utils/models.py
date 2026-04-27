@@ -54,7 +54,7 @@ class SourcingOption:
     price_tbd: bool = False             # True when no price was found
     extracted_shipping_fee: Optional[float] = None  # from vendor page; 0 = Free Shipping
     is_freight: bool = False            # True if LTL/truck freight required
-    match_type: str = "Exact"           # "Exact" | "Alternative" (PN match quality)
+    match_type: str = "Exact OEM"        # "Exact OEM" | "Aftermarket Compatible" | "Functional Alternative"
     found_part_number: Optional[str] = None   # actual PN shown on vendor page
     shipping_terms: Optional[str] = None      # human-readable: "Free Shipping", "LTL Freight Required", "S.F.Q.", etc.
     is_collection_page: bool = False          # True when URL is a search/collection list, not a direct product page
