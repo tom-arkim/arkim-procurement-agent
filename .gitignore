@@ -19,3 +19,9 @@ streamlit_err.log
 
 # Claude Code internal
 .claude/
+
+# Audit / database files (contain PII and business data — do not commit)
+data/*.sqlite
+data/*.db
+# Keep directory marker
+!data/.gitkeep

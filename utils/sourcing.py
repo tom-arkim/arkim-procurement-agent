@@ -77,7 +77,15 @@ def _anthropic_complete(system: str, user: str) -> str:
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()["content"][0]["text"].strip()
+    data = resp.json()
+    # 2.5 — LLM cost tracking (silent fail so it never breaks sourcing)
+    try:
+        from utils.llm_tracker import record_call as _llm_rec
+        _u = data.get("usage", {})
+        _llm_rec(_u.get("input_tokens", 0), _u.get("output_tokens", 0))
+    except Exception:
+        pass
+    return data["content"][0]["text"].strip()
 
 
 # ---------------------------------------------------------------------------
@@ -997,6 +1005,7 @@ def _call_enterprise_api(specs: AssetSpecs,
             auth_status  = "Authorized" if stier == "Gold" else "Unknown"
             cf_risk      = _counterfeit_risk_flag(specs, url, auth_status)
             conf_score   = _compute_confidence_score(specs, suit, match_type, auth_status)
+            is_oem_dir   = _home_field_bonus(specs, url, snippet) > 0
 
             _common = dict(
                 lead_time_days=int(lead),
@@ -1018,6 +1027,7 @@ def _call_enterprise_api(specs: AssetSpecs,
                 vendor_authorization_status=auth_status,
                 confidence_score=conf_score,
                 limited_price_data=limited_price,
+                is_oem_direct=is_oem_dir,
             )
             if price is not None:
                 save_price(specs.part_number, vendor, float(price), int(lead), source="live", url=url)
@@ -1226,8 +1236,9 @@ def _discover_national_specialists(specs: AssetSpecs,
                 if slug[:6] in surl.lower():
                     snippet = stext
                     break
-        suit   = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
-        stier  = _suitability_tier(name, suit)
+        suit      = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
+        stier     = _suitability_tier(name, suit)
+        t2_is_oem = _home_field_bonus(specs, url or "", snippet) > 0
 
         # 1.2 — "Direct Buy via Arkim" reserved for verified partners only.
         # All other Tier 2 vendors are "Quote Request" until onboarded.
@@ -1257,6 +1268,7 @@ def _discover_national_specialists(specs: AssetSpecs,
             vendor_authorization_status=t2_auth,
             onboarding_status="Active" if name in _VERIFIED_PARTNERS else "Not Onboarded",
             confidence_score=t2_conf,
+            is_oem_direct=t2_is_oem,
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
         print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | {stier or 'no tier'}")
@@ -1371,6 +1383,72 @@ procurement@arkim.ai"""
 
 
 # ---------------------------------------------------------------------------
+# 2.2 — Warranty Gate
+# ---------------------------------------------------------------------------
+
+def _apply_warranty_filter(
+    specs: AssetSpecs, options: list[SourcingOption]
+) -> tuple[list[SourcingOption], Optional[str]]:
+    """Filter vendor results based on AssetSpecs.warranty_status.
+
+    Returns (filtered_options, banner_message_or_None).
+
+    in_warranty     → Exact OEM only; if none found, returns empty list + error message.
+    out_of_warranty │
+    warranty_waived → No filter applied.
+    unknown / None  → All results surfaced, but a warning banner is returned.
+    """
+    warranty = (getattr(specs, "warranty_status", None) or "").lower().strip()
+
+    if warranty == "in_warranty":
+        oem = [o for o in options if getattr(o, "match_type", "") == "Exact OEM"]
+        if not oem:
+            msg = (
+                "Equipment is in warranty — only OEM parts are recommended. "
+                "No OEM listings found. Consider Tier 3 RFQ to OEM direct."
+            )
+            return [], msg
+        return oem, None
+
+    if warranty in ("out_of_warranty", "warranty_waived"):
+        return options, None
+
+    # unknown or not set
+    if warranty and warranty not in ("unknown", "none", ""):
+        return options, None
+
+    banner = None
+    has_interchange = any(
+        getattr(o, "match_type", "") in ("Aftermarket Compatible", "Functional Alternative")
+        for o in options
+    )
+    if has_interchange:
+        banner = (
+            "Warranty status unknown — interchange parts may void OEM warranty. "
+            "Confirm warranty status with the asset owner before purchase."
+        )
+    return options, banner
+
+
+# ---------------------------------------------------------------------------
+# 2.4 — Registry Enrichment
+# ---------------------------------------------------------------------------
+
+def _apply_registry_enrichment(options: list[SourcingOption]) -> None:
+    """Look up each vendor in the supplier registry and update onboarding state.
+
+    Mutates options in place. Unknown vendors are auto-registered as discovery_only.
+    Silent on errors so registry issues never break the sourcing pipeline.
+    """
+    try:
+        from utils.supplier_registry import enrich_option
+        for opt in options:
+            enrich_option(opt)
+    except Exception as exc:
+        print(f"[Sourcing] Registry enrichment error (non-fatal): {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -1385,7 +1463,12 @@ def find_vendors(specs: AssetSpecs,
     workflow:     "spare_parts" | "replacement" | "capex"
                   CapEx skips Tier 1/2 price search and goes straight to specialist discovery.
     search_mode:  "exact" | "equivalents" — controls competitor injection in Equipment queries.
-    Returns: (all_options, None)
+    Returns: (all_options, warranty_banner_message_or_None)
+
+    Post-processing steps (in order):
+      1. Registry enrichment  — populate onboarding_status / vendor_authorization_status
+      2. Warranty filter       — gate interchange results when asset is in-warranty
+    The warranty_banner is returned for the UI to display; it is None when no warning needed.
     """
     enterprise: list[SourcingOption] = []
 
@@ -1401,4 +1484,14 @@ def find_vendors(specs: AssetSpecs,
     print(f"\n[Sourcing] Tier 2 — National specialist discovery...")
     tier2 = _discover_national_specialists(specs, enterprise)
 
-    return enterprise + tier2, None
+    all_options = enterprise + tier2
+
+    # 2.4 — Enrich onboarding state from supplier registry (mutates in place)
+    _apply_registry_enrichment(all_options)
+
+    # 2.2 — Apply warranty gate; returns filtered list + optional UI banner
+    filtered, warranty_banner = _apply_warranty_filter(specs, all_options)
+    if warranty_banner:
+        print(f"[Sourcing] Warranty banner: {warranty_banner}")
+
+    return filtered, warranty_banner

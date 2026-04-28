@@ -400,6 +400,14 @@ _DEFAULTS: dict = {
     "search_mode":                "equivalents",  # "exact" | "equivalents" — always equivalents
     "workflow_mode":              "spare_parts",  # "spare_parts" | "replacement" | "capex"
     "downtime_cost_per_day":      500.0,   # USD/day — used for TLV calculation
+    # 2.1 — urgency factor (0.0=stocking, 0.3=predictive, 1.0=emergency)
+    "urgency_factor":             0.3,
+    # 2.2 — warranty status override (applied to specs before pipeline)
+    "warranty_status_override":   None,
+    # 2.2 — warranty banner message surfaced from find_vendors
+    "warranty_banner":            None,
+    # 2.3 — sourcing run ID (UUID generated per pipeline run for audit correlation)
+    "sourcing_run_id":            None,
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -432,7 +440,14 @@ def _claude(system: str, user: str, api_key: str,
         timeout=30,
     )
     resp.raise_for_status()
-    return resp.json()["content"][0]["text"].strip()
+    data = resp.json()
+    try:
+        from utils.llm_tracker import record_call as _llm_rec
+        _u = data.get("usage", {})
+        _llm_rec(_u.get("input_tokens", 0), _u.get("output_tokens", 0))
+    except Exception:
+        pass
+    return data["content"][0]["text"].strip()
 
 
 def _detect_media_type(image_bytes: bytes) -> str:
@@ -532,12 +547,25 @@ def _execute_pipeline(specs, site: str,
                       force_refresh: bool = False,
                       search_mode: str = "exact",
                       workflow: str = "spare_parts",
-                      downtime_cost_per_day: float = 500.0) -> None:
-    from utils.inventory import check_internal
-    from utils.sourcing  import find_vendors
-    from utils.quoting   import generate_arkim_quote
+                      downtime_cost_per_day: float = 500.0,
+                      urgency_factor: float = 0.3) -> None:
+    from utils.inventory   import check_internal
+    from utils.sourcing    import find_vendors
+    from utils.quoting     import generate_arkim_quote
+    from utils.audit_log   import write_audit_log
+    from utils.llm_tracker import start_run as _llm_start, finish_run as _llm_finish
     from datetime import datetime as _dt
+    import uuid as _uuid
+    import dataclasses
+
     _patch_sourcing_keys(tavily_key, anthropic_key)
+
+    # 2.3 — Generate sourcing_run_id and start LLM cost tracker
+    run_id = str(_uuid.uuid4())
+    st.session_state.sourcing_run_id = run_id
+    _llm_start(run_id)
+    _run_start_ms = _dt.now().timestamp() * 1000
+    _error_log: list[str] = []
 
     wf_labels = {
         "spare_parts": "Spare Parts (OpEx) — Exact PN",
@@ -563,12 +591,13 @@ def _execute_pipeline(specs, site: str,
             st.write(f"🌐 **Sourcing Specialized Authorized Distributors and Parent Company Stockists...** ({src_label} · {mode_label})")
 
         st.write("📦 **Batching Snippets** — parsing vendor results…")
-        options, _ = find_vendors(specs, site=site, force_refresh=force_refresh,
-                                  search_mode=search_mode, workflow=workflow)
+        options, warranty_banner = find_vendors(specs, site=site, force_refresh=force_refresh,
+                                               search_mode=search_mode, workflow=workflow)
         st.write("🔒 **Validating Magnitude** — applying freight & weight guards…")
-        st.session_state.all_options = options
-        st.session_state.rfq_draft   = None
-        st.session_state.rfq_emails  = {}
+        st.session_state.all_options   = options
+        st.session_state.warranty_banner = warranty_banner
+        st.session_state.rfq_draft     = None
+        st.session_state.rfq_emails    = {}
 
         national_priced = sum(1 for o in options
                               if o.merchant_type in ("Enterprise", "National Specialist")
@@ -602,7 +631,10 @@ def _execute_pipeline(specs, site: str,
             st.write(f"📊 **Calculating TLV** — purchase price + downtime risk + shipping + tax…")
             all_quotes, best = generate_arkim_quote(
                 specs, priced_options, site=site,
-                workflow=workflow, downtime_cost_per_day=downtime_cost_per_day,
+                workflow=workflow,
+                downtime_cost_per_day=downtime_cost_per_day,
+                urgency_factor=urgency_factor,
+                sourcing_run_id=run_id,
             )
             st.session_state.all_quotes    = all_quotes
             st.session_state.best_quote    = best
@@ -648,6 +680,45 @@ def _execute_pipeline(specs, site: str,
         st.session_state.sourcing_history = history
 
         status.update(label="✅ Pipeline complete", state="complete", expanded=False)
+
+    # 2.3 — Write audit log entry (outside st.status to avoid Streamlit context issues)
+    try:
+        _llm_stats  = _llm_finish(run_id)
+        _duration   = int(_dt.now().timestamp() * 1000 - _run_start_ms)
+        _best       = st.session_state.get("best_quote")
+        _all_opts   = st.session_state.get("all_options", [])
+        _specs      = st.session_state.get("specs") or specs
+
+        def _opt_dict(o):
+            try:
+                return dataclasses.asdict(o)
+            except Exception:
+                return {"vendor_name": getattr(o, "vendor_name", str(o))}
+
+        def _specs_dict(s):
+            try:
+                return dataclasses.asdict(s)
+            except Exception:
+                return {}
+
+        write_audit_log({
+            "sourcing_run_id":        run_id,
+            "agent_version":          "1.0.0-phase2",
+            "asset_specs_json":       _specs_dict(_specs),
+            "input_summary":          f"{_specs.manufacturer} {_specs.model} ({_specs.part_number})" if _specs else "—",
+            "vendors_considered":     [_opt_dict(o) for o in _all_opts],
+            "vendors_surfaced":       [_opt_dict(o) for o in _all_opts if not getattr(o, "price_tbd", False)],
+            "final_recommendation":   _best.chosen_option.vendor_name if _best else None,
+            "urgency_factor_used":    urgency_factor,
+            "warranty_status_used":   getattr(_specs, "warranty_status", None),
+            "workflow_mode":          workflow,
+            "llm_calls_made":         _llm_stats.calls,
+            "estimated_llm_cost_usd": _llm_stats.estimated_cost_usd,
+            "duration_ms":            _duration,
+            "error_log":              _error_log,
+        })
+    except Exception as _audit_exc:
+        print(f"[AuditLog] Non-fatal write error: {_audit_exc}")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1022,6 +1093,10 @@ def render_vendor_cards() -> None:
                     not in ("Enterprise", "National Specialist")]
     ordered_quotes = tier1_quotes + tier2_quotes + other_quotes
 
+    from utils.contact_resolution import resolve_contact_action, ContactActionType
+    from utils.supplier_registry import load_registry
+    _registry = load_registry()
+
     _rendered_tier = None
     for i, q in enumerate(ordered_quotes):
         o = q.chosen_option
@@ -1078,12 +1153,46 @@ def render_vendor_cards() -> None:
             if getattr(o, "is_collection_page", False) else ""
         )
 
+        # OEM Direct badge (Phase 1.5)
+        _is_oem_direct = getattr(o, "is_oem_direct", False)
+        _oem_badge = (
+            '<span class="chip chip-g" style="font-size:.62rem;" '
+            'title="Vendor is manufacturer\'s own channel — best for warranty compliance">'
+            '&#9733; OEM Direct</span>'
+            if _is_oem_direct else ""
+        )
+        _oem_sublabel = (
+            '<div style="margin-top:.2rem;font-size:.68rem;color:#3fb950;">'
+            '&#10003; Recommended for warranty compliance</div>'
+            if _is_oem_direct else ""
+        )
+
+        # Phase 1.5: unified contact action — replaces plain "View Source" link
+        _contact = resolve_contact_action(o, _registry)
+        if _contact.action_type == ContactActionType.VIEW_LISTING and _contact.url:
+            _sub_span = (
+                f' <span style="color:#3fb950;font-size:.65rem;">{_contact.sub_label}</span>'
+                if _contact.sub_label else ""
+            )
+            url_html = (
+                f'<div style="margin-top:.3rem;font-size:.7rem;">'
+                f'<a href="{_contact.url}" target="_blank" rel="noopener noreferrer" '
+                f'style="color:#58a6ff;text-decoration:none;">&#128279; {_contact.label}</a>'
+                f'{_sub_span}</div>'
+            )
+        elif _contact.action_type == ContactActionType.SEND_QUOTE_REQUEST and _contact.email:
+            url_html = (
+                f'<div style="margin-top:.3rem;font-size:.7rem;">'
+                f'<a href="mailto:{_contact.email}" '
+                f'style="color:#58a6ff;text-decoration:none;">&#9993; {_contact.label}</a></div>'
+            )
+        else:
+            url_html = (
+                '<div style="margin-top:.3rem;font-size:.7rem;color:#8b949e;">'
+                '&#9888; Outreach required — no direct listing available</div>'
+            )
+
         col_info, col_price, col_btn = st.columns([4, 3, 1.2])
-        url_html = (
-            f'<div style="margin-top:.3rem;font-size:.7rem;">'
-            f'<a href="{o.source_url}" target="_blank" rel="noopener noreferrer" '
-            f'style="color:#58a6ff;text-decoration:none;">&#128279; View Source</a></div>'
-        ) if o.source_url else ""
 
         mt = o.merchant_type
         if mt == "Enterprise":
@@ -1188,9 +1297,10 @@ def render_vendor_cards() -> None:
             <div class="{card_cls}">
               <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.35rem;">
                 <span style="font-size:1rem;font-weight:700;color:#e6edf3;">{o.vendor_name}</span>
-                {mt_badge}{_mor_html}
+                {mt_badge}{_mor_html}{_oem_badge}
                 {src_badge}{best_html}{_preferred_html}{alt_badge}{coll_badge}{_cf_badge}
               </div>
+              {_oem_sublabel}
               <div style="font-size:.77rem;color:#8b949e;">
                 Lead: <b style="color:#c9d1d9;">{o.lead_time_days}d</b> &nbsp;&middot;&nbsp;
                 {_reliability_html} &nbsp;&middot;&nbsp;
@@ -1494,19 +1604,28 @@ def render_tier3_outreach() -> None:
     if not rfq_options:
         return
 
+    # Phase 1.5: only show when < 3 priced options OR all vendors need outreach
+    from utils.contact_resolution import resolve_contact_action, ContactActionType
+    from utils.supplier_registry import load_registry
+    _t3_registry   = load_registry()
+    priced_options = [o for o in all_options if not getattr(o, "price_tbd", False)]
+    _all_actions   = [resolve_contact_action(o, _t3_registry) for o in all_options]
+    _all_outreach  = bool(_all_actions) and all(
+        a.action_type == ContactActionType.GENERATE_OUTREACH_DRAFT for a in _all_actions
+    )
+    if len(priced_options) >= 3 and not _all_outreach:
+        return
+
     specs = st.session_state.specs
 
-    priced_national = [o for o in all_options
-                       if not getattr(o, "price_tbd", False)
-                       and o.merchant_type in ("Enterprise", "National Specialist", "Direct Buy via Arkim", "Quote Request")]
-    no_buy_now = len(priced_national) == 0
+    no_buy_now = len(priced_options) == 0
     header_note = (
         '<span style="color:#f85149;font-size:.72rem;font-weight:600;margin-left:.5rem;">'
         '&#9888; No Tier 1/1.5 Buy Now pricing found</span>'
         if no_buy_now else ""
     )
 
-    st.markdown(f'<div class="tier3-hdr">Tier 3: Partner Outreach Network{header_note}</div>',
+    st.markdown(f'<div class="tier3-hdr">Broader Outreach Required{header_note}</div>',
                 unsafe_allow_html=True)
     body = (
         '<b style="color:#e6edf3;">No immediate Buy Now pricing was returned by national distributors.</b> '
@@ -1525,10 +1644,10 @@ def render_tier3_outreach() -> None:
 
     from utils.sourcing import draft_rfq_email
 
-    # Sort: highest suitability first
+    # Sort: highest suitability first; cap display to top 5 (per Phase 1.5 spec)
     rfq_options_sorted = sorted(rfq_options,
                                  key=lambda o: getattr(o, "suitability_score", 0),
-                                 reverse=True)
+                                 reverse=True)[:5]
 
     any_checked = False
     for o in rfq_options_sorted:
@@ -1624,6 +1743,21 @@ def render_tier3_outreach() -> None:
                     if st.session_state.get(f"rfq_chk_{o.vendor_name}", False)]
         st.markdown("<div style='margin-top:.5rem'></div>", unsafe_allow_html=True)
         if st.button("Initiate Partner Outreach Campaign", type="primary"):
+            # Phase 1.5: create discovery_only registry stubs for vendors needing outreach
+            from utils.supplier_registry import create_stub
+            for _o in rfq_options_sorted:
+                if st.session_state.get(f"rfq_chk_{_o.vendor_name}", False):
+                    _action = resolve_contact_action(_o, _t3_registry)
+                    if _action.action_type == ContactActionType.GENERATE_OUTREACH_DRAFT:
+                        _domain = ""
+                        _surl   = _o.source_url or ""
+                        if _surl:
+                            try:
+                                from urllib.parse import urlparse as _up
+                                _domain = _up(_surl).hostname or ""
+                            except Exception:
+                                pass
+                        create_stub(_o.vendor_name, domain=_domain, source_url=_surl)
             st.session_state.rfq_campaign_sent   = True
             st.session_state.rfq_vendors_selected = selected
             st.rerun()
@@ -1633,6 +1767,20 @@ def render_tier3_outreach() -> None:
             f"Partner outreach initiated — queued for: "
             f"{', '.join(st.session_state.rfq_vendors_selected)}"
         )
+
+
+def render_warranty_banner() -> None:
+    """Display the warranty warning/error banner from find_vendors if present."""
+    banner = st.session_state.get("warranty_banner")
+    if not banner:
+        return
+    warranty_val = st.session_state.get("warranty_status_override") or ""
+    if warranty_val == "in_warranty":
+        # Hard block — OEM only, none found
+        st.error(f"⚠️ Warranty Gate: {banner}")
+    else:
+        # Soft warning — unknown status
+        st.warning(f"ℹ️ Warranty Status Unknown: {banner}")
 
 
 def render_empty() -> None:
@@ -1682,7 +1830,7 @@ with st.sidebar:
             "pending_verification_specs", "pending_verification_site",
             "pending_search_strategy", "seal_enhanced_done", "force_refresh",
             "inventory_hit", "inventory_location", "messages",
-            "search_mode", "workflow_mode",
+            "search_mode", "workflow_mode", "warranty_banner", "sourcing_run_id",
         ]
         for _ck in _clear_keys:
             st.session_state[_ck] = _DEFAULTS.get(_ck)
@@ -1692,6 +1840,51 @@ with st.sidebar:
                 del st.session_state[_ck]
         st.session_state.active_tab = "🔍 Active Sourcing"
         st.rerun()
+
+    # 2.1 — Urgency Factor control
+    st.markdown('<div class="sb-sec">Urgency</div>', unsafe_allow_html=True)
+    _UF_PRESETS = {"Emergency (1.0)": 1.0, "Predictive (0.3)": 0.3, "Stocking (0.0)": 0.0}
+    _cur_uf   = st.session_state.get("urgency_factor", 0.3)
+    _cur_preset = next(
+        (k for k, v in _UF_PRESETS.items() if abs(v - _cur_uf) < 0.01), "Custom"
+    )
+    _uf_sel = st.radio(
+        "Urgency preset",
+        list(_UF_PRESETS.keys()),
+        index=list(_UF_PRESETS.keys()).index(_cur_preset) if _cur_preset != "Custom" else 1,
+        label_visibility="collapsed",
+    )
+    _uf_val = st.slider(
+        "Urgency factor",
+        min_value=0.0, max_value=1.0,
+        value=_UF_PRESETS.get(_uf_sel, _cur_uf),
+        step=0.05,
+        label_visibility="collapsed",
+        help="0.0 = stocking (ignore downtime), 0.3 = predictive (default), 1.0 = emergency (full downtime cost). Values ≥ 0.8 boost Speed weight in TCA scoring.",
+    )
+    if _uf_val != _cur_uf:
+        st.session_state.urgency_factor = _uf_val
+
+    # 2.2 — Warranty Status control
+    st.markdown('<div class="sb-sec">Asset Warranty</div>', unsafe_allow_html=True)
+    _WS_OPTS = {
+        "Unknown": None,
+        "In Warranty": "in_warranty",
+        "Out of Warranty": "out_of_warranty",
+        "Warranty Waived": "warranty_waived",
+    }
+    _cur_ws_val = st.session_state.get("warranty_status_override")
+    _cur_ws_lbl = next((k for k, v in _WS_OPTS.items() if v == _cur_ws_val), "Unknown")
+    _ws_sel = st.selectbox(
+        "Warranty status",
+        list(_WS_OPTS.keys()),
+        index=list(_WS_OPTS.keys()).index(_cur_ws_lbl),
+        label_visibility="collapsed",
+        help="In Warranty → only Exact OEM results surfaced. Unknown → all results shown with a warning banner.",
+    )
+    _new_ws = _WS_OPTS[_ws_sel]
+    if _new_ws != _cur_ws_val:
+        st.session_state.warranty_status_override = _new_ws
 
     st.markdown("<div style='flex:1'></div>", unsafe_allow_html=True)
 
@@ -1841,10 +2034,17 @@ if st.session_state.pending_run:
     search_mode  = run_data.get("search_mode", "equivalents")
     workflow     = run_data.get("workflow", st.session_state.workflow_mode)
     dtc          = st.session_state.downtime_cost_per_day
+    uf           = st.session_state.get("urgency_factor", 0.3)
+    # 2.2 — apply warranty override to specs before pipeline
+    _run_specs   = run_data["specs"]
+    _ws_override = st.session_state.get("warranty_status_override")
+    if _ws_override:
+        _run_specs.warranty_status = _ws_override
     try:
-        _execute_pipeline(run_data["specs"], run_data["site"], tav_key, ant_key,
+        _execute_pipeline(_run_specs, run_data["site"], tav_key, ant_key,
                           force_refresh=fr, search_mode=search_mode,
-                          workflow=workflow, downtime_cost_per_day=dtc)
+                          workflow=workflow, downtime_cost_per_day=dtc,
+                          urgency_factor=uf)
         bq = st.session_state.best_quote
         sp = run_data["specs"]
         if bq:
@@ -2006,6 +2206,7 @@ elif active_tab == "🔍 Active Sourcing":
             render_purchase_confirmed()
         elif st.session_state.pipeline_ran:
             render_asset_card()
+            render_warranty_banner()
             render_tier3_outreach()
             if st.session_state.pipeline_error:
                 st.error(f"Pipeline error: {st.session_state.pipeline_error}")
@@ -2149,6 +2350,7 @@ elif active_tab == "🔍 Active Sourcing":
             render_purchase_confirmed()
         elif st.session_state.pipeline_ran:
             render_asset_card()
+            render_warranty_banner()
             _rc1, _rc2 = st.columns([6, 1])
             with _rc2:
                 if st.button("🔄 Refresh", help="Bypass price cache and fetch fresh prices from Tavily",

@@ -3,3 +3,6 @@ requests>=2.31.0
 pandas>=2.0.0
 tavily-python>=0.7.23
 Pillow>=10.0.0
+# sqlalchemy>=2.0 — target ORM for Postgres migration post-seed
+#   Currently using Python stdlib sqlite3 (zero-dep prototype).
+#   Install when greenlet wheels become available for this platform.

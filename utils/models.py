@@ -77,6 +77,7 @@ class SourcingOption:
     limited_price_data: bool = False              # True when fewer than 4 peer prices available for sanity check
     export_control_classification: Optional[str] = None  # EAR/ITAR classification if applicable
     ship_from_country: Optional[str] = None       # ISO country code for origin (counterfeit risk signal)
+    is_oem_direct: Optional[bool] = None          # True when vendor domain matches manufacturer (home field bonus)
 
 
 @dataclass

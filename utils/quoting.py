@@ -6,6 +6,7 @@ Generates the final Arkim-branded quote with full line-item breakdown.
 """
 
 from datetime import datetime
+from typing import Optional
 from uuid import uuid4
 from utils.models import AssetSpecs, SourcingOption, ArkimQuote
 
@@ -105,15 +106,30 @@ def estimate_shipping(option: SourcingOption,
 def _compute_tca_score(option: SourcingOption,
                        grand_total: float = None,
                        min_grand: float = None,
-                       max_grand: float = None) -> float:
+                       max_grand: float = None,
+                       urgency_factor: float = 0.3) -> float:
     """
     Score 0–100. Higher = better.
-      Speed (35%)         : shorter lead time → higher score
-      Reliability (25%)   : vendor reliability score
-      Friction (20%)      : no RFQ = 100, RFQ = 50
+      Speed (35%)          : shorter lead time → higher score
+      Reliability (25%)    : vendor reliability score
+      Friction (20%)       : no RFQ = 100, RFQ = 50
       Cost Efficiency (20%): lower grand_total relative to peers → higher score
                              (neutral 100 on first pass when context is absent)
+
+    Emergency re-weighting (urgency_factor >= 0.8):
+      Speed weight rises from 35% to 50%; Cost weight drops from 20% to 5%.
+      This ensures fastest-delivery vendors rank higher in emergency mode,
+      even at a cost premium.  The 15 pt delta is taken entirely from Cost
+      so that Reliability and Friction weights are not distorted.
     """
+    # Dynamic weight re-weighting for emergency sourcing
+    if urgency_factor >= 0.8:
+        speed_w = 0.50
+        cost_w  = 0.05   # 35→50 (+15) offset by 20→5 (-15)
+    else:
+        speed_w = SPEED_WEIGHT
+        cost_w  = COST_WEIGHT
+
     speed_score       = max(0.0, (MAX_LEAD_TIME - option.lead_time_days) / MAX_LEAD_TIME) * 100
     reliability_score = option.reliability_score
     friction_score    = 50.0 if option.requires_rfq else 100.0
@@ -124,10 +140,10 @@ def _compute_tca_score(option: SourcingOption,
         cost_score = 100.0  # neutral when no cross-quote context yet
 
     return round(
-        speed_score       * SPEED_WEIGHT
+        speed_score       * speed_w
         + reliability_score * RELIABILITY_WEIGHT
         + friction_score    * FRICTION_WEIGHT
-        + cost_score        * COST_WEIGHT,
+        + cost_score        * cost_w,
         2,
     )
 
@@ -136,27 +152,38 @@ def _compute_tca_score(option: SourcingOption,
 # TLV & Labor Impact
 # ---------------------------------------------------------------------------
 
-def compute_tlv(quote: "ArkimQuote", downtime_cost_per_day: float = DEFAULT_DOWNTIME_COST_PER_DAY) -> float:
+def compute_tlv(quote: "ArkimQuote",
+                downtime_cost_per_day: float = DEFAULT_DOWNTIME_COST_PER_DAY,
+                urgency_factor: float = 0.3) -> float:
     """Total Life Cycle Value — lower is better.
 
-    TLV = Purchase Price + (Estimated Downtime Cost × Reliability Risk) + Shipping + Tax
+    TLV = Purchase Price + (Downtime_Cost × Lead_Days × Urgency_Factor × Reliability_Risk)
+          + Shipping + Tax
 
-    Reliability Risk is the expected downtime exposure during lead time:
-      risk = lead_time_days × (1 - effective_reliability)
-      effective_reliability blends vendor reliability_score (0-100 %) with
-      market_confidence_score (1-10) when available.
+    urgency_factor  : 0.0 = stocking (ignore downtime), 0.3 = predictive (default),
+                      1.0 = emergency (full downtime cost applied)
+    Reliability_Risk: (1 - effective_reliability) blending vendor reliability_score
+                      with market_confidence_score when available.
+
+    Defaults urgency_factor to 0.3 (predictive) when not explicitly set.
     """
     opt = quote.chosen_option
+
     rel = opt.reliability_score / 100.0
     mcs = getattr(opt, "market_confidence_score", None)
-    if mcs is not None:
-        effective_rel = (rel + mcs / 10.0) / 2.0
-    else:
-        effective_rel = rel
+    effective_rel = (rel + mcs / 10.0) / 2.0 if mcs is not None else rel
 
     risk_factor   = max(0.0, 1.0 - effective_rel)
-    downtime_cost = downtime_cost_per_day * quote.chosen_option.lead_time_days * risk_factor
-    return round(quote.vendor_base_price + downtime_cost + quote.shipping_cost + quote.tax_amount, 2)
+    downtime_cost = (
+        downtime_cost_per_day
+        * opt.lead_time_days
+        * risk_factor
+        * max(0.0, min(1.0, urgency_factor))
+    )
+    return round(
+        quote.vendor_base_price + downtime_cost + quote.shipping_cost + quote.tax_amount,
+        2,
+    )
 
 
 def _compute_labor_impact(option: SourcingOption) -> float:
@@ -219,11 +246,15 @@ def _build_arkim_quote(specs: AssetSpecs, option: SourcingOption,
 
 def _build_arkim_quote_for_workflow(specs: AssetSpecs, option: SourcingOption,
                                     site: str, workflow: str,
-                                    downtime_cost_per_day: float) -> ArkimQuote:
-    """Wraps _build_arkim_quote and stamps workflow + TLV onto the result."""
+                                    downtime_cost_per_day: float,
+                                    urgency_factor: float = 0.3,
+                                    sourcing_run_id: Optional[str] = None) -> ArkimQuote:
+    """Wraps _build_arkim_quote and stamps workflow, TLV, urgency, and run ID."""
     q = _build_arkim_quote(specs, option, site)
-    q.workflow  = workflow
-    q.tlv_score = compute_tlv(q, downtime_cost_per_day)
+    q.workflow             = workflow
+    q.urgency_factor_used  = urgency_factor
+    q.sourcing_run_id      = sourcing_run_id
+    q.tlv_score            = compute_tlv(q, downtime_cost_per_day, urgency_factor)
     return q
 
 
@@ -236,6 +267,8 @@ def generate_arkim_quote(specs: AssetSpecs,
                          site: str = "La Mirada",
                          workflow: str = "spare_parts",
                          downtime_cost_per_day: float = DEFAULT_DOWNTIME_COST_PER_DAY,
+                         urgency_factor: float = 0.3,
+                         sourcing_run_id: Optional[str] = None,
                          ) -> tuple[list[ArkimQuote], ArkimQuote]:
     """
     Two-pass scoring:
@@ -244,17 +277,27 @@ def generate_arkim_quote(specs: AssetSpecs,
 
     Ranking metric:
       spare_parts → TCA (speed + reliability + friction + cost)
-      replacement → TLV (purchase price + downtime risk + shipping + tax)
+                    Emergency re-weighting applies when urgency_factor >= 0.8.
+      replacement → TLV (purchase price + downtime risk × urgency_factor + shipping + tax)
       capex       → TLV
 
     Returns (all_quotes sorted by primary metric desc/asc, recommended_quote).
     """
+    if urgency_factor is None:
+        print(f"[Quote Engine] WARNING: urgency_factor not provided — defaulting to 0.3 (predictive)")
+        urgency_factor = 0.3
+
     print(f"\n[Quote Engine] Scoring {len(options)} options via "
-          f"{'TCA' if workflow == 'spare_parts' else 'TLV'} (site: {site}, workflow: {workflow})...")
+          f"{'TCA' if workflow == 'spare_parts' else 'TLV'} "
+          f"(site: {site}, workflow: {workflow}, urgency: {urgency_factor:.1f})...")
 
     # Pass 1
-    all_quotes = [_build_arkim_quote_for_workflow(specs, opt, site, workflow, downtime_cost_per_day)
-                  for opt in options]
+    all_quotes = [
+        _build_arkim_quote_for_workflow(
+            specs, opt, site, workflow, downtime_cost_per_day, urgency_factor, sourcing_run_id
+        )
+        for opt in options
+    ]
 
     # Pass 2 — inject grand_total context into TCA; add labor impact for spare_parts
     for q in all_quotes:
@@ -264,8 +307,8 @@ def generate_arkim_quote(specs: AssetSpecs,
     min_gt = min(effective_costs)
     max_gt = max(effective_costs)
     for q, eff in zip(all_quotes, effective_costs):
-        q.tca_score = _compute_tca_score(q.chosen_option, eff, min_gt, max_gt)
-        q.tlv_score = compute_tlv(q, downtime_cost_per_day)
+        q.tca_score = _compute_tca_score(q.chosen_option, eff, min_gt, max_gt, urgency_factor)
+        q.tlv_score = compute_tlv(q, downtime_cost_per_day, urgency_factor)
 
     if workflow == "spare_parts":
         all_quotes.sort(key=lambda q: q.tca_score, reverse=True)
