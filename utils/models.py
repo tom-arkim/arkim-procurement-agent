@@ -105,6 +105,7 @@ class ArkimQuote:
     tlv_score: float = 0.0             # Total Life Cycle Value (Purchase + Downtime Risk + Shipping + Tax)
     workflow: str = "spare_parts"      # "spare_parts" | "replacement" | "capex"
     labor_impact_cost: float = 0.0    # Projected labor cost for low-MCS spare parts ($200/hr × hours)
+    arkim_fee_rate_applied: Optional[float] = None  # Arkim processing fee rate used (e.g. 0.035)
     # Phase 1 additions — audit, compliance, lifecycle context
     tax_jurisdiction: Optional[str] = None             # e.g. "LA County, CA"
     tax_exemption_certificate_ref: Optional[str] = None  # certificate number if tax-exempt

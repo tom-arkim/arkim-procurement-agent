@@ -1,6 +1,7 @@
 """
 Module D — Merchant Logic & TCA Scoring
-Applies markup, shipping, location-based tax, and ranks all options by Total Cost of Acquisition.
+Applies a flat Arkim processing fee, shipping, location-based tax, and ranks
+all options by Total Cost of Acquisition.
 Generates the final Arkim-branded quote with full line-item breakdown.
 """
 
@@ -13,8 +14,9 @@ from utils.models import AssetSpecs, SourcingOption, ArkimQuote
 # Constants
 # ---------------------------------------------------------------------------
 
-ENTERPRISE_MARKUP = 0.10   # 10%  — Tier 1 (Grainger, McMaster-Carr, MSC)
-DISCOVERY_MARKUP  = 0.25   # 25%  — Tier 2 (Direct Buy via Arkim) and Tier 3 (Local / RFQ)
+# Single flat processing fee applied to (vendor_base + shipping).
+# Replaces the previous tiered markup model (10% Enterprise / 25% Discovery).
+ARKIM_PROCESSING_FEE_RATE = 0.035   # 3.5% of (vendor base + shipping)
 
 # TCA weights — must sum to 1.0
 SPEED_WEIGHT       = 0.35
@@ -60,19 +62,18 @@ def estimate_shipping(option: SourcingOption,
     Priority order for non-freight items:
       1. Extracted page fee (0 = Free Shipping, >0 = stated fee).
       2. LLM-extracted shipping_terms token.
-      3. Flat-rate fallback ($40 Local/Discovery; 5% min $15 Enterprise).
+      3. Flat-rate fallback ($40 Local/Quote Request; 5% min $15 Enterprise/Specialist).
     """
     # ── Magnitude guard: physical_magnitude classification takes first priority ─
     if specs is not None and getattr(specs, "physical_magnitude", None) == "LTL_freight":
         return (0.0, True, "S.F.Q.")
 
-    # ── Weight guard: >100 lbs is always freight — checked before any other logic
-    #    so no extracted fee or flat-rate fallback can override it.
+    # ── Weight guard: >100 lbs is always freight ──────────────────────────────
     _weight = getattr(option, "weight_lbs", None)
     if _weight is not None and _weight > 100:
         return (0.0, True, "S.F.Q.")
 
-    # ── Freight guard: absolute priority — zero cost, always S.F.Q. ─────────
+    # ── Freight guard: absolute priority — zero cost, always S.F.Q. ──────────
     if getattr(option, "is_freight", False):
         terms = getattr(option, "shipping_terms", None)
         label = terms if terms in ("LTL Freight Required", "S.F.Q.", "TBA - Freight") else "S.F.Q."
@@ -132,7 +133,7 @@ def _compute_tca_score(option: SourcingOption,
 
 
 # ---------------------------------------------------------------------------
-# Markup selection
+# TLV & Labor Impact
 # ---------------------------------------------------------------------------
 
 def compute_tlv(quote: "ArkimQuote", downtime_cost_per_day: float = DEFAULT_DOWNTIME_COST_PER_DAY) -> float:
@@ -153,18 +154,15 @@ def compute_tlv(quote: "ArkimQuote", downtime_cost_per_day: float = DEFAULT_DOWN
     else:
         effective_rel = rel
 
-    risk_factor    = max(0.0, 1.0 - effective_rel)
-    downtime_cost  = downtime_cost_per_day * quote.chosen_option.lead_time_days * risk_factor
-    shipping       = quote.shipping_cost
-    tax            = quote.tax_amount
-    return round(quote.vendor_base_price + downtime_cost + shipping + tax, 2)
+    risk_factor   = max(0.0, 1.0 - effective_rel)
+    downtime_cost = downtime_cost_per_day * quote.chosen_option.lead_time_days * risk_factor
+    return round(quote.vendor_base_price + downtime_cost + quote.shipping_cost + quote.tax_amount, 2)
 
 
 def _compute_labor_impact(option: SourcingOption) -> float:
     """Projected extra labor cost when market_confidence_score < MCS_LABOR_THRESHOLD.
 
     Each point below the threshold represents ~2 additional hours of replacement labour.
-    e.g. MCS=4 → 2 h × $200 = $400 | MCS=2 → 6 h × $200 = $1,200
     Returns 0.0 for high-confidence parts or when MCS is unknown.
     """
     mcs = getattr(option, "market_confidence_score", None)
@@ -174,31 +172,28 @@ def _compute_labor_impact(option: SourcingOption) -> float:
     return round(labor_hours * LABOR_RATE_PER_HOUR, 2)
 
 
-def _markup_for(option: SourcingOption) -> float:
-    """10 % for Tier 1 Enterprise; 25 % for Tier 2 (Direct Buy via Arkim) and Local."""
-    if option.merchant_type == "Enterprise":
-        return ENTERPRISE_MARKUP
-    return DISCOVERY_MARKUP
-
-
 # ---------------------------------------------------------------------------
-# Arkim Quote Builder
+# Arkim Quote Builder — flat 3.5% processing fee model
+#
+# Pricing formula:
+#   vendor_base  = vendor_quoted_price + shipping
+#   arkim_fee    = vendor_base × ARKIM_PROCESSING_FEE_RATE
+#   subtotal     = vendor_base + arkim_fee
+#   tax          = subtotal × tax_rate
+#   grand_total  = subtotal + tax
 # ---------------------------------------------------------------------------
 
 def _build_arkim_quote(specs: AssetSpecs, option: SourcingOption,
                        site: str = "La Mirada") -> ArkimQuote:
-    markup_pct                    = _markup_for(option)
-    admin_fee                     = option.admin_fee
     shipping_cost, is_ltl, s_label = estimate_shipping(option, specs)
-    tax_rate                      = get_tax_rate(site)
+    tax_rate                       = get_tax_rate(site)
 
-    # Line-item sequence (shipping excluded from basis when LTL — unknown cost)
-    cost_basis       = option.base_price + admin_fee + shipping_cost
-    arkim_sale_price = round(cost_basis * (1 + markup_pct), 2)
+    vendor_base      = option.base_price + shipping_cost
+    arkim_fee        = round(vendor_base * ARKIM_PROCESSING_FEE_RATE, 2)
+    arkim_sale_price = round(vendor_base + arkim_fee, 2)   # subtotal before tax
     tax_amount       = round(arkim_sale_price * tax_rate, 2)
     grand_total      = round(arkim_sale_price + tax_amount, 2)
 
-    # Pass-1 TCA: cost component is neutral (no peer context yet)
     tca_score = _compute_tca_score(option)
 
     return ArkimQuote(
@@ -207,8 +202,8 @@ def _build_arkim_quote(specs: AssetSpecs, option: SourcingOption,
         asset_specs=specs,
         chosen_option=option,
         vendor_base_price=option.base_price,
-        arkim_markup_pct=markup_pct * 100,
-        admin_fee=admin_fee,
+        arkim_markup_pct=ARKIM_PROCESSING_FEE_RATE * 100,  # 3.5 — stored for audit
+        admin_fee=0.0,                                       # removed in flat-fee model
         shipping_cost=shipping_cost,
         arkim_sale_price=arkim_sale_price,
         tax_rate=tax_rate,
@@ -218,6 +213,7 @@ def _build_arkim_quote(specs: AssetSpecs, option: SourcingOption,
         tca_score=tca_score,
         shipping_ltl=is_ltl,
         shipping_label=s_label,
+        arkim_fee_rate_applied=ARKIM_PROCESSING_FEE_RATE,
     )
 
 
@@ -264,7 +260,6 @@ def generate_arkim_quote(specs: AssetSpecs,
     for q in all_quotes:
         q.labor_impact_cost = _compute_labor_impact(q.chosen_option) if workflow == "spare_parts" else 0.0
 
-    # Effective cost for TCA ranking = grand_total + labor surcharge (spare parts only)
     effective_costs = [q.grand_total + q.labor_impact_cost for q in all_quotes]
     min_gt = min(effective_costs)
     max_gt = max(effective_costs)
@@ -273,9 +268,9 @@ def generate_arkim_quote(specs: AssetSpecs,
         q.tlv_score = compute_tlv(q, downtime_cost_per_day)
 
     if workflow == "spare_parts":
-        all_quotes.sort(key=lambda q: q.tca_score, reverse=True)   # higher TCA = better
+        all_quotes.sort(key=lambda q: q.tca_score, reverse=True)
     else:
-        all_quotes.sort(key=lambda q: q.tlv_score)                  # lower TLV  = better
+        all_quotes.sort(key=lambda q: q.tlv_score)
 
     best = all_quotes[0]
     metric_str = (f"TCA: {best.tca_score:.1f}" if workflow == "spare_parts"
@@ -283,7 +278,7 @@ def generate_arkim_quote(specs: AssetSpecs,
     print(
         f"[Quote Engine] Recommended: {best.chosen_option.vendor_name} "
         f"| {metric_str} "
-        f"| Arkim Price: ${best.arkim_sale_price:.2f} "
+        f"| Subtotal: ${best.arkim_sale_price:.2f} "
         f"| Grand Total: ${best.grand_total:.2f}"
         + (" +LTL freight" if best.shipping_ltl else "")
     )

@@ -391,6 +391,7 @@ _DEFAULTS: dict = {
     "active_tab":           "🔍 Active Sourcing",
     "sourcing_history":           [],    # auto-saved sourcing events
     "force_refresh":              False, # bypass price cache on next pipeline run
+    "recorded_intents":           {},    # {quote_id: intent_record} — captured Accept Offer events
     "pending_verification_specs": None,  # specs waiting for user to confirm missing fields
     "pending_verification_site":  None,
     "pending_search_strategy":    None,  # run_data held while user answers OEM-vs-aftermarket
@@ -874,7 +875,7 @@ def _build_context() -> str:
     )
     for q in st.session_state.all_quotes:
         o = q.chosen_option
-        tag = " [+$50 RFQ]" if o.requires_rfq else ""
+        tag = " [RFQ]" if o.requires_rfq else ""
         lines.append(
             f"  {o.vendor_name} ({o.merchant_type}): vendor ${o.base_price:.2f} "
             f"→ Arkim ${q.arkim_sale_price:.2f} + tax ${q.tax_amount:.2f} "
@@ -1046,7 +1047,7 @@ def render_vendor_cards() -> None:
         _wf       = st.session_state.workflow_mode
         _best_lbl = "Best TLV" if _wf != "spare_parts" else "Best TCA"
         best_html = f'<span class="best-badge">{_best_lbl}</span>' if is_best else ""
-        rfq_html  = '<div class="rfq-warning">&#9888; Requires 24-48h for manual outreach &middot; +$50 admin fee</div>' if o.requires_rfq else ""
+        rfq_html  = '<div class="rfq-warning">&#9888; Requires 24-48h for manual outreach</div>' if o.requires_rfq else ""
 
         # "Preferred" badge: 100% PN exact match across all workflows — differentiates
         # the original from functional equivalents returned by dual-search.
@@ -1239,13 +1240,15 @@ def render_vendor_cards() -> None:
                 _total_cell = f'<td style="text-align:right;font-weight:700;color:#3fb950;padding:.12rem 0 0;">${q.grand_total:,.2f}</td>'
                 _total_lbl  = 'Grand Total'
 
+            _arkim_fee_amt = round(q.arkim_sale_price - (o.base_price + q.shipping_cost), 2)
+            _fee_rate_pct  = f"{(getattr(q, 'arkim_fee_rate_applied', 0.035) or 0.035) * 100:.1f}"
             st.markdown(f"""
             <div class="{card_cls}">
               <table style="font-size:.77rem;width:100%;border-collapse:collapse;">
                 <tr><td style="color:#8b949e;padding:.04rem 0;">Vendor Base</td><td style="text-align:right;">${o.base_price:,.2f}</td></tr>
                 <tr><td style="color:#8b949e;padding:.04rem 0;">Shipping</td>{_ship_cell}</tr>
                 {_pn_row}
-                <tr><td style="color:#8b949e;padding:.04rem 0;">Arkim Price</td><td style="text-align:right;color:#e6edf3;font-weight:600;">${q.arkim_sale_price:,.2f}</td></tr>
+                <tr><td style="color:#8b949e;padding:.04rem 0;">Arkim Processing Fee ({_fee_rate_pct}%)</td><td style="text-align:right;color:#e6edf3;font-weight:600;">${_arkim_fee_amt:,.2f}</td></tr>
                 <tr><td style="color:#8b949e;padding:.04rem 0;">Tax</td><td style="text-align:right;">${q.tax_amount:,.2f}</td></tr>
                 <tr style="border-top:1px solid #30363d;">
                   <td style="padding:.12rem 0 0;font-weight:700;color:#3fb950;">{_total_lbl}</td>
@@ -1339,29 +1342,67 @@ def render_vendor_cards() -> None:
                 )
                 _accept_enabled = _confirmed
 
-            if st.button(
-                "Accept Offer",
-                key=f"accept_{q.quote_id}",
-                type="primary" if is_best else "secondary",
-                use_container_width=True,
-                disabled=not _accept_enabled,
-            ):
-                from datetime import datetime as _dt
-                st.session_state.accepted_quote = q
-                st.session_state.rfq_campaign_sent = False
-                st.session_state.rfq_vendors_selected = []
-                st.session_state.active_tab = "🔍 Active Sourcing"
-                st.session_state.order_history.append({
-                    "Asset":       f"{st.session_state.specs.manufacturer} {st.session_state.specs.model}",
-                    "Part No.":    st.session_state.specs.part_number,
-                    "Vendor":      o.vendor_name,
-                    "Site":        st.session_state.site,
-                    "Grand Total": q.grand_total,
-                    "Quote ID":    q.quote_id,
-                    "Accepted":    _dt.now().strftime("%Y-%m-%d %H:%M"),
-                    "Status":      "Processing",
-                })
-                st.rerun()
+            _already_accepted = q.quote_id in st.session_state.get("recorded_intents", {})
+
+            if _already_accepted:
+                # Show inline confirmation — button is effectively disabled
+                st.markdown(
+                    '<div style="background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.4);'
+                    'border-radius:6px;padding:.5rem .7rem;font-size:.75rem;color:#3fb950;">'
+                    '&#10003; <b>Offer recorded</b> — Arkim transaction processing is currently in '
+                    'prototype mode. In production, this action will trigger Arkim\'s '
+                    'merchant-of-record workflow: vendor payment via ACH, customer invoicing, '
+                    'and shipment tracking.</div>',
+                    unsafe_allow_html=True,
+                )
+                _intent = st.session_state.recorded_intents[q.quote_id]
+                with st.expander("View Recorded Intent"):
+                    st.json(_intent)
+            else:
+                if st.button(
+                    "Accept Offer",
+                    key=f"accept_{q.quote_id}",
+                    type="primary" if is_best else "secondary",
+                    use_container_width=True,
+                    disabled=not _accept_enabled,
+                ):
+                    from datetime import datetime as _dt
+                    _fee_rate   = getattr(q, "arkim_fee_rate_applied", 0.035) or 0.035
+                    _vbase      = o.base_price + q.shipping_cost
+                    _arkim_fee  = round(_vbase * _fee_rate, 2)
+                    _specs      = st.session_state.specs
+                    _intent_rec = {
+                        "quote_id":            q.quote_id,
+                        "sourcing_run_id":     getattr(q, "sourcing_run_id", None),
+                        "captured_at":         _dt.now().isoformat(),
+                        "vendor":              o.vendor_name,
+                        "vendor_merchant_type": o.merchant_type,
+                        "part_number":         _specs.part_number if _specs else None,
+                        "manufacturer":        _specs.manufacturer if _specs else None,
+                        "model":               _specs.model if _specs else None,
+                        "description":         _specs.description if _specs else None,
+                        "site":                st.session_state.site,
+                        "vendor_base_price":   o.base_price,
+                        "shipping_cost":       q.shipping_cost,
+                        "arkim_processing_fee": _arkim_fee,
+                        "arkim_fee_rate":      _fee_rate,
+                        "tax_amount":          q.tax_amount,
+                        "grand_total":         q.grand_total,
+                    }
+                    if "recorded_intents" not in st.session_state:
+                        st.session_state.recorded_intents = {}
+                    st.session_state.recorded_intents[q.quote_id] = _intent_rec
+                    st.session_state.order_history.append({
+                        "Asset":       f"{_specs.manufacturer} {_specs.model}" if _specs else "—",
+                        "Part No.":    _specs.part_number if _specs else "—",
+                        "Vendor":      o.vendor_name,
+                        "Site":        st.session_state.site,
+                        "Grand Total": q.grand_total,
+                        "Quote ID":    q.quote_id,
+                        "Accepted":    _dt.now().strftime("%Y-%m-%d %H:%M"),
+                        "Status":      "Intent Recorded",
+                    })
+                    st.rerun()
 
     if quotes:
         _wf_note = st.session_state.workflow_mode
@@ -1370,7 +1411,7 @@ def render_vendor_cards() -> None:
         else:
             _metric_note = "TLV = Purchase Price + (Downtime Cost × Lead Days × Reliability Risk) + Shipping + Tax. Lower TLV = better lifecycle value."
         st.markdown(f'<div style="font-size:.7rem;color:#8b949e;margin-top:.2rem;">'
-                    f'{_metric_note} &nbsp;·&nbsp; Grand Total includes Arkim markup + sales tax. '
+                    f'{_metric_note} &nbsp;·&nbsp; Grand Total includes 3.5% Arkim processing fee + sales tax. '
                     f'Purchasable via Arkim — no new vendor onboarding required.'
                     f'</div>', unsafe_allow_html=True)
 
@@ -1380,21 +1421,20 @@ def render_purchase_confirmed() -> None:
     q   = st.session_state.accepted_quote
     s   = st.session_state.specs
     opt = q.chosen_option
-    cost_basis = opt.base_price + q.admin_fee + q.shipping_cost
-    markup_amt = q.arkim_sale_price - cost_basis
+    _fee_rate    = getattr(q, "arkim_fee_rate_applied", 0.035) or 0.035
+    _fee_rate_pct = f"{_fee_rate * 100:.1f}"
+    _arkim_fee   = round((opt.base_price + q.shipping_cost) * _fee_rate, 2)
 
     st.markdown("""
     <div class="confirmed-banner">
-      <h2>&#10003; Purchase Confirmed</h2>
-      <p>Arkim is now processing this order via our Merchant of Record account.</p>
+      <h2>&#10003; Offer Recorded</h2>
+      <p>Arkim transaction processing is currently in prototype mode. In production,
+      this action will trigger Arkim's merchant-of-record workflow: vendor payment
+      via ACH, customer invoicing, and shipment tracking.</p>
     </div>""", unsafe_allow_html=True)
 
     c1, c2 = st.columns([3, 1])
     with c1:
-        admin_row = (
-            f'<tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;">Admin Fee (RFQ)</td>'
-            f'<td style="text-align:right;">${q.admin_fee:,.2f}</td></tr>'
-        ) if q.admin_fee else ""
         _conf_ltl    = getattr(q, "shipping_ltl", False)
         _conf_slabel = getattr(q, "shipping_label", "") or ("LTL Freight Required" if _conf_ltl else f"${q.shipping_cost:,.2f}")
         _conf_freight = _conf_ltl or _conf_slabel in ("LTL Freight Required", "S.F.Q.", "TBA - Freight")
@@ -1408,7 +1448,7 @@ def render_purchase_confirmed() -> None:
         _grand_display = f"${q.grand_total:,.2f} + Freight" if _conf_freight else f"${q.grand_total:,.2f}"
         st.markdown(f"""
         <div class="a-card">
-          <div class="a-label">Arkim Purchase Order</div>
+          <div class="a-label">Arkim Sourcing Recommendation</div>
           <div style="font-size:.8rem;color:#8b949e;margin-bottom:.5rem;">
             Quote ID: <code>{q.quote_id}</code> &nbsp;&middot;&nbsp;
             {q.generated_at.strftime('%Y-%m-%d %H:%M')} &nbsp;&middot;&nbsp;
@@ -1420,12 +1460,9 @@ def render_purchase_confirmed() -> None:
           </div>
           <table style="font-size:.82rem;border-collapse:collapse;width:100%;">
             <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;">Vendor Base Price</td><td style="text-align:right;">${opt.base_price:,.2f}</td></tr>
-            {admin_row}
             {ship_row_confirmed}
-            <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;border-top:1px solid #30363d;">Cost Basis</td><td style="text-align:right;border-top:1px solid #30363d;">${cost_basis:,.2f}</td></tr>
-            <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;">Arkim Markup ({q.arkim_markup_pct:.0f}%)</td><td style="text-align:right;">${markup_amt:,.2f}</td></tr>
-            <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;border-top:1px solid #30363d;">Arkim Service Price</td><td style="text-align:right;border-top:1px solid #30363d;">${q.arkim_sale_price:,.2f}</td></tr>
-            <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;">Sales Tax ({q.tax_rate*100:.2f}%)</td><td style="text-align:right;">${q.tax_amount:,.2f}</td></tr>
+            <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;">Arkim Processing Fee ({_fee_rate_pct}%)</td><td style="text-align:right;">${_arkim_fee:,.2f}</td></tr>
+            <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;border-top:1px solid #30363d;">Sales Tax ({q.tax_rate*100:.2f}%)</td><td style="text-align:right;border-top:1px solid #30363d;">${q.tax_amount:,.2f}</td></tr>
           </table>
           <div style="font-size:.78rem;color:#58a6ff;margin-top:.6rem;">
             &#10004; Client approves Arkim to proceed with quote request (AVL bypass)
@@ -1482,8 +1519,7 @@ def render_tier3_outreach() -> None:
     st.markdown(
         f'<div style="font-size:.78rem;color:#8b949e;margin-bottom:.75rem;">'
         f'{body}'
-        f'Select vendors to contact. Each outreach includes a Partner Invitation '
-        f'and adds a <b style="color:#d29922;">$50 admin fee</b>.</div>',
+        f'Select vendors to contact. Arkim will reach out on your behalf within 24–48 hours.</div>',
         unsafe_allow_html=True,
     )
 
@@ -1555,7 +1591,7 @@ def render_tier3_outreach() -> None:
             with _inv_col1:
                 chk_key = f"rfq_chk_{o.vendor_name}"
                 checked = st.checkbox(
-                    f"Include {o.vendor_name} in outreach (+$50 admin fee)",
+                    f"Include {o.vendor_name} in outreach",
                     key=chk_key,
                     value=True,
                 )
@@ -1569,7 +1605,7 @@ def render_tier3_outreach() -> None:
         else:
             chk_key = f"rfq_chk_{o.vendor_name}"
             checked = st.checkbox(
-                f"Include {o.vendor_name} in outreach (+$50 admin fee)",
+                f"Include {o.vendor_name} in outreach",
                 key=chk_key,
                 value=True,
             )

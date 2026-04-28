@@ -85,14 +85,14 @@ def render_report(report: ProcurementReport, all_quotes: list[ArkimQuote]) -> No
         print(c(row, row_color))
 
     print(c(sep, GREY))
-    print(f"  {c('★ = Recommended (highest TCA)', GREEN)}   {c('[RFQ] = Manual outreach +$50 admin', RED)}")
+    print(f"  {c('★ = Recommended (highest TCA)', GREEN)}   {c('[RFQ] = Manual outreach required', RED)}")
     print(f"  {GREY}Grand Total includes Arkim markup + location sales tax{RESET}")
 
-    # ── Final PO ──
-    rq  = report.recommended_quote
-    opt = rq.chosen_option
-    cost_basis = opt.base_price + rq.admin_fee + rq.shipping_cost
-    markup_amt = rq.arkim_sale_price - cost_basis
+    # ── Final Sourcing Recommendation ──
+    rq         = report.recommended_quote
+    opt        = rq.chosen_option
+    vendor_base = opt.base_price + rq.shipping_cost
+    arkim_fee   = round(vendor_base * (rq.arkim_fee_rate_applied or 0.035), 2)
 
     print(f"\n{c(dsep, CYAN)}")
     print(c("  ▲  ARKIM SOURCING RECOMMENDATION (PENDING CLIENT APPROVAL)", BOLD, CYAN))
@@ -101,20 +101,17 @@ def render_report(report: ProcurementReport, all_quotes: list[ArkimQuote]) -> No
     print(f"  Generated At   : {rq.generated_at.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Asset          : {s.manufacturer} {s.model} ({s.part_number})")
     print()
-    print(f"  Preferred Vendor       : {c(opt.vendor_name, BOLD)}")
-    print(f"  ── Cost Breakdown ──────────────────────────────")
-    print(f"  Vendor Base Price      : ${opt.base_price:>10.2f}")
-    print(f"  Admin Fee              : ${rq.admin_fee:>10.2f}")
-    print(f"  Shipping               : ${rq.shipping_cost:>10.2f}")
-    print(f"  ────────────────────────────────────────────────")
-    print(f"  Cost Basis             : ${cost_basis:>10.2f}")
-    print(f"  Arkim Markup ({rq.arkim_markup_pct:.0f}%)       : ${markup_amt:>10.2f}")
-    print(f"  ────────────────────────────────────────────────")
-    print(f"  Arkim Service Price    : ${rq.arkim_sale_price:>10.2f}")
-    print(f"  Sales Tax ({rq.tax_rate*100:.2f}%)        : ${rq.tax_amount:>10.2f}")
-    print(f"  ════════════════════════════════════════════════")
-    print(f"  {c('GRAND TOTAL            : ${:>10.2f}'.format(rq.grand_total), BOLD, GREEN)}")
-    print(f"  ════════════════════════════════════════════════")
+    print(f"  Preferred Vendor               : {c(opt.vendor_name, BOLD)}")
+    print(f"  ── Cost Breakdown ──────────────────────────────────────")
+    print(f"  Vendor Base Price              : ${opt.base_price:>10.2f}")
+    print(f"  Shipping                       : ${rq.shipping_cost:>10.2f}")
+    print(f"  Arkim Processing Fee (3.5%)    : ${arkim_fee:>10.2f}")
+    print(f"  ────────────────────────────────────────────────────────")
+    print(f"  Subtotal                       : ${rq.arkim_sale_price:>10.2f}")
+    print(f"  Sales Tax ({rq.tax_rate*100:.2f}%)              : ${rq.tax_amount:>10.2f}")
+    print(f"  ════════════════════════════════════════════════════════")
+    print(f"  {c('GRAND TOTAL                    : ${:>10.2f}'.format(rq.grand_total), BOLD, GREEN)}")
+    print(f"  ════════════════════════════════════════════════════════")
     print()
     print(f"  Est. Delivery      : {rq.estimated_delivery_days} business days")
     print(f"  AVL Status         : {c(rq.avl_bypass_label, BOLD, CYAN)}")

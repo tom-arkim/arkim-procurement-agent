@@ -1247,7 +1247,7 @@ def _discover_national_specialists(specs: AssetSpecs,
             merchant_type=t2_merchant,
             requires_rfq=tbd,
             contact_email=email,
-            admin_fee=50.0 if tbd else 0.0,
+            admin_fee=0.0,
             notes=f"National specialist — {url}" if url else "National specialist",
             source_url=url,
             price_tbd=tbd,
@@ -1270,99 +1270,104 @@ def _discover_national_specialists(specs: AssetSpecs,
 # Tier 3 — RFQ Email Draft Generator
 # ---------------------------------------------------------------------------
 
-def draft_rfq_email(specs: AssetSpecs, vendor: SourcingOption) -> str:
-    """Generate a Partner Invitation email for Tier 3 / TBD vendors.
+# Outbound email is not implemented. This constant must remain False until:
+# (a) email templates are reviewed by legal counsel, and (b) a deliberate
+# enabling decision is made and documented.
+EMAIL_SEND_ENABLED = False  # Outbound email is not implemented.
+                            # When SMTP/email API integration is added, this
+                            # constant must remain False until:
+                            # (a) email templates are reviewed by legal counsel
+                            #     for accuracy of representations and CAN-SPAM compliance.
+                            # (b) a deliberate enabling decision is made and documented.
 
-    Combines an immediate RFQ (specific part, 48-hour intent) with an Arkim
-    Partner Network onboarding offer (Merchant of Record value prop + unique claim link).
+_EMAIL_DEMO_FOOTER = """
+---
+[DEMO PREVIEW — This is a rendered example of the email Arkim's procurement agent will send
+when the supplier outreach workflow is activated. No outbound email is currently sent from
+this system.]"""
+
+
+# IMPORTANT: These email templates describe Arkim's prototype-stage product.
+# Before any outbound email send capability is enabled:
+# 1. EMAIL_SEND_ENABLED above must be reviewed and updated.
+# 2. Templates must be reviewed by legal counsel for accuracy of representations
+#    and CAN-SPAM compliance.
+# 3. The two-template structure (quote_request vs. partner_invitation) must be
+#    preserved — do not recombine them into a single multi-purpose email.
+def draft_rfq_email(specs: AssetSpecs, vendor: SourcingOption,
+                    email_type: str = "quote_request") -> str:
+    """Generate a supplier outreach email.
+
+    email_type:
+      "quote_request"      — requests a specific quote for the part being sourced (default).
+      "partner_invitation" — invites the vendor to join the Arkim supplier network.
+
+    These are intentionally two separate emails. Do not recombine them.
     """
-    to_address   = vendor.contact_email or "[ vendor email — see contact details below ]"
-    onboard_url  = _onboarding_url(vendor.vendor_name, specs)
-    suit_pct     = f"{vendor.suitability_score:.0f}%" if vendor.suitability_score else "—"
+    to_address = vendor.contact_email or "[vendor email — to be sourced via partner onboarding]"
 
-    # Asset-type label for the "why selected" paragraph
-    asset_type = (getattr(specs, "detected_type", None) or specs.description
-                  or f"{specs.manufacturer} {specs.model}")
+    if email_type == "partner_invitation":
+        body = f"""To: {to_address}
+Subject: Arkim AI — partnership opportunity for industrial parts suppliers
 
-    part_line = f"{specs.manufacturer} {specs.model}"
-    if specs.part_number and specs.part_number not in ("N/A", "UNKNOWN-PN", "Unknown"):
-        part_line += f" (PN: {specs.part_number})"
-    if specs.hp and specs.hp not in ("N/A", "None", "null"):
-        part_line += f" — {specs.hp} HP"
-    if specs.description:
-        part_line += f" — {specs.description}"
+Hello,
 
-    # CapEx extras
-    use_case   = getattr(specs, "use_case",   None)
-    duty_cycle = getattr(specs, "duty_cycle",  None)
-    budget_max = getattr(specs, "budget_max",  None)
-    capex_block = ""
-    if use_case or duty_cycle or budget_max:
-        capex_block = (
-            "\n──────────────────────────────────────────\n"
-            "APPLICATION CONTEXT\n"
-            "──────────────────────────────────────────\n"
-            + (f"  Use Case     : {use_case}\n"   if use_case   else "")
-            + (f"  Duty Cycle   : {duty_cycle}\n"  if duty_cycle else "")
-            + (f"  Max Budget   : {budget_max}\n"  if budget_max else "")
-        )
+Arkim AI is building a maintenance and procurement platform for industrial facilities.
+We're inviting parts suppliers and distributors to join our early supplier network.
 
-    return f"""To: {to_address}
-Subject: Sourcing Inquiry + Arkim Partner Invitation — {specs.manufacturer} {specs.model}
+What we're building:
 
-Dear {vendor.vendor_name} Team,
+We connect industrial maintenance teams with suppliers when they need replacement parts.
+Our diagnostic AI identifies the part, and we route the sourcing request to suppliers
+in our network.
 
-I represent Arkim Industrial Procurement Services. Our sourcing system identified
-{vendor.vendor_name} as a specialist in {asset_type} equipment (match score: {suit_pct}).
-We have an active, time-sensitive requirement for the item below and believe your
-expertise makes you the right supplier:
+What we're offering early partners:
 
-  {part_line}
-{capex_block}
-──────────────────────────────────────────
-IMMEDIATE SOURCING REQUEST
-──────────────────────────────────────────
-  Manufacturer  : {specs.manufacturer}
-  Model         : {specs.model}
-  Part Number   : {specs.part_number}
-  Voltage       : {specs.voltage}
-  Horsepower    : {specs.hp or "—"}
-  Description   : {specs.description or "—"}
-  Quantity      : 1 unit (first order)
+  • Free placement in our supplier network — no fees to onboard
+  • Direct sourcing requests from facilities in your service area
+  • Early input into how the platform serves your business
 
-Please reply with:
-  • Unit price and lead time
+If this is interesting, learn more at https://partners.arkim.ai
+
+Thanks for your time.
+
+Arkim AI
+partners@arkim.ai"""
+    else:
+        # quote_request (default)
+        pn   = specs.part_number if specs.part_number not in ("N/A", "UNKNOWN-PN", "Unknown", None) else "—"
+        desc = specs.description or "—"
+        qty  = "1"
+
+        body = f"""To: {to_address}
+Subject: Quote request — {specs.manufacturer} {specs.model}, PN {pn}
+
+Hello,
+
+I'm reaching out from Arkim AI on behalf of one of our facility customers who is
+sourcing the part below. Your company appeared in our search for specialists in
+this category.
+
+Item: {specs.manufacturer} {specs.model}
+Part Number: {pn}
+Description: {desc}
+Quantity: {qty}
+
+If you stock or can supply this part, we'd appreciate:
+
+  • Unit price
+  • Lead time
   • Shipping terms (FOB origin or destination)
-  • Availability / stock status
+  • Stock availability
 
-We aim to place an order within 48 hours of a complete quote.
+Please reply directly to this email or contact procurement@arkim.ai.
 
-──────────────────────────────────────────
-ARKIM MERCHANT OF RECORD — HOW IT WORKS
-──────────────────────────────────────────
-Arkim acts as the Merchant of Record on every transaction:
+Thanks for your time.
 
-  ✓ Net-0 instant payment — ACH wired upon order confirmation, zero
-    collections risk, no invoice chasing
-  ✓ No corporate onboarding — bypass the 4-6 week AP/vendor setup
-    that blocks most industrial buyers; sell immediately
-  ✓ Guaranteed volume — Arkim aggregates demand across multiple facilities;
-    partners in our network see 3-8× more repeat orders per year
-  ✓ Regional RFQ priority — once verified, you appear first in our
-    sourcing queue for {specs.detected_type or specs.description or "this equipment category"}
+Arkim AI
+procurement@arkim.ai"""
 
-Our matching algorithm rated {vendor.vendor_name} at {suit_pct} compatibility
-for this category. Claim your Partner profile (under 5 minutes):
-
-  → {onboard_url}
-
-──────────────────────────────────────────
-
-Thank you — we look forward to working together.
-
-Arkim Procurement Team
-procurement@arkim.ai  |  partners.arkim.ai
-──────────────────────────────────────────""".strip()
+    return body.strip() + _EMAIL_DEMO_FOOTER
 
 
 # ---------------------------------------------------------------------------
