@@ -393,7 +393,10 @@ _DEFAULTS: dict = {
     "force_refresh":              False, # bypass price cache on next pipeline run
     "pending_verification_specs": None,  # specs waiting for user to confirm missing fields
     "pending_verification_site":  None,
-    "search_mode":                "exact",  # "exact" | "equivalents" — carried into pipeline
+    "pending_search_strategy":    None,  # run_data held while user answers OEM-vs-aftermarket
+    "seal_enhanced_done":         False, # True once dimensional question has been asked for this seal
+    "input_key_counter":          0,     # incremented on every Send to force text_input to clear
+    "search_mode":                "equivalents",  # "exact" | "equivalents" — always equivalents
     "workflow_mode":              "spare_parts",  # "spare_parts" | "replacement" | "capex"
     "downtime_cost_per_day":      500.0,   # USD/day — used for TLV calculation
 }
@@ -556,7 +559,7 @@ def _execute_pipeline(specs, site: str,
         else:
             src_label  = "fetching fresh prices" if force_refresh else "checking price DB first"
             mode_label = "exact PN" if search_mode == "exact" else "exact + equivalents + cross-reference"
-            st.write(f"🌐 **Sourcing specialized stockists and aftermarket alternatives** ({src_label} · {mode_label})…")
+            st.write(f"🌐 **Sourcing Specialized Authorized Distributors and Parent Company Stockists...** ({src_label} · {mode_label})")
 
         st.write("📦 **Batching Snippets** — parsing vendor results…")
         options, _ = find_vendors(specs, site=site, force_refresh=force_refresh,
@@ -791,27 +794,30 @@ def _missing_critical_specs(specs) -> list[str]:
     Category-aware: Parts only need Manufacturer + PN to run a search.
     Equipment needs Voltage, Phase, and at least one performance spec.
     """
+    from utils.sourcing import HIGH_RISK_ELECTRICAL_CATEGORIES
     _null = {"N/A", "Unknown", "null", "None", "UNKNOWN-PN", None, ""}
     missing = []
 
     if specs.category == "Part":
         # Parts: Voltage/Phase/HP/GPM/PSI belong to the parent machine, not the part.
-        # We only need enough to identify the part — Manufacturer + PN is sufficient.
+        # Only Manufacturer + PN are needed to run a search; everything else is noise.
+        # Dimensional/material details are collected via the OEM-vs-aftermarket strategy
+        # question (a separate pipeline stage), not here.
         if specs.manufacturer in _null:
             missing.append("Manufacturer (needed to find cross-reference alternatives)")
         if specs.part_number in _null:
             missing.append("Part Number or dimensions (needed to locate the exact part)")
-        # Seal-specific: shaft size and material help find aftermarket alternatives
-        dtype_l = (getattr(specs, "detected_type", "") or "").lower()
-        if "seal" in dtype_l:
-            desc_l = (specs.description or "").lower()
-            has_dim_info = any(kw in desc_l for kw in
-                               ("inch", "mm", "viton", "epdm", "buna", "teflon",
-                                "shaft", "sleeve", "carbon", "ceramic", "tungsten"))
-            if not has_dim_info:
+
+        # 1.8 — Soft-warn for high-risk electrical parts missing voltage/phase
+        dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
+        is_high_risk_elec = any(cat in dtype_lower for cat in HIGH_RISK_ELECTRICAL_CATEGORIES)
+        if is_high_risk_elec:
+            has_voltage = specs.voltage not in _null
+            has_phase   = getattr(specs, "phase", None) not in _null
+            if not has_voltage or not has_phase:
                 missing.append(
-                    'shaft size or elastomer material (e.g. "1.5 inch shaft, Viton") '
-                    '— helps find aftermarket alternatives'
+                    "Voltage and Phase (recommended for electrical components — "
+                    "wrong ratings risk damage or non-compliance)"
                 )
     else:
         # Equipment: Voltage, Phase, and at least one performance spec required
@@ -1083,6 +1089,10 @@ def render_vendor_cards() -> None:
             mt_badge = '<span class="chip chip-g" style="font-size:.62rem;">ENTERPRISE</span>'
         elif mt == "National Specialist":
             mt_badge = '<span class="chip chip-a" style="font-size:.62rem;">NATIONAL SPECIALIST</span>'
+        elif mt == "Direct Buy via Arkim":
+            mt_badge = '<span class="chip chip-g" style="font-size:.62rem;">DIRECT BUY</span>'
+        elif mt == "Quote Request":
+            mt_badge = '<span class="chip chip-o" style="font-size:.62rem;">QUOTE REQUEST</span>'
         else:
             mt_badge = '<span class="chip" style="font-size:.62rem;">LOCAL</span>'
 
@@ -1091,6 +1101,36 @@ def render_vendor_cards() -> None:
             '<span class="mor-badge">Purchasable via Arkim</span>'
             if mt not in ("Enterprise",) else ""
         )
+
+        # 1.9 — Counterfeit risk warning badge
+        _cf_risk = getattr(o, "counterfeit_risk_flag", False)
+        _cf_badge = (
+            '<span class="chip chip-r" style="font-size:.62rem;" '
+            'title="Elevated counterfeit risk: verify source authenticity before purchase">'
+            '&#9888; Counterfeit Risk</span>'
+            if _cf_risk else ""
+        )
+
+        # 1.6 — Limited price data warning
+        _limited_price = getattr(o, "limited_price_data", False)
+        _limited_price_badge = (
+            '<span class="chip chip-a" style="font-size:.62rem;" '
+            'title="Fewer than 4 peer prices found — price sanity confidence is limited">'
+            '&#9432; Limited Price Data</span>'
+            if _limited_price else ""
+        )
+
+        # 1.10 — Confidence score chip
+        _conf = getattr(o, "confidence_score", None)
+        _conf_html = ""
+        if _conf is not None:
+            _conf_color = "#3fb950" if _conf >= 70 else "#d29922" if _conf >= 50 else "#f85149"
+            _conf_label = "High Confidence" if _conf >= 70 else "Medium Confidence" if _conf >= 50 else "Low Confidence"
+            _conf_html = (
+                f'<span class="chip" title="Identification confidence score" '
+                f'style="font-size:.62rem;border-color:{_conf_color};color:{_conf_color};">'
+                f'{_conf_label} {_conf:.0f}%</span>'
+            )
 
         _mt = getattr(o, "match_type", "Exact OEM")
         if _mt == "Aftermarket Compatible":
@@ -1148,14 +1188,14 @@ def render_vendor_cards() -> None:
               <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.35rem;">
                 <span style="font-size:1rem;font-weight:700;color:#e6edf3;">{o.vendor_name}</span>
                 {mt_badge}{_mor_html}
-                {src_badge}{best_html}{_preferred_html}{alt_badge}{coll_badge}
+                {src_badge}{best_html}{_preferred_html}{alt_badge}{coll_badge}{_cf_badge}
               </div>
               <div style="font-size:.77rem;color:#8b949e;">
                 Lead: <b style="color:#c9d1d9;">{o.lead_time_days}d</b> &nbsp;&middot;&nbsp;
                 {_reliability_html} &nbsp;&middot;&nbsp;
                 {_score_html}
               </div>
-              <div style="margin-top:.25rem;">{_mcs_html}{_wt_html}</div>
+              <div style="margin-top:.25rem;">{_mcs_html}{_wt_html}{_conf_html}{_limited_price_badge}</div>
               {_risk_html}{rfq_html}{url_html}
             </div>""", unsafe_allow_html=True)
 
@@ -1388,7 +1428,7 @@ def render_purchase_confirmed() -> None:
             <tr><td style="color:#8b949e;padding:.1rem .5rem .1rem 0;">Sales Tax ({q.tax_rate*100:.2f}%)</td><td style="text-align:right;">${q.tax_amount:,.2f}</td></tr>
           </table>
           <div style="font-size:.78rem;color:#58a6ff;margin-top:.6rem;">
-            &#10004; Direct Buy via Arkim — no new vendor onboarding required (AVL bypass)
+            &#10004; Client approves Arkim to proceed with quote request (AVL bypass)
             &nbsp;&middot;&nbsp; Est. {q.estimated_delivery_days} business days
           </div>
         </div>""", unsafe_allow_html=True)
@@ -1421,7 +1461,7 @@ def render_tier3_outreach() -> None:
 
     priced_national = [o for o in all_options
                        if not getattr(o, "price_tbd", False)
-                       and o.merchant_type in ("Enterprise", "National Specialist", "Direct Buy via Arkim")]
+                       and o.merchant_type in ("Enterprise", "National Specialist", "Direct Buy via Arkim", "Quote Request")]
     no_buy_now = len(priced_national) == 0
     header_note = (
         '<span style="color:#f85149;font-size:.72rem;font-weight:600;margin-left:.5rem;">'
@@ -1457,7 +1497,7 @@ def render_tier3_outreach() -> None:
     any_checked = False
     for o in rfq_options_sorted:
         suit  = getattr(o, "suitability_score", 0.0)
-        pstat = getattr(o, "partner_status", "")
+        pstat = getattr(o, "suitability_tier", "")
 
         # Suitability colour class
         if suit >= 75:
@@ -1603,7 +1643,8 @@ with st.sidebar:
             "specs", "all_options", "all_quotes", "best_quote", "pipeline_ran",
             "accepted_quote", "rfq_emails", "rfq_draft", "rfq_campaign_sent",
             "rfq_vendors_selected", "pipeline_error", "pending_run", "pending_image",
-            "pending_verification_specs", "pending_verification_site", "force_refresh",
+            "pending_verification_specs", "pending_verification_site",
+            "pending_search_strategy", "seal_enhanced_done", "force_refresh",
             "inventory_hit", "inventory_location", "messages",
             "search_mode", "workflow_mode",
         ]
@@ -1675,13 +1716,9 @@ if st.session_state.pending_image:
             specs = specs_from_image(img_data["bytes"], img_data["filename"], ant_key)
             st.write(f"Identified: **{specs.manufacturer} {specs.model}** — PN: `{specs.part_number}`")
             _img_status.update(label="Nameplate read successfully", state="complete", expanded=False)
-            _img_mode = ("exact"
-                         if getattr(specs, "category", "Part") == "Part"
-                         and st.session_state.workflow_mode == "spare_parts"
-                         else "equivalents")
             st.session_state.pending_run = {
                 "specs": specs, "site": img_data["site"],
-                "search_mode": _img_mode,
+                "search_mode": "equivalents",
                 "workflow": st.session_state.workflow_mode,
             }
         except Exception as e:
@@ -1702,13 +1739,16 @@ if st.session_state.pending_run:
             dtype_l = (getattr(sp, "detected_type", "") or "").lower()
             if sp.category == "Part" and "seal" in dtype_l:
                 # Seal-specific clarification question
+                _s1_mfg = sp.manufacturer if sp.manufacturer not in ("Unknown", None, "") else ""
+                _s1_pn  = sp.part_number  if sp.part_number  not in ("UNKNOWN-PN", "Unknown", None, "") else ""
+                _s1_id  = " ".join(filter(None, [_s1_mfg, _s1_pn])) or (sp.detected_type or "Mechanical Seal")
+                st.session_state.seal_enhanced_done = True
                 q = (
-                    f"I've identified this as a **{sp.detected_type or 'mechanical seal'}**"
-                    + (f" (PN: {sp.part_number})" if sp.part_number not in ("UNKNOWN-PN", "Unknown", None) else "")
-                    + ". Do you have the **shaft size** or **elastomer/material type** "
-                    f"(e.g. *'1.5 inch shaft, Viton'* or *'EPDM, 1-1/4 inch'*)? "
-                    f"This helps me find aftermarket alternatives like U.S. Seal or equivalent. "
-                    f"Or reply **'search anyway'** to proceed with what I have."
+                    f"I've identified this as **{_s1_id}**"
+                    + (f" (**{sp.detected_type}**)" if sp.detected_type else "")
+                    + ". Do you have the **shaft size** or **material type** (e.g. Viton, EPDM)"
+                    " to help find an aftermarket alternative?"
+                    " Or reply **'search anyway'** to proceed."
                 )
             elif sp.category == "Part":
                 q = (
@@ -1731,11 +1771,38 @@ if st.session_state.pending_run:
             st.session_state.pending_verification_site  = run_data["site"]
             st.rerun()
 
+    # ── Stage 1.5: Seal dimensional enhancement ───────────────────────────────
+    # Stage 1 only fires when specs are MISSING.  This stage catches seals whose
+    # Manufacturer + PN are already known, and asks for shaft size / material
+    # type to improve aftermarket cross-reference quality.  Skipped if we already
+    # asked this question in the current sourcing event (seal_enhanced_done=True).
+    _sp15_specs = run_data["specs"]
+    _sp15_dtype = (getattr(_sp15_specs, "detected_type", "") or "").lower()
+    if (_sp15_specs.category == "Part"
+            and "seal" in _sp15_dtype
+            and not st.session_state.seal_enhanced_done):
+        st.session_state.seal_enhanced_done = True
+        st.session_state.pending_run = None
+        _s15_mfg = _sp15_specs.manufacturer if _sp15_specs.manufacturer not in ("Unknown", None, "") else ""
+        _s15_pn  = _sp15_specs.part_number  if _sp15_specs.part_number  not in ("UNKNOWN-PN", "Unknown", None, "") else ""
+        _s15_id  = " ".join(filter(None, [_s15_mfg, _s15_pn])) or (_sp15_specs.detected_type or "Mechanical Seal")
+        _s15_q = (
+            f"I've identified this as **{_s15_id}**"
+            + (f" (**{_sp15_specs.detected_type}**)" if _sp15_specs.detected_type else "")
+            + ". Do you have the **shaft size** or **material type** (e.g. Viton, EPDM)"
+            " to help find an aftermarket alternative?"
+            " Or reply **'search anyway'** to proceed."
+        )
+        st.session_state.messages.append({"role": "assistant", "content": _s15_q})
+        st.session_state.pending_verification_specs = _sp15_specs
+        st.session_state.pending_verification_site  = run_data["site"]
+        st.rerun()
+
     run_data = st.session_state.pending_run
     st.session_state.pending_run = None
     fr           = st.session_state.force_refresh
     st.session_state.force_refresh = False
-    search_mode  = run_data.get("search_mode", "exact")
+    search_mode  = run_data.get("search_mode", "equivalents")
     workflow     = run_data.get("workflow", st.session_state.workflow_mode)
     dtc          = st.session_state.downtime_cost_per_day
     try:
@@ -1951,6 +2018,7 @@ elif active_tab == "🔍 Active Sourcing":
                     else:
                         st.session_state.accepted_quote = None
                         st.session_state.rfq_campaign_sent = False
+                        st.session_state.seal_enhanced_done = False
                         st.session_state.active_tab = "🔍 Active Sourcing"
                         st.session_state.pending_image = {
                             "bytes": uploaded.getvalue(),
@@ -1978,10 +2046,11 @@ elif active_tab == "🔍 Active Sourcing":
                 "Message",
                 placeholder=_placeholder,
                 label_visibility="collapsed",
-                key="chat_text",
+                key=f"user_input_{st.session_state.input_key_counter}",
             )
             if st.button("Send", use_container_width=True) and chat_input.strip():
                 prompt = chat_input.strip()
+                st.session_state.input_key_counter += 1  # new key → blank widget on next render
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.active_tab = "🔍 Active Sourcing"
                 if not ant_key:
@@ -2024,16 +2093,12 @@ elif active_tab == "🔍 Active Sourcing":
                             ):
                                 st.session_state.accepted_quote = None
                                 st.session_state.rfq_campaign_sent = False
+                                st.session_state.seal_enhanced_done = False
                                 specs = specs_from_classification(classified)
-                                # Equipment always runs dual-search (exact + equivalents)
-                                default_mode = ("exact"
-                                               if getattr(specs, "category", "Part") == "Part"
-                                               and st.session_state.workflow_mode == "spare_parts"
-                                               else "equivalents")
                                 st.session_state.pending_run = {
                                     "specs": specs, "site": req_site,
                                     "workflow": st.session_state.workflow_mode,
-                                    "search_mode": default_mode,
+                                    "search_mode": "equivalents",
                                 }
                             else:
                                 reply = chat_respond(prompt, ant_key)
@@ -2055,15 +2120,11 @@ elif active_tab == "🔍 Active Sourcing":
                     st.session_state.force_refresh = True
                     st.session_state.accepted_quote = None
                     st.session_state.rfq_campaign_sent = False
-                    _refresh_cat = getattr(st.session_state.specs, "category", "Part") if st.session_state.specs else "Part"
-                    _refresh_mode = ("exact"
-                                    if _refresh_cat == "Part" and st.session_state.workflow_mode == "spare_parts"
-                                    else "equivalents")
                     st.session_state.pending_run = {
                         "specs":       st.session_state.specs,
                         "site":        st.session_state.site,
                         "workflow":    st.session_state.workflow_mode,
-                        "search_mode": _refresh_mode,
+                        "search_mode": "equivalents",
                     }
                     st.rerun()
             render_vendor_cards()

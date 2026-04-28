@@ -101,6 +101,42 @@ def _is_collection_url(url: str) -> bool:
 
 _VERIFIED_PARTNERS: set[str] = set()   # populated from DB in production; empty = no Gold partners yet
 
+# Child brand → parent company mappings.
+# When the searched brand is a child brand and the parent company name appears in a
+# vendor snippet, the vendor likely stocks compatible/OEM parts — award +40 pts.
+RECOGNIZED_PARENT_BRANDS: dict[str, str] = {
+    "gusher": "ruthman",   # substring matches "Ruthman Pumps" AND "Ruthman Companies"
+    "nagle":  "ruthman",
+}
+
+# URL subdomains that indicate marketing / informational pages with no product data.
+_LOW_VALUE_SUBDOMAINS = (
+    "info.", "lp.", "marketing.", "blog.", "support.", "news.", "resources.",
+)
+
+
+def _is_low_value_landing_page(url: str, snippet: str, searched_pn: str) -> bool:
+    """Return True for pages that cannot confirm product availability.
+
+    Triggers when:
+    - The URL subdomain is a known marketing/informational subdomain.
+    - The URL path contains /category/ or /categories/ and the searched PN is
+      absent from the snippet (pure browse page, not a product match).
+    """
+    from urllib.parse import urlparse
+    u = url.lower()
+    try:
+        hostname = urlparse(u).hostname or ""
+        parts    = hostname.split(".")
+        if len(parts) >= 3 and any(f"{parts[0]}." == sub for sub in _LOW_VALUE_SUBDOMAINS):
+            return True
+    except Exception:
+        pass
+    if ("/category/" in u or "/categories/" in u) and searched_pn:
+        if searched_pn.lower() not in (snippet or "").lower():
+            return True
+    return False
+
 
 def _compute_suitability_score(specs, snippet: str, url: str,
                                 found_pn: Optional[str] = None) -> float:
@@ -113,12 +149,17 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     Components
       PN match        : 0 / 10 / 25 / 40 pts
       Equipment type  : 0-15 pts  (detected_type words in snippet)
-      Manufacturer    : 0-10 pts
+      Manufacturer    : 0-10 pts  (+40 parent-brand bonus)
       Authorized dist : 0-20 pts  (bonus for authorized distributor / service center)
       Direct URL      : 0-10 pts  (product page vs list/search page)
     """
     s       = (snippet or "").lower()
     u_lower = url.lower()
+
+    # ── Low-value landing page guard ────────────────────────────────────────
+    _spn_early = (specs.part_number or "").upper().strip()
+    if _is_low_value_landing_page(url, snippet, _spn_early):
+        return 0.0
 
     # ── Guardrail 0: niche mismatch — hard 0.0 when ≥2 wrong-category terms appear ──
     # A single cross-category term can appear in generic distributor snippets; requiring
@@ -169,6 +210,15 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     mfg     = (specs.manufacturer or "").lower()
     mfg_pts = 10 if (mfg and mfg not in ("unknown", "n/a", "null") and mfg in s) else 0
 
+    # ── Parent brand bonus: child brand (e.g. Gusher) → parent (Ruthman) ──
+    # When the searched manufacturer is a known sub-brand and the parent company
+    # name appears in the snippet, the vendor stocks compatible OEM parts.
+    _mfg_key = mfg.strip()
+    if _mfg_key in RECOGNIZED_PARENT_BRANDS:
+        _parent = RECOGNIZED_PARENT_BRANDS[_mfg_key]
+        if _parent in s:
+            mfg_pts = max(mfg_pts, 40)
+
     # ── Distributor / stockist bonus (category-aware) ──────────────────────
     if specs.category == "Part":
         # For Parts the right signal is: stocking distributor or cross-reference catalogue.
@@ -204,7 +254,15 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     # ── PN mismatch penalty: a different PN found = functional equiv, not exact ──
     pn_mismatch_penalty = 30 if pn_alt else 0   # pn_alt = found_pn present but ≠ searched_pn
 
-    total = pn_pts + type_pts + mfg_pts + auth_pts + url_pts - pn_mismatch_penalty
+    # ── 1.7 Home Field bonus ────────────────────────────────────────────────
+    home_bonus = _home_field_bonus(specs, url, snippet)
+
+    # ── 1.9 Counterfeit marketplace penalty ────────────────────────────────
+    dtype_for_cf = (getattr(specs, "detected_type", "") or specs.description or "").lower()
+    is_risky_cat = any(cat in dtype_for_cf for cat in _HIGH_COUNTERFEIT_RISK_CATEGORIES)
+    cf_penalty   = _counterfeit_suitability_penalty(url, "Unknown", is_risky_cat)
+
+    total = pn_pts + type_pts + mfg_pts + auth_pts + url_pts - pn_mismatch_penalty + home_bonus + cf_penalty
 
     # Guardrail 1: PN not mentioned at all → cap at 45
     if pn_pts == 0:
@@ -218,7 +276,7 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     return min(100.0, max(0.0, round(float(total), 1)))
 
 
-def _partner_status(vendor_name: str, suitability: float) -> str:
+def _suitability_tier(vendor_name: str, suitability: float) -> str:
     """Return Arkim network tier: Gold (verified partner), Silver (high-suitability target), or ''."""
     if vendor_name in _VERIFIED_PARTNERS:
         return "Gold"
@@ -466,11 +524,17 @@ def _llm_parse_results(specs: AssetSpecs, results: list[dict]) -> list[dict]:
 
 def _apply_price_sanity(items: list[dict],
                         specs: "AssetSpecs" = None) -> list[dict]:
-    """Strip prices that are >70% below the peer average — likely hallucinations.
+    """Strip prices that fall below a tier-based threshold vs. the peer average.
 
-    Single-price case: fetch a Tavily market-reference query first; only accept
-    the price if it is within 70% of the reference average.
-    Multi-price case: compare within the peer set (existing logic).
+    Thresholds (via _sanity_threshold):
+      < $100    → reject if < 20% of avg
+      $100-$5K  → reject if < 30% of avg
+      > $5K     → reject if < 50% of avg
+
+    N≥4 guard: when fewer than 4 peer prices exist, set limited_price_data=True on
+    all items — sanity check still runs but callers should treat results with caution.
+
+    Single-price case: validate against a market-reference Tavily search.
     Flagged items → price stripped, price_sanity_flagged=True, suitability zeroed later.
     """
     prices = [float(it["price"]) for it in items
@@ -478,6 +542,13 @@ def _apply_price_sanity(items: list[dict],
 
     if len(prices) == 0:
         return items
+
+    # N≥4 guard — flag limited data for callers
+    limited = len(prices) < 4
+    if limited:
+        for it in items:
+            it["limited_price_data"] = True
+        print(f"[Sourcing] Price sanity: only {len(prices)} peer price(s) — limited_price_data flagged")
 
     if len(prices) == 1 and specs is not None and _tavily:
         # Single price — validate against a quick market reference search
@@ -495,7 +566,7 @@ def _apply_price_sanity(items: list[dict],
                         ref_prices.append(p)
             if ref_prices:
                 ref_avg   = sum(ref_prices) / len(ref_prices)
-                threshold = ref_avg * 0.30
+                threshold = _sanity_threshold(ref_avg)
                 if prices[0] < threshold:
                     for item in items:
                         p = item.get("price")
@@ -509,15 +580,15 @@ def _apply_price_sanity(items: list[dict],
             print(f"[Sourcing] Market reference lookup error: {exc}")
         return items
 
-    # Multi-price: peer comparison
+    # Multi-price: tiered peer comparison
     avg       = sum(prices) / len(prices)
-    threshold = avg * 0.30
+    threshold = _sanity_threshold(avg)
 
     for item in items:
         p = item.get("price")
         if p is not None and float(p) > 0 and float(p) < threshold:
             print(f"[Sourcing] Price sanity FAIL: {item.get('vendor','?')} "
-                  f"@ ${float(p):.2f} vs peer avg ${avg:.2f} — stripping price")
+                  f"@ ${float(p):.2f} vs peer avg ${avg:.2f} (threshold ${threshold:.2f}) — stripping price")
             item["price"]                = None
             item["price_sanity_flagged"] = True
     return items
@@ -529,11 +600,182 @@ _MERCHANT_RELIABILITY: dict[str, float] = {
     "Enterprise":           90.0,
     "National Specialist":  82.0,
     "Direct Buy via Arkim": 78.0,
+    "Quote Request":        75.0,
 }
 
 
 def _base_reliability(merchant_type: str) -> float:
     return _MERCHANT_RELIABILITY.get(merchant_type, 78.0)
+
+
+# ---------------------------------------------------------------------------
+# 1.8 — High-risk electrical categories (require voltage/phase confirmation)
+# ---------------------------------------------------------------------------
+
+HIGH_RISK_ELECTRICAL_CATEGORIES = {
+    "motor", "drive", "controller", "transformer",
+    "power_supply", "vfd", "variable frequency drive",
+}
+
+# ---------------------------------------------------------------------------
+# 1.6 — Price sanity: tier-based thresholds + N≥4 guard
+# ---------------------------------------------------------------------------
+
+def _sanity_threshold(avg_price: float) -> float:
+    """Return the minimum acceptable price as a fraction of the peer average.
+
+    Tier       Avg price range    Max deviation allowed
+    Low-cost   < $100             80 % below avg  → threshold = avg × 0.20
+    Mid-range  $100 – $5 000      70 % below avg  → threshold = avg × 0.30
+    High-value > $5 000           50 % below avg  → threshold = avg × 0.50
+    """
+    if avg_price < 100:
+        return avg_price * 0.20
+    if avg_price <= 5000:
+        return avg_price * 0.30
+    return avg_price * 0.50
+
+
+# ---------------------------------------------------------------------------
+# 1.7 — Home Field suitability bonus
+# ---------------------------------------------------------------------------
+
+def _home_field_bonus(specs: "AssetSpecs", url: str, snippet: str) -> float:
+    """Return +50 when the vendor domain is clearly the manufacturer/brand home page
+    AND the page shows commerce signals (price, add to cart, buy).
+    Return +25 when the domain matches the manufacturer but no commerce signals found.
+    """
+    mfg = (specs.manufacturer or "").lower().strip()
+    if not mfg or mfg in ("unknown", "n/a", "null"):
+        return 0.0
+
+    try:
+        from urllib.parse import urlparse
+        hostname = (urlparse(url.lower()).hostname or "").replace("www.", "")
+    except Exception:
+        return 0.0
+
+    # Normalise brand: "Ruthman" → "ruthman", strip spaces/hyphens
+    mfg_slug = re.sub(r"[^a-z0-9]", "", mfg)
+    host_slug = re.sub(r"[^a-z0-9]", "", hostname)
+
+    if mfg_slug not in host_slug:
+        return 0.0
+
+    # Check for commerce signals on the page
+    commerce_signals = ("add to cart", "buy now", "add to order", "price", "purchase",
+                        "in stock", "order now", "checkout")
+    s_lower = (snippet or "").lower()
+    has_commerce = any(sig in s_lower for sig in commerce_signals)
+
+    return 50.0 if has_commerce else 25.0
+
+
+# ---------------------------------------------------------------------------
+# 1.9 — Counterfeit risk
+# ---------------------------------------------------------------------------
+
+# Categories with elevated counterfeit risk in the industrial supply chain.
+_HIGH_COUNTERFEIT_RISK_CATEGORIES: set[str] = {
+    "bearing", "seal", "vfd", "variable frequency drive", "contactor",
+    "relay", "sensor", "belt", "coupling", "motor starter",
+}
+
+# Marketplace domains with elevated counterfeit risk.
+_MARKETPLACE_DOMAINS: set[str] = {
+    "amazon.com", "ebay.com", "aliexpress.com", "alibaba.com",
+    "wish.com", "dhgate.com", "made-in-china.com",
+}
+
+
+def _counterfeit_risk_flag(specs: "AssetSpecs", url: str,
+                            vendor_authorization_status: str) -> bool:
+    """Return True when the combination of category + source domain signals
+    elevated counterfeit risk.
+
+    Triggers when ALL of:
+      - detected_type or description matches a high-counterfeit-risk category
+      - source URL is a marketplace domain OR vendor is not authorized
+    """
+    dtype = (getattr(specs, "detected_type", "") or specs.description or "").lower()
+    is_risky_category = any(cat in dtype for cat in _HIGH_COUNTERFEIT_RISK_CATEGORIES)
+    if not is_risky_category:
+        return False
+
+    try:
+        from urllib.parse import urlparse
+        hostname = (urlparse(url.lower()).hostname or "").replace("www.", "")
+    except Exception:
+        hostname = ""
+
+    is_marketplace = any(dom in hostname for dom in _MARKETPLACE_DOMAINS)
+    is_unauthorized = vendor_authorization_status not in ("Authorized",)
+
+    return is_marketplace or is_unauthorized
+
+
+def _counterfeit_suitability_penalty(url: str,
+                                      vendor_authorization_status: str,
+                                      is_risky_category: bool) -> float:
+    """Return a suitability deduction for counterfeit-risk signals.
+
+    -30 pts: marketplace domain AND high-risk category
+    -15 pts: marketplace domain only (lower risk category)
+    +15 pts: vendor is Authorized (bonus applies regardless of category)
+    Net result is additive — authorized marketplace = -30 + 15 = -15.
+    """
+    penalty = 0.0
+    try:
+        from urllib.parse import urlparse
+        hostname = (urlparse(url.lower()).hostname or "").replace("www.", "")
+    except Exception:
+        hostname = ""
+
+    is_marketplace = any(dom in hostname for dom in _MARKETPLACE_DOMAINS)
+    if is_marketplace:
+        penalty -= 30.0 if is_risky_category else 15.0
+
+    if vendor_authorization_status == "Authorized":
+        penalty += 15.0
+
+    return penalty
+
+
+# ---------------------------------------------------------------------------
+# 1.10 — Confidence score
+# ---------------------------------------------------------------------------
+
+def _compute_confidence_score(specs: "AssetSpecs", suitability: float,
+                               match_type: str,
+                               vendor_authorization_status: str) -> float:
+    """0-100 epistemic certainty that we have correctly identified and matched the part.
+
+    Components:
+      Suitability basis  (50 pts max) : scaled from suitability_score
+      Match type         (30 pts max) : Exact OEM=30, Aftermarket=20, Functional=10
+      Spec completeness  (10 pts max) : all critical specs present
+      Authorization      (10 pts max) : Authorized vendor = +10
+    """
+    # Suitability contributes up to 50 pts
+    suit_pts = round(min(suitability, 100.0) * 0.50, 1)
+
+    # Match type
+    match_pts = {"Exact OEM": 30, "Aftermarket Compatible": 20, "Functional Alternative": 10}.get(
+        match_type, 10
+    )
+
+    # Spec completeness: check that the key fields are populated
+    _null = {None, "", "null", "N/A", "Unknown", "UNKNOWN-PN"}
+    spec_fields = [specs.manufacturer, specs.model, specs.part_number]
+    if specs.category == "Equipment":
+        spec_fields += [specs.voltage, specs.hp]
+    filled = sum(1 for f in spec_fields if f not in _null)
+    spec_pts = round(10.0 * filled / max(len(spec_fields), 1), 1)
+
+    # Authorization bonus
+    auth_pts = 10.0 if vendor_authorization_status == "Authorized" else 0.0
+
+    return min(100.0, round(suit_pts + match_pts + spec_pts + auth_pts, 1))
 
 
 # ---------------------------------------------------------------------------
@@ -682,8 +924,9 @@ def _call_enterprise_api(specs: AssetSpecs,
             weight_lbs      = item.get("weight_lbs")
             weight_lbs      = float(weight_lbs) if weight_lbs is not None else None
             found_pn        = (item.get("found_part_number") or "").strip() or None
-            sanity_flagged  = bool(item.get("price_sanity_flagged", False))
-            exact_match     = bool(item.get("exact_match", True))
+            sanity_flagged   = bool(item.get("price_sanity_flagged", False))
+            limited_price    = bool(item.get("limited_price_data", False))
+            exact_match      = bool(item.get("exact_match", True))
             # Freight guard: >100 lbs OR >10 HP OR category heavy → S.F.Q.
             heavy         = _is_heavy_item(specs, weight_lbs)
             is_freight    = bool(item.get("is_freight", False)) or (heavy and ship_fee is None and price is not None)
@@ -750,7 +993,10 @@ def _call_enterprise_api(specs: AssetSpecs,
             if sanity_flagged:
                 suit = 0.0
 
-            pstat   = _partner_status(vendor, suit)
+            stier        = _suitability_tier(vendor, suit)
+            auth_status  = "Authorized" if stier == "Gold" else "Unknown"
+            cf_risk      = _counterfeit_risk_flag(specs, url, auth_status)
+            conf_score   = _compute_confidence_score(specs, suit, match_type, auth_status)
 
             _common = dict(
                 lead_time_days=int(lead),
@@ -764,10 +1010,14 @@ def _call_enterprise_api(specs: AssetSpecs,
                 shipping_terms=resolved_terms,
                 is_collection_page=is_coll,
                 suitability_score=suit,
-                partner_status=pstat,
+                suitability_tier=stier,
                 warranty_terms=warranty,
                 weight_lbs=weight_lbs,
                 market_confidence_score=mkt_conf,
+                counterfeit_risk_flag=cf_risk,
+                vendor_authorization_status=auth_status,
+                confidence_score=conf_score,
+                limited_price_data=limited_price,
             )
             if price is not None:
                 save_price(specs.part_number, vendor, float(price), int(lead), source="live", url=url)
@@ -871,18 +1121,18 @@ def _build_tier2_query(specs: AssetSpecs) -> str:
     known_pn  = pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown", None)
 
     if specs.category == "Part":
-        # Parts: anchor to PN + cross-reference vocabulary so stockists surface
+        # Parts: anchor to PN + cross-reference vocabulary + authorized/stocking distributors
         q_parts = [
-            '(distributor OR stockist OR "in stock" OR "cross-reference" OR interchange)',
+            '("authorized distributor" OR "stocking distributor" OR stockist OR "in stock" OR "cross-reference" OR interchange)',
             f'"{niche_term}"',
         ]
         if known_pn:
             q_parts.append(f'"{pn}"')
         if known_mfg:
             q_parts.append(f'"{specs.manufacturer}"')
-        # For seals: add aftermarket-specific terms
+        # Seal-specific: add cross-reference catalogue terms
         if "seal" in ctx:
-            q_parts.append('("aftermarket" OR "equivalent" OR "interchange")')
+            q_parts.append('("seal cross reference" OR "aftermarket" OR "equivalent" OR "interchange")')
         return " AND ".join(q_parts)
     else:
         # Equipment: authorized distributor / service center format
@@ -976,15 +1226,25 @@ def _discover_national_specialists(specs: AssetSpecs,
                 if slug[:6] in surl.lower():
                     snippet = stext
                     break
-        suit  = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
-        pstat = _partner_status(name, suit)
+        suit   = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
+        stier  = _suitability_tier(name, suit)
+
+        # 1.2 — "Direct Buy via Arkim" reserved for verified partners only.
+        # All other Tier 2 vendors are "Quote Request" until onboarded.
+        # TODO: populate _VERIFIED_PARTNERS from DB when partner onboarding is live.
+        assert isinstance(_VERIFIED_PARTNERS, set), "_VERIFIED_PARTNERS must be a set"
+        t2_merchant = "Direct Buy via Arkim" if name in _VERIFIED_PARTNERS else "Quote Request"
+
+        t2_auth   = "Authorized" if name in _VERIFIED_PARTNERS else "Unknown"
+        t2_cf     = _counterfeit_risk_flag(specs, url or "", t2_auth)
+        t2_conf   = _compute_confidence_score(specs, suit, "Functional Alternative", t2_auth)
 
         options.append(SourcingOption(
             vendor_name=name,
             base_price=base_price,
             lead_time_days=lead,
-            reliability_score=78.0,
-            merchant_type="Direct Buy via Arkim",
+            reliability_score=_base_reliability(t2_merchant),
+            merchant_type=t2_merchant,
             requires_rfq=tbd,
             contact_email=email,
             admin_fee=50.0 if tbd else 0.0,
@@ -992,10 +1252,14 @@ def _discover_national_specialists(specs: AssetSpecs,
             source_url=url,
             price_tbd=tbd,
             suitability_score=suit,
-            partner_status=pstat,
+            suitability_tier=stier,
+            counterfeit_risk_flag=t2_cf,
+            vendor_authorization_status=t2_auth,
+            onboarding_status="Active" if name in _VERIFIED_PARTNERS else "Not Onboarded",
+            confidence_score=t2_conf,
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {pstat or 'no partner'}")
+        print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | {stier or 'no tier'}")
 
     if not options:
         print("[Sourcing] Tier 2: no qualifying national specialists found")

@@ -37,6 +37,12 @@ class AssetSpecs:
     rpm: Optional[str] = None
     # True when critical specs (Frame + RPM) are absent for a motor — triggers chat pause
     missing_critical_specs: bool = False
+    # Phase 1 additions — maintenance & procurement lifecycle context
+    asset_id: Optional[str] = None                 # unique asset identifier from CMMS/EAM
+    diagnostic_event_id: Optional[str] = None      # originating work order / diagnostic event
+    warranty_status: Optional[str] = None          # "In Warranty" | "Out of Warranty" | "Unknown"
+    urgency_factor: float = 0.3                    # 1.0=emergency, 0.3=predictive, 0.0=stocking
+    failure_mode: Optional[str] = None             # e.g. "Bearing Failure", "Seal Leak", "Overheating"
 
 
 @dataclass
@@ -45,7 +51,7 @@ class SourcingOption:
     base_price: float
     lead_time_days: int
     reliability_score: float
-    merchant_type: str          # "Enterprise" | "National Specialist" | "Direct Buy via Arkim" | "Local"
+    merchant_type: str          # "Enterprise" | "National Specialist" | "Direct Buy via Arkim" | "Quote Request" | "Local"
     requires_rfq: bool = False
     contact_email: Optional[str] = None
     notes: Optional[str] = None
@@ -59,10 +65,18 @@ class SourcingOption:
     shipping_terms: Optional[str] = None      # human-readable: "Free Shipping", "LTL Freight Required", "S.F.Q.", etc.
     is_collection_page: bool = False          # True when URL is a search/collection list, not a direct product page
     suitability_score: float = 0.0            # 0-100 fit score for Tier 2/3 vendors (PN + type + auth status)
-    partner_status: str = ""                  # "Gold" | "Silver" | "" — Arkim network tier
+    suitability_tier: str = ""                # "Gold" | "Silver" | "" — Arkim network tier
     warranty_terms: Optional[str] = None      # e.g., "12-month standard", "5-year limited"
     market_confidence_score: Optional[float] = None  # 1-10 web-sourced reliability score
     weight_lbs: Optional[float] = None        # item weight in lbs (for freight guard)
+    # Phase 1 additions — vendor qualification & risk
+    confidence_score: float = 0.0            # 0-100 epistemic certainty of identification
+    counterfeit_risk_flag: bool = False       # True when category or marketplace signals high counterfeit risk
+    vendor_authorization_status: str = "Unknown"  # "Authorized" | "Unauthorized" | "Unknown"
+    onboarding_status: str = "Not Onboarded"      # "Active" | "Pending" | "Not Onboarded"
+    limited_price_data: bool = False              # True when fewer than 4 peer prices available for sanity check
+    export_control_classification: Optional[str] = None  # EAR/ITAR classification if applicable
+    ship_from_country: Optional[str] = None       # ISO country code for origin (counterfeit risk signal)
 
 
 @dataclass
@@ -91,6 +105,14 @@ class ArkimQuote:
     tlv_score: float = 0.0             # Total Life Cycle Value (Purchase + Downtime Risk + Shipping + Tax)
     workflow: str = "spare_parts"      # "spare_parts" | "replacement" | "capex"
     labor_impact_cost: float = 0.0    # Projected labor cost for low-MCS spare parts ($200/hr × hours)
+    # Phase 1 additions — audit, compliance, lifecycle context
+    tax_jurisdiction: Optional[str] = None             # e.g. "LA County, CA"
+    tax_exemption_certificate_ref: Optional[str] = None  # certificate number if tax-exempt
+    merchant_of_record: str = "Arkim Industrial Procurement Services"
+    urgency_factor_used: float = 0.3                   # mirrors AssetSpecs.urgency_factor at quote time
+    agent_version: str = "1.0.0-phase1"                # semantic version of the sourcing agent
+    sourcing_run_id: Optional[str] = None              # UUID for audit trail correlation
+    user_id: Optional[str] = None                      # operator who initiated the request
 
 
 @dataclass

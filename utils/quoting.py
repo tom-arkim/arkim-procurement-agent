@@ -91,7 +91,7 @@ def estimate_shipping(option: SourcingOption,
         return (0.0, True, terms)
 
     # ── Flat-rate fallback (unreachable for any freight-flagged item) ─────────
-    if option.merchant_type in ("Local", "Direct Buy via Arkim"):
+    if option.merchant_type in ("Local", "Direct Buy via Arkim", "Quote Request"):
         return (40.00, False, "$40.00 (est.)")
     fee = max(15.00, round(option.base_price * 0.05, 2))
     return (fee, False, f"${fee:,.2f} (est.)")

@@ -95,7 +95,7 @@ def render_report(report: ProcurementReport, all_quotes: list[ArkimQuote]) -> No
     markup_amt = rq.arkim_sale_price - cost_basis
 
     print(f"\n{c(dsep, CYAN)}")
-    print(c("  ▲  ARKIM PURCHASE ORDER (PENDING CLIENT APPROVAL)", BOLD, CYAN))
+    print(c("  ▲  ARKIM SOURCING RECOMMENDATION (PENDING CLIENT APPROVAL)", BOLD, CYAN))
     print(c(dsep, CYAN))
     print(f"  Quote ID       : {c(rq.quote_id, BOLD, YELLOW)}")
     print(f"  Generated At   : {rq.generated_at.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -121,7 +121,7 @@ def render_report(report: ProcurementReport, all_quotes: list[ArkimQuote]) -> No
     print(f"  AVL Time Saved     : ~{rq.avl_time_saved_days} days (no vendor onboarding)")
     print(f"  TCA Score          : {rq.tca_score} / 100")
     print()
-    print(c("  ✔  Client approves purchase via Arkim — no new vendor onboarding required.", GREEN, BOLD))
+    print(c("  ✔  Client approves Arkim to proceed with quote request.", GREEN, BOLD))
     print(c(dsep, CYAN))
 
     # ── RFQ Email ──
