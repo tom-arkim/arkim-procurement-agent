@@ -368,6 +368,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Vendors with suitability below this threshold are excluded from Broader Outreach.
+# Surfacing a 10% match with a "contact them" checkbox erodes user trust.
+BROADER_OUTREACH_MIN_MATCH_SCORE: float = 25.0
+
+# Admin view: set False for clean demos; True shows audit log + supplier registry tabs.
+SHOW_ADMIN_VIEW: bool = True
+
 # ── Session state ─────────────────────────────────────────────────────────────
 _DEFAULTS: dict = {
     "messages":           [],
@@ -1598,11 +1605,21 @@ def render_purchase_confirmed() -> None:
         st.rerun()
 
 
+def _t3_match_label(suit: float) -> str:
+    """Replace raw suitability % with a quality label for the Tier 3 outreach view.
+
+    Showing "10% match" next to a contact checkbox misleads users — labels communicate
+    relative quality without anchoring on a low number that erodes trust.
+    """
+    if suit >= 70:
+        return "Strong match"
+    if suit >= 40:
+        return "Possible match"
+    return "Tentative match"
+
+
 def render_tier3_outreach() -> None:
     all_options = st.session_state.all_options
-    rfq_options = [o for o in all_options if getattr(o, "price_tbd", False)]
-    if not rfq_options:
-        return
 
     # Phase 1.5: only show when < 3 priced options OR all vendors need outreach
     from utils.contact_resolution import resolve_contact_action, ContactActionType
@@ -1616,7 +1633,20 @@ def render_tier3_outreach() -> None:
     if len(priced_options) >= 3 and not _all_outreach:
         return
 
+    # Apply minimum match-score threshold -- vendors below this are noise, not candidates.
+    rfq_options = [
+        o for o in all_options
+        if getattr(o, "price_tbd", False)
+        and getattr(o, "suitability_score", 0.0) >= BROADER_OUTREACH_MIN_MATCH_SCORE
+    ]
+    if not rfq_options:
+        return
+
     specs = st.session_state.specs
+    _in_warranty = (
+        getattr(specs, "warranty_status", None) == "in_warranty"
+        if specs else False
+    )
 
     no_buy_now = len(priced_options) == 0
     header_note = (
@@ -1629,40 +1659,60 @@ def render_tier3_outreach() -> None:
                 unsafe_allow_html=True)
     body = (
         '<b style="color:#e6edf3;">No immediate Buy Now pricing was returned by national distributors.</b> '
-        'Partner Outreach is your next step — Arkim contacts these specialists on your behalf '
-        'and returns a binding quote within 24–48 h. '
+        'Partner Outreach is your next step -- Arkim contacts these specialists on your behalf '
+        'and returns a binding quote within 24-48 h. '
         if no_buy_now else
         'National distributors returned Buy Now pricing above. '
-        'These specialists may offer better terms — Arkim contacts them on your behalf. '
+        'These specialists may offer better terms -- Arkim contacts them on your behalf. '
     )
     st.markdown(
         f'<div style="font-size:.78rem;color:#8b949e;margin-bottom:.75rem;">'
         f'{body}'
-        f'Select vendors to contact. Arkim will reach out on your behalf within 24–48 hours.</div>',
+        f'Select vendors to contact. Arkim will reach out on your behalf within 24-48 hours.</div>',
         unsafe_allow_html=True,
     )
 
     from utils.sourcing import draft_rfq_email
 
-    # Sort: highest suitability first; cap display to top 5 (per Phase 1.5 spec)
-    rfq_options_sorted = sorted(rfq_options,
-                                 key=lambda o: getattr(o, "suitability_score", 0),
-                                 reverse=True)[:5]
+    # Sort: OEM Direct first (highest warranty value), then by suitability descending.
+    # Cap to top 5 after threshold filtering.
+    rfq_options_sorted = sorted(
+        rfq_options,
+        key=lambda o: (
+            not getattr(o, "is_oem_direct", False),  # False=0 -> OEM first
+            -getattr(o, "suitability_score", 0.0),
+        ),
+    )[:5]
 
     any_checked = False
     for o in rfq_options_sorted:
-        suit  = getattr(o, "suitability_score", 0.0)
-        pstat = getattr(o, "suitability_tier", "")
+        suit       = getattr(o, "suitability_score", 0.0)
+        pstat      = getattr(o, "suitability_tier", "")
+        _is_oem    = getattr(o, "is_oem_direct", False)
+        match_lbl  = _t3_match_label(suit)
 
-        # Suitability colour class
-        if suit >= 75:
+        # Match label colour class
+        if suit >= 70:
             suit_cls = "suit-hi"
-        elif suit >= 50:
+        elif suit >= 40:
             suit_cls = "suit-mid"
         else:
             suit_cls = "suit-lo"
 
-        # Partner badge HTML
+        # OEM Direct badge -- always shown when is_oem_direct=True
+        _oem_t3_badge = (
+            '<span class="chip chip-g" style="font-size:.62rem;margin-left:.3rem;" '
+            'title="Vendor is manufacturer\'s own channel">&#9733; OEM Direct</span>'
+            if _is_oem else ""
+        )
+        # Warranty compliance sub-label -- shown on OEM card when asset is in-warranty
+        _oem_t3_sublabel = (
+            '<div style="font-size:.68rem;color:#3fb950;margin-top:.15rem;">'
+            '&#10003; Recommended for warranty compliance</div>'
+            if (_is_oem and _in_warranty) else ""
+        )
+
+        # Partner tier badge
         if pstat == "Gold":
             badge_html = '<span class="badge-gold">&#9733; Gold Partner</span>'
         elif pstat == "Silver":
@@ -1679,21 +1729,21 @@ def render_tier3_outreach() -> None:
             alt_badge = ""
 
         found_pn = getattr(o, "found_part_number", None)
-        pn_note  = f'<span style="color:#8b949e;font-size:.72rem;"> · PN found: {found_pn}</span>' if found_pn else ""
+        pn_note  = f'<span style="color:#8b949e;font-size:.72rem;"> &middot; PN found: {found_pn}</span>' if found_pn else ""
         url_note = (f'<a href="{o.source_url}" target="_blank" '
-                    f'style="color:#58a6ff;font-size:.72rem;margin-left:.4rem;">↗ View</a>'
+                    f'style="color:#58a6ff;font-size:.72rem;margin-left:.4rem;">&#8599; View</a>'
                     if o.source_url else "")
 
         card_html = (
             f'<div class="t3-card">'
             f'  <div class="t3-suit-col">'
-            f'    <div class="t3-suit-num {suit_cls}">{suit:.0f}%</div>'
-            f'    <div class="t3-suit-lbl">Match</div>'
+            f'    <div class="t3-suit-num {suit_cls}" style="font-size:.78rem;font-weight:700;">{match_lbl}</div>'
             f'  </div>'
             f'  <div class="t3-body">'
-            f'    <div class="t3-name">{o.vendor_name}{badge_html}{alt_badge}</div>'
+            f'    <div class="t3-name">{o.vendor_name}{_oem_t3_badge}{badge_html}{alt_badge}</div>'
+            f'    {_oem_t3_sublabel}'
             f'    <div class="t3-meta">'
-            f'      Price: TBD (Inquiry Required) · {o.lead_time_days}d lead · '
+            f'      Price: TBD (Inquiry Required) &middot; {o.lead_time_days}d lead &middot; '
             f'      Reliability {o.reliability_score:.0f}%'
             f'      {pn_note}{url_note}'
             f'    </div>'
@@ -1702,8 +1752,11 @@ def render_tier3_outreach() -> None:
         )
         st.markdown(card_html, unsafe_allow_html=True)
 
+        # Checkbox default: OEM Direct always checked; >=50% suitability checked; below 50% unchecked.
+        _default_checked = _is_oem or suit >= 50.0
+
         # "Invite to Partner Network" button for high-suitability non-Gold vendors
-        from utils.sourcing import _onboarding_url as _ourl, _VERIFIED_PARTNERS as _vp
+        from utils.sourcing import _onboarding_url as _ourl
         if suit >= 75 and pstat != "Gold":
             _invite_url = _ourl(o.vendor_name, specs) if specs else "#"
             _inv_col1, _inv_col2 = st.columns([3, 1])
@@ -1712,21 +1765,21 @@ def render_tier3_outreach() -> None:
                 checked = st.checkbox(
                     f"Include {o.vendor_name} in outreach",
                     key=chk_key,
-                    value=True,
+                    value=st.session_state.get(chk_key, _default_checked),
                 )
             with _inv_col2:
                 st.link_button(
-                    "Invite to Partner Network →",
+                    "Invite to Partner Network",
                     url=_invite_url,
                     use_container_width=True,
-                    help=f"Open onboarding link for {o.vendor_name} ({suit:.0f}% match)",
+                    help=f"Open onboarding link for {o.vendor_name}",
                 )
         else:
             chk_key = f"rfq_chk_{o.vendor_name}"
             checked = st.checkbox(
                 f"Include {o.vendor_name} in outreach",
                 key=chk_key,
-                value=True,
+                value=st.session_state.get(chk_key, _default_checked),
             )
 
         if checked:
@@ -1734,9 +1787,9 @@ def render_tier3_outreach() -> None:
             if o.vendor_name not in st.session_state.rfq_emails and specs:
                 st.session_state.rfq_emails[o.vendor_name] = draft_rfq_email(specs, o)
             if o.vendor_name in st.session_state.rfq_emails:
-                with st.expander(f"Partner Invitation — {o.vendor_name}", expanded=False):
+                with st.expander(f"Partner Invitation -- {o.vendor_name}", expanded=False):
                     st.code(st.session_state.rfq_emails[o.vendor_name], language="text")
-                    st.caption("Copy and send via your email client · reply-to: procurement@arkim.ai")
+                    st.caption("Copy and send via your email client -- reply-to: procurement@arkim.ai")
 
     if any_checked:
         selected = [o.vendor_name for o in rfq_options_sorted
@@ -1764,7 +1817,7 @@ def render_tier3_outreach() -> None:
 
     if st.session_state.rfq_campaign_sent and st.session_state.rfq_vendors_selected:
         st.success(
-            f"Partner outreach initiated — queued for: "
+            f"Partner outreach initiated -- queued for: "
             f"{', '.join(st.session_state.rfq_vendors_selected)}"
         )
 
@@ -1842,27 +1895,35 @@ with st.sidebar:
         st.rerun()
 
     # 2.1 — Urgency Factor control
+    # Buttons ordered left-to-right matching slider direction (Stocking→Predictive→Emergency).
+    # Three buttons with use_container_width=True fit in the sidebar without wrapping
+    # at the label lengths used here ("Stocking" / "Predictive" / "Emergency").
     st.markdown('<div class="sb-sec">Urgency</div>', unsafe_allow_html=True)
-    _UF_PRESETS = {"Emergency (1.0)": 1.0, "Predictive (0.3)": 0.3, "Stocking (0.0)": 0.0}
-    _cur_uf   = st.session_state.get("urgency_factor", 0.3)
-    _cur_preset = next(
-        (k for k, v in _UF_PRESETS.items() if abs(v - _cur_uf) < 0.01), "Custom"
-    )
-    _uf_sel = st.radio(
-        "Urgency preset",
-        list(_UF_PRESETS.keys()),
-        index=list(_UF_PRESETS.keys()).index(_cur_preset) if _cur_preset != "Custom" else 1,
-        label_visibility="collapsed",
-    )
+    _UF_PRESETS = [("Stocking", 0.0), ("Predictive", 0.3), ("Emergency", 1.0)]
+    _cur_uf = st.session_state.get("urgency_factor", 0.3)
+    _uf_btn_cols = st.columns(3)
+    for _uf_col, (_uf_lbl, _uf_preset_val) in zip(_uf_btn_cols, _UF_PRESETS):
+        _is_active = abs(_uf_preset_val - _cur_uf) < 0.01
+        with _uf_col:
+            if st.button(
+                _uf_lbl,
+                key=f"uf_btn_{_uf_lbl}",
+                type="primary" if _is_active else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.urgency_factor = _uf_preset_val
+                st.session_state["uf_slider"] = _uf_preset_val
+                st.rerun()
     _uf_val = st.slider(
         "Urgency factor",
         min_value=0.0, max_value=1.0,
-        value=_UF_PRESETS.get(_uf_sel, _cur_uf),
+        value=_cur_uf,
         step=0.05,
+        key="uf_slider",
         label_visibility="collapsed",
-        help="0.0 = stocking (ignore downtime), 0.3 = predictive (default), 1.0 = emergency (full downtime cost). Values ≥ 0.8 boost Speed weight in TCA scoring.",
+        help="0.0 = stocking (ignore downtime), 0.3 = predictive (default), 1.0 = emergency (full downtime cost). Values >=0.8 boost Speed weight in TCA scoring.",
     )
-    if _uf_val != _cur_uf:
+    if abs(_uf_val - _cur_uf) > 0.001:
         st.session_state.urgency_factor = _uf_val
 
     # 2.2 — Warranty Status control
@@ -2072,6 +2133,11 @@ if st.session_state.pending_run:
 
 # ── Tab navigation (radio styled as tabs — supports programmatic selection) ─────
 _TABS = ["📊 Analytics", "🔍 Active Sourcing", "📋 History & Drafts"]
+if SHOW_ADMIN_VIEW:
+    _TABS = _TABS + ["🔧 Admin"]
+# Guard: active_tab may name a tab that no longer exists (e.g. Admin hidden after flag flip)
+if st.session_state.active_tab not in _TABS:
+    st.session_state.active_tab = "🔍 Active Sourcing"
 active_tab = st.radio(
     "_tab_nav",
     _TABS,
@@ -2603,3 +2669,190 @@ elif active_tab == "📋 History & Drafts":
           <div class="es-body">No warranty data yet. Warranty terms are automatically extracted
           when vendors list them on their product pages.</div>
         </div>""", unsafe_allow_html=True)
+
+# ── Tab 4 · Admin (prototype logs) ────────────────────────────────────────────
+elif active_tab == "🔧 Admin" and SHOW_ADMIN_VIEW:
+    st.markdown(
+        '<div class="a-label" style="margin:.4rem 0 .75rem;">Prototype Admin -- Read-Only</div>',
+        unsafe_allow_html=True,
+    )
+    _adm_tab_audit, _adm_tab_reg = st.tabs(["📋 Audit Log", "🏭 Supplier Registry"])
+
+    # ── Audit Log Viewer ──────────────────────────────────────────────────────
+    with _adm_tab_audit:
+        from utils.audit_log import recent_entries as _al_recent, get_entry as _al_get
+
+        _al_col1, _al_col2, _al_col3 = st.columns([3, 2, 1])
+        with _al_col1:
+            _al_search = st.text_input(
+                "Search input summary",
+                placeholder="e.g. Gusher, Square D, pump...",
+                label_visibility="visible",
+                key="adm_al_search",
+            )
+        with _al_col2:
+            _al_ws_filter = st.selectbox(
+                "Warranty status",
+                ["All", "in_warranty", "out_of_warranty", "warranty_waived", "unknown"],
+                key="adm_al_ws",
+            )
+        with _al_col3:
+            st.markdown("<div style='padding-top:1.75rem'></div>", unsafe_allow_html=True)
+            _al_refresh = st.button("Refresh", key="adm_al_refresh", use_container_width=True)
+
+        _al_entries = _al_recent(50)
+
+        # Apply filters
+        if _al_search.strip():
+            _al_entries = [
+                e for e in _al_entries
+                if _al_search.strip().lower() in (e.get("input_summary") or "").lower()
+            ]
+        if _al_ws_filter != "All":
+            _al_entries = [
+                e for e in _al_entries
+                if (e.get("warranty_status_used") or "unknown") == _al_ws_filter
+            ]
+
+        if not _al_entries:
+            st.info("No audit log entries found. Run the pipeline to generate entries.")
+        else:
+            st.caption(f"{len(_al_entries)} entr{'y' if len(_al_entries) == 1 else 'ies'}")
+
+            # Build display table
+            _al_rows = []
+            for _e in _al_entries:
+                _run_short = (_e.get("sourcing_run_id") or "")[-8:]
+                _vendors_raw = _e.get("vendors_surfaced") or "[]"
+                try:
+                    _vcount = len(json.loads(_vendors_raw))
+                except Exception:
+                    _vcount = 0
+                _al_rows.append({
+                    "Time (UTC)":      (_e.get("created_at") or "")[:16],
+                    "Run ID":          _run_short,
+                    "Asset":           _e.get("input_summary") or "--",
+                    "Urgency":         _e.get("urgency_factor_used"),
+                    "Warranty":        _e.get("warranty_status_used") or "unknown",
+                    "Vendors":         _vcount,
+                    "Recommended":     _e.get("final_recommendation") or "--",
+                    "LLM calls":       _e.get("llm_calls_made", 0),
+                    "Cost $":          _e.get("estimated_llm_cost_usd", 0.0),
+                    "Duration ms":     _e.get("duration_ms"),
+                })
+            _al_df = pd.DataFrame(_al_rows)
+            st.dataframe(
+                _al_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Cost $":      st.column_config.NumberColumn("Cost $", format="$%.4f"),
+                    "Urgency":     st.column_config.NumberColumn("Urgency", format="%.2f"),
+                    "Duration ms": st.column_config.NumberColumn("Duration ms", format="%d"),
+                },
+            )
+
+            # Row detail expanders
+            st.markdown(
+                '<div style="font-size:.74rem;color:#8b949e;margin:.5rem 0 .3rem;">'
+                'Expand a run for full detail:</div>',
+                unsafe_allow_html=True,
+            )
+            for _e in _al_entries[:20]:  # cap expanders to 20 to keep page fast
+                _run_short = (_e.get("sourcing_run_id") or "")[-8:]
+                _lbl = f"[{(_e.get('created_at') or '')[:16]}]  {_e.get('input_summary') or '--'}  (run ...{_run_short})"
+                with st.expander(_lbl, expanded=False):
+                    # Core fields
+                    _ecols = st.columns(2)
+                    with _ecols[0]:
+                        st.markdown(f"**Run ID:** `{_e.get('sourcing_run_id') or '--'}`")
+                        st.markdown(f"**Workflow:** {_e.get('workflow_mode') or '--'}")
+                        st.markdown(f"**Urgency factor:** {_e.get('urgency_factor_used')}")
+                        st.markdown(f"**Warranty status:** {_e.get('warranty_status_used') or 'unknown'}")
+                        st.markdown(f"**Recommended:** {_e.get('final_recommendation') or '--'}")
+                        st.markdown(f"**User selection:** {_e.get('user_selection') or '(none)'}")
+                    with _ecols[1]:
+                        st.markdown(f"**LLM calls:** {_e.get('llm_calls_made', 0)}")
+                        st.markdown(f"**Est. cost:** ${_e.get('estimated_llm_cost_usd', 0.0):.4f}")
+                        st.markdown(f"**Duration:** {_e.get('duration_ms', '--')} ms")
+                        st.markdown(f"**Agent ver:** {_e.get('agent_version') or '--'}")
+
+                    # Asset specs
+                    _specs_raw = _e.get("asset_specs_json")
+                    if _specs_raw:
+                        try:
+                            _specs_d = json.loads(_specs_raw) if isinstance(_specs_raw, str) else _specs_raw
+                            with st.expander("Asset specs", expanded=False):
+                                st.json(_specs_d)
+                        except Exception:
+                            pass
+
+                    # Vendors considered / surfaced
+                    _vc_raw = _e.get("vendors_considered")
+                    if _vc_raw:
+                        try:
+                            _vc = json.loads(_vc_raw) if isinstance(_vc_raw, str) else _vc_raw
+                            with st.expander(f"All {len(_vc)} vendor(s) considered", expanded=False):
+                                for _v in _vc:
+                                    _vn   = _v.get("vendor_name", "?")
+                                    _vp   = _v.get("base_price")
+                                    _vpstr = f"${_vp:.2f}" if _vp else "TBD"
+                                    _vmt  = _v.get("merchant_type", "?")
+                                    _vs   = _v.get("suitability_score")
+                                    _vsstr = f" | {_vs:.0f}% match" if _vs is not None else ""
+                                    st.markdown(f"- **{_vn}** ({_vmt}) {_vpstr}{_vsstr}")
+                        except Exception:
+                            pass
+
+                    # Errors
+                    _err_raw = _e.get("error_log")
+                    if _err_raw:
+                        try:
+                            _errs = json.loads(_err_raw) if isinstance(_err_raw, str) else _err_raw
+                            if _errs:
+                                st.error(f"Errors: {'; '.join(str(x) for x in _errs[:5])}")
+                        except Exception:
+                            pass
+
+    # ── Supplier Registry Viewer ──────────────────────────────────────────────
+    with _adm_tab_reg:
+        from utils.supplier_registry import all_entries as _reg_all
+
+        _reg_status_filter = st.selectbox(
+            "Filter by onboarding status",
+            ["All", "discovery_only", "invited", "onboarded_arkim_supplier"],
+            key="adm_reg_status",
+        )
+
+        _reg_entries = _reg_all()
+
+        if _reg_status_filter != "All":
+            _reg_entries = [
+                e for e in _reg_entries if e.get("onboarding_status") == _reg_status_filter
+            ]
+
+        if not _reg_entries:
+            st.info("No supplier records found. Run the pipeline or use 'python scripts/manage_suppliers.py seed'.")
+        else:
+            st.caption(f"{len(_reg_entries)} supplier(s)")
+            _reg_rows = []
+            for _r in _reg_entries:
+                _reg_rows.append({
+                    "Name":          _r.get("name") or "--",
+                    "Domain":        _r.get("domain") or "--",
+                    "Status":        _r.get("onboarding_status") or "--",
+                    "Email":         _r.get("contact_email") or "--",
+                    "Auth":          _r.get("vendor_authorization_status") or "--",
+                    "Contract":      _r.get("contract_status") or "--",
+                    "Created":       (_r.get("created_at") or "")[:10],
+                    "Updated":       (_r.get("updated_at") or "")[:10],
+                })
+            st.dataframe(
+                pd.DataFrame(_reg_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+            st.caption(
+                "Read-only. To update a supplier: "
+                "`python scripts/manage_suppliers.py update <name> --status <status>`"
+            )
