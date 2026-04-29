@@ -20,6 +20,10 @@ except ImportError:
     from tavily import Client as TavilyClient
 
 from utils.models import AssetSpecs, SourcingOption
+from utils.brand_intelligence import (
+    get_brand_relationships, get_competitors, get_wrong_category_terms,
+    get_parent_brand, get_subcategory_refinement,
+)
 
 # ---------------------------------------------------------------------------
 # Clients
@@ -53,6 +57,15 @@ _VENDOR_DOMAINS = [
 # Vendors whose prices appear on sites without login walls → "Enterprise"
 # Everything else (including Tier 1.5 specialists) → "National Specialist"
 _TIER1_VENDORS = {"Grainger", "McMaster-Carr", "MSC Industrial"}
+
+# Domains excluded from Tier 1 dynamic discovery (consumer / marketplace platforms).
+_BLACKLISTED_DOMAINS = (
+    "amazon", "ebay", "aliexpress", "alibaba", "walmart", "etsy",
+    "craigslist", "offerup", "mercari",
+)
+
+_AUTHORITY_VIABLE_THRESHOLD = 30.0  # minimum authority score to count as viable
+_DYNAMIC_FALLBACK_MIN_VIABLE = 3    # fall back to domain-list if fewer viable than this
 
 
 def _vendor_merchant_type(vendor_name: str) -> str:
@@ -109,13 +122,16 @@ def _is_collection_url(url: str) -> bool:
 
 _VERIFIED_PARTNERS: set[str] = set()   # populated from DB in production; empty = no Gold partners yet
 
-# Child brand → parent company mappings.
-# When the searched brand is a child brand and the parent company name appears in a
-# vendor snippet, the vendor likely stocks compatible/OEM parts — award +40 pts.
-RECOGNIZED_PARENT_BRANDS: dict[str, str] = {
-    "gusher": "ruthman",   # substring matches "Ruthman Pumps" AND "Ruthman Companies"
-    "nagle":  "ruthman",
-}
+
+def _detect_equip_type(specs) -> str:
+    """Return the primary equipment-type keyword from detected_type or description."""
+    ctx = (getattr(specs, 'detected_type', None) or specs.description or '').lower()
+    for kw in ("motor", "pump", "compressor", "blower", "conveyor",
+               "vfd", "starter", "bearing", "seal", "coupling", "belt", "contactor", "sensor"):
+        if kw in ctx:
+            return kw
+    return ""
+
 
 # URL subdomains that indicate marketing / informational pages with no product data.
 _LOW_VALUE_SUBDOMAINS = (
@@ -169,14 +185,16 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     if _is_low_value_landing_page(url, snippet, _spn_early):
         return 0.0
 
-    # ── Guardrail 0: niche mismatch — hard 0.0 when ≥2 wrong-category terms appear ──
+    # Guardrail 0: niche mismatch -- hard 0.0 when 2+ wrong-category terms appear.
     # A single cross-category term can appear in generic distributor snippets; requiring
     # at least 2 distinct hits avoids false positives while still eliminating pure
     # hydraulics/HVAC/plumbing shops returned for motor or pump searches.
     dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
-    for equip_type, bad_terms in _NICHE_WRONG_TERMS.items():
-        if equip_type in dtype_lower:
-            hit_count = sum(1 for t in bad_terms if t in s or t in u_lower)
+    _equip_kw = _detect_equip_type(specs)
+    if _equip_kw:
+        _bad_terms = get_wrong_category_terms(specs.manufacturer, _equip_kw)
+        if _bad_terms:
+            hit_count = sum(1 for t in _bad_terms if t in s or t in u_lower)
             if hit_count >= 2:
                 return 0.0
 
@@ -218,14 +236,10 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     mfg     = (specs.manufacturer or "").lower()
     mfg_pts = 10 if (mfg and mfg not in ("unknown", "n/a", "null") and mfg in s) else 0
 
-    # ── Parent brand bonus: child brand (e.g. Gusher) → parent (Ruthman) ──
-    # When the searched manufacturer is a known sub-brand and the parent company
-    # name appears in the snippet, the vendor stocks compatible OEM parts.
-    _mfg_key = mfg.strip()
-    if _mfg_key in RECOGNIZED_PARENT_BRANDS:
-        _parent = RECOGNIZED_PARENT_BRANDS[_mfg_key]
-        if _parent in s:
-            mfg_pts = max(mfg_pts, 40)
+    # Parent brand bonus: brand intelligence resolves child brand -> parent company.
+    _parent = get_parent_brand(mfg.strip(), _detect_equip_type(specs))
+    if _parent and _parent.lower() in s:
+        mfg_pts = max(mfg_pts, 40)
 
     # ── Distributor / stockist bonus (category-aware) ──────────────────────
     if specs.category == "Part":
@@ -313,29 +327,7 @@ def _onboarding_url(vendor_name: str, specs) -> str:
     return f"https://partners.arkim.ai/claim?v={slug}&t={token}&rfq={rfq}"
 
 
-# Wrong-niche terms per searched equipment type.
-# If a vendor's snippet/URL contains these terms when we are searching for a DIFFERENT
-# type of asset, the suitability score is penalised by 50 points to prevent irrelevant
-# shops (e.g. a hydraulics-only distributor) from surfacing for motor or pump searches.
-_NICHE_WRONG_TERMS: dict[str, tuple[str, ...]] = {
-    "motor":      ("hydraulic pump", "hydraulic cylinder", "hydraulic distributor",
-                   "pneumatic cylinder", "hvac unit", "hvac system", "hvac distributor"),
-    "pump":       ("motor rewind", "motor winding", "hydraulic cylinder",
-                   "electrical panel", "circuit breaker distributor"),
-    "compressor": ("hydraulic press", "pump seal kit", "plumbing fixture",
-                   "motor rewind", "hvac coil"),
-    "blower":     ("hydraulic cylinder", "pneumatic cylinder", "pump seal kit",
-                   "plumbing supply", "motor rewind"),
-}
 
-# Known competitor brands per equipment type — injected into equipment queries so Tavily
-# surfaces alternatives that actually list "Add to Cart" prices even when the OEM doesn't.
-_EQUIP_COMPETITORS = {
-    "pump":       "Goulds Lowara Armstrong Xylem ITT",
-    "motor":      "Baldor Leeson WEG Marathon Nidec",
-    "compressor": "Ingersoll Rand Atlas Copco Gardner Denver",
-    "blower":     "Spencer Hoffman Dresser",
-}
 
 
 def _build_search_query(specs: AssetSpecs, search_mode: str = "exact") -> str:
@@ -382,13 +374,11 @@ def _build_search_query(specs: AssetSpecs, search_mode: str = "exact") -> str:
                 parts.append(f'"{pn}"')
             elif known:
                 parts.append(f"{specs.manufacturer} {specs.model}")
-            # Boolean OR competitor group — explicit operator for search precision
-            desc_lower = (desc or specs.model or "").lower()
-            for equip_type, competitors in _EQUIP_COMPETITORS.items():
-                if equip_type in desc_lower:
-                    brands = competitors.split()
-                    parts.append(f"({' OR '.join(brands)})")
-                    break
+            # Boolean OR competitor group -- brand intelligence provides manufacturer-specific alternatives
+            _bi_equip_kw = _detect_equip_type(specs)
+            _bi_competitors = get_competitors(specs.manufacturer, _bi_equip_kw) if _bi_equip_kw else []
+            if _bi_competitors:
+                parts.append(f"({' OR '.join(_bi_competitors)})")
             if known:
                 parts.append(f"OR equivalent to {specs.manufacturer} {specs.model}")
             # Cross-reference / interchange terms surface aftermarket parts and OEM alternates
@@ -416,29 +406,89 @@ def _build_search_query(specs: AssetSpecs, search_mode: str = "exact") -> str:
         return f"{base} distributor price buy"
 
 
+def _vendor_authority_score(url: str, content: str, title: str = "") -> float:
+    """0-100 score for whether a URL is from a viable B2B industrial vendor.
+
+    Used by dynamic Tier 1 discovery to rank unrestricted Tavily results
+    before falling back to the hardcoded _VENDOR_DOMAINS list.
+    """
+    from urllib.parse import urlparse
+    u_lower  = url.lower()
+    combined = (content + " " + title).lower()
+
+    if any(b in u_lower for b in _BLACKLISTED_DOMAINS):
+        return 0.0
+
+    score = 0.0
+    try:
+        hostname = urlparse(u_lower).hostname or ""
+        if any(d in hostname for d in _VENDOR_DOMAINS):
+            score += 60.0
+    except Exception:
+        pass
+
+    if any(p in combined for p in ("add to cart", "in stock", "per unit", "unit price")):
+        score += 20.0
+    elif any(p in combined for p in ("price", "buy", "usd")):
+        score += 10.0
+
+    if any(t in combined for t in ("industrial", "distributor", "supply", "automation", "mro")):
+        score += 10.0
+
+    if not _is_collection_url(url):
+        score += 10.0
+
+    return min(100.0, score)
+
+
 def _search_vendor_prices(specs: AssetSpecs, search_mode: str = "exact") -> list[dict]:
     """Tavily search for Tier 1 / 1.5 pricing.
 
-    Parts         → domain-restricted to known distributor sites (precision).
-    Equipment/exact → domain-restricted to find the specific PN on known sites.
-    Equipment/equivalents → open web so competitor brands surface.
+    Discovery-first: unrestricted Tavily search scored by vendor authority.
+    Falls back to _VENDOR_DOMAINS-restricted search when fewer than
+    _DYNAMIC_FALLBACK_MIN_VIABLE authoritative results are found, ensuring
+    existing vetted vendors always surface even for obscure part queries.
     """
     query = _build_search_query(specs, search_mode=search_mode)
     print(f"[Sourcing] Tavily query ({search_mode}): {query!r}")
 
     if not _tavily:
-        print("[Sourcing] Tavily client not initialised — TAVILY_API_KEY missing.")
+        print("[Sourcing] Tavily client not initialised -- TAVILY_API_KEY missing.")
         return []
+
+    # Pass 1: unrestricted search
     try:
-        kwargs: dict = dict(search_depth="advanced", max_results=15)
-        # Domain-restrict for exact searches and all parts; open web for equivalents
-        if specs.category != "Equipment" or search_mode == "exact":
-            kwargs["include_domains"] = _VENDOR_DOMAINS
-        response = _tavily.search(query=query, **kwargs)
-        return response.get("results", [])
+        response = _tavily.search(query=query, search_depth="advanced", max_results=15)
+        results  = response.get("results", [])
     except Exception as exc:
         print(f"[Sourcing] Tavily error: {exc}")
         return []
+
+    # Score by vendor authority; keep results above the viable threshold
+    viable = [
+        r for r in results
+        if _vendor_authority_score(r.get("url", ""), r.get("content", ""), r.get("title", ""))
+           >= _AUTHORITY_VIABLE_THRESHOLD
+    ]
+    print(f"[Sourcing] Dynamic discovery: {len(results)} results, {len(viable)} viable vendor pages")
+
+    # Pass 2: supplement from known-good domains when dynamic discovery yields too few results
+    if len(viable) < _DYNAMIC_FALLBACK_MIN_VIABLE:
+        print(f"[Sourcing] Viable < {_DYNAMIC_FALLBACK_MIN_VIABLE} -- supplementing with domain-restricted fallback")
+        try:
+            fb_resp    = _tavily.search(query=query, search_depth="advanced",
+                                         max_results=10, include_domains=_VENDOR_DOMAINS)
+            fb_results = fb_resp.get("results", [])
+            existing_urls = {r.get("url") for r in viable}
+            for r in fb_results:
+                if r.get("url") not in existing_urls:
+                    viable.append(r)
+            print(f"[Sourcing] After fallback: {len(viable)} total results")
+        except Exception as exc:
+            print(f"[Sourcing] Fallback search error: {exc}")
+            return results  # best-effort: return original results on fallback failure
+
+    return viable if viable else results
 
 
 _PARSE_SYSTEM = """You are a procurement data extractor for industrial parts and equipment.
@@ -1086,25 +1136,6 @@ Rules:
 """
 
 
-# Asset-type niche terms for Tier 2 discovery.
-# Using specific industry vocabulary surfaces specialist shops instead of generalists.
-_TIER2_NICHE_TERMS: dict[str, str] = {
-    # Equipment — service centers and authorized distributors are the right channel
-    "motor":      "electric motor distributor service center repair authorized",
-    "pump":       "industrial pump distributor authorized service center",
-    "compressor": "air compressor distributor service repair authorized",
-    "blower":     "industrial blower fan distributor service",
-    "conveyor":   "conveyor equipment distributor industrial",
-    # Parts — stockists and cross-reference catalogues are the right channel
-    "vfd":        "variable frequency drive VFD distributor in stock",
-    "starter":    "motor starter contactor distributor in stock",
-    "bearing":    "industrial bearing distributor in stock cross-reference",
-    "seal":       "mechanical seal cross-reference interchange in stock aftermarket",
-    "coupling":   "shaft coupling distributor in stock industrial",
-    "belt":       "industrial belt cross-reference interchange in stock",
-    "contactor":  "contactor relay distributor in stock",
-    "sensor":     "industrial sensor distributor in stock",
-}
 
 
 def _build_tier2_query(specs: AssetSpecs) -> str:
@@ -1117,14 +1148,11 @@ def _build_tier2_query(specs: AssetSpecs) -> str:
     desc     = (specs.description or "").lower()
     ctx      = detected or desc or ""
 
-    # Determine primary niche term
-    niche_term = None
-    for equip_type in _TIER2_NICHE_TERMS:
-        if equip_type in ctx:
-            niche_term = equip_type
-            break
+    # Determine primary niche term via brand intelligence (falls back to detected_type)
+    _equip_kw = _detect_equip_type(specs)
+    niche_term = get_subcategory_refinement(specs.manufacturer, _equip_kw) if _equip_kw else None
     if not niche_term:
-        niche_term = (getattr(specs, "detected_type", None) or specs.description or "industrial equipment")
+        niche_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
 
     known_mfg = specs.manufacturer not in ("Unknown", "N/A", "null", None)
     pn        = specs.part_number
@@ -1470,6 +1498,13 @@ def find_vendors(specs: AssetSpecs,
       2. Warranty filter       — gate interchange results when asset is in-warranty
     The warranty_banner is returned for the UI to display; it is None when no warning needed.
     """
+    # 3.4 — Spec enrichment: fill missing technical fields for Equipment via LLM inference
+    try:
+        from utils.spec_lookup import enrich_equipment_specs
+        specs = enrich_equipment_specs(specs)
+    except Exception as _se:
+        print(f"[Sourcing] Spec enrichment skipped: {_se}")
+
     enterprise: list[SourcingOption] = []
 
     if workflow != "capex":
