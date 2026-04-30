@@ -43,6 +43,12 @@ class AssetSpecs:
     warranty_status: Optional[str] = None          # "In Warranty" | "Out of Warranty" | "Unknown"
     urgency_factor: float = 0.3                    # 1.0=emergency, 0.3=predictive, 0.0=stocking
     failure_mode: Optional[str] = None             # e.g. "Bearing Failure", "Seal Leak", "Overheating"
+    # Dimensional / fit-critical specs (parts and seals)
+    shaft_size: Optional[str] = None       # e.g. "1-5/8\"", "42mm"
+    bore_diameter: Optional[str] = None    # bore or ID spec
+    seal_face_size: Optional[str] = None   # for mechanical seals
+    connection_size: Optional[str] = None  # for fittings, valves, flanged connections
+    material_spec: Optional[str] = None    # e.g. "Viton", "EPDM", "Carbon/Silicon"
 
 
 @dataclass

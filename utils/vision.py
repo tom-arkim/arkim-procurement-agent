@@ -14,7 +14,13 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 _VISION_MODEL     = os.environ.get("OS_VISION_MODEL", "claude-sonnet-4-6")
 
 _SYSTEM = """You are an industrial equipment data extractor.
-Given raw nameplate text or a text description of industrial equipment, extract all specifications.
+Given raw nameplate text, a product listing title/description, or any text describing industrial equipment,
+extract ALL visible specifications.
+
+CRITICAL: Extract ALL dimensional and fit specifications visible ANYWHERE in the input — including
+product titles, subtitles, description text, specification tables, and part number suffixes.
+Do not limit extraction to nameplate-style fields only.
+Return null for any field not visible. Never omit a field — always return the key with null if not found.
 
 Return ONLY valid JSON with these exact keys:
 {
@@ -32,7 +38,12 @@ Return ONLY valid JSON with these exact keys:
   "gpm":                string or null,
   "psi":                string or null,
   "frame":              string or null,
-  "physical_magnitude": "parcel" | "heavy_parcel" | "LTL_freight"
+  "physical_magnitude": "parcel" | "heavy_parcel" | "LTL_freight",
+  "shaft_size":         string or null,
+  "bore_diameter":      string or null,
+  "seal_face_size":     string or null,
+  "connection_size":    string or null,
+  "material_spec":      string or null
 }
 
 Category rules:
@@ -43,7 +54,7 @@ detected_type rules:
 - A precise, searchable equipment description, e.g.:
     "Vertical Multi-Stage Centrifugal Pump", "3-Phase TEFC Induction Motor",
     "Variable Frequency Drive", "Horizontal Belt Conveyor", "Rotary Screw Air Compressor",
-    "Magnetic Motor Starter", "Roller Bearing".
+    "Magnetic Motor Starter", "Roller Bearing", "Mechanical Seal".
 - For Parts, use the component name, e.g. "Magnetic Motor Starter", "Deep Groove Ball Bearing".
 - Never use brand names in detected_type — it must be a generic searchable category.
 
@@ -55,16 +66,30 @@ Technical requirement rules:
 - rpm   : motor shaft speed, e.g. "1750 RPM", "3450 RPM". Motors only; null for pumps/parts.
 - Extract phase / gpm / psi / frame / rpm even when the brand is unknown or unreadable.
 - Set any field to null if not found — do not invent values.
-- For description: one concise line, e.g. "3 HP TEFC induction motor, 3-phase, 56C frame, 1750 RPM".
+- For description: one concise line including all key specs found, e.g.
+  "Mechanical seal, 1-5/8\" shaft, Type 21, Viton elastomers" or
+  "3 HP TEFC induction motor, 3-phase, 56C frame, 1750 RPM".
+
+Dimensional and fit-critical fields:
+- shaft_size     : Look for "[dimension] Shaft" anywhere in title, description, or spec table.
+                   Examples: "1-5/8\" Shaft" → "1-5/8\"", "42mm Shaft" → "42mm", "1.625\" shaft" → "1.625\"".
+                   Product titles often have format: "[Mfr], [PN], [Type], [Size] Shaft, [Model]".
+- bore_diameter  : Bore or ID specification. Look in description or spec table.
+- seal_face_size : For mechanical seals specifically — face diameter if stated.
+- connection_size: For fittings, valves, flanged connections — e.g. "1-1/2\" NPT", "2\" flanged".
+- material_spec  : Elastomer or material type. For seals: "Viton", "EPDM", "Buna-N", "Silicon", "PTFE",
+                   "Carbon/Silicon Carbide". For Gusher and similar brands, part number suffixes encode
+                   material (e.g. "C238CBC" style suffixes indicate seal face and elastomer combinations
+                   — note the full suffix in part_number AND infer or state the material in material_spec
+                   if the encoding is recognisable; otherwise set material_spec to the suffix itself).
 
 CRITICAL — Parts category extraction rule:
   When category == "Part" (bearing, seal, contactor, relay, VFD, belt, coupling, sensor, etc.),
   you MUST set voltage, hp, rpm, gpm, psi, and phase to null.
-  These numbers on a nameplate describe the parent equipment, NOT the part itself.
+  These numbers describe the parent equipment, NOT the part itself.
   A mechanical seal does not have a voltage. A bearing does not have HP.
-  Extract ONLY: manufacturer, model, part_number, description, physical_magnitude.
-  The description for a Part should include dimensional or material info if visible,
-  e.g. "1.5 inch shaft mechanical seal, Viton elastomers" or "6205-2RS deep groove ball bearing".
+  Extract ONLY: manufacturer, model, part_number, description, physical_magnitude,
+  shaft_size, bore_diameter, seal_face_size, connection_size, material_spec.
 
 physical_magnitude rules (shipping size classification — required, never null):
 - "LTL_freight"  : Motor > 10 HP, OR Pump > 15 HP, OR compressor/blower/conveyor of any size,
@@ -154,6 +179,11 @@ def extract_specs(image_description: str) -> AssetSpecs:
             physical_magnitude=mag,
             rpm=rpm_val,
             missing_critical_specs=missing_crit,
+            shaft_size=d.get("shaft_size") or None,
+            bore_diameter=d.get("bore_diameter") or None,
+            seal_face_size=d.get("seal_face_size") or None,
+            connection_size=d.get("connection_size") or None,
+            material_spec=d.get("material_spec") or None,
         )
     except Exception as exc:
         print(f"[Vision] Sonnet call failed ({exc}) — using regex fallback")

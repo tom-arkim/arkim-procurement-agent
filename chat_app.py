@@ -404,8 +404,7 @@ _DEFAULTS: dict = {
     "pending_verification_site":  None,
     "pending_search_strategy":    None,  # run_data held while user answers OEM-vs-aftermarket
     "seal_enhanced_done":         False, # True once dimensional question has been asked for this seal
-    "input_key_counter":          0,     # incremented on every Send to force text_input to clear
-    "search_mode":                "equivalents",  # "exact" | "equivalents" — always equivalents
+"search_mode":                "equivalents",  # "exact" | "equivalents" — always equivalents
     "workflow_mode":              "spare_parts",  # "spare_parts" | "replacement" | "capex"
     "downtime_cost_per_day":      500.0,   # USD/day — used for TLV calculation
     # 2.1 — urgency factor (0.0=stocking, 0.3=predictive, 1.0=emergency)
@@ -783,27 +782,42 @@ def classify_message(text: str, api_key: str) -> dict:
     return {"intent": "GENERAL"}
 
 
-_VISION_PROMPT = """This is an industrial equipment nameplate photo.
-Read all visible text and return ONLY JSON (no prose):
+_VISION_PROMPT = """This is an industrial equipment nameplate photo or product listing image.
+Read ALL visible text — including product titles, subtitles, description text, specification
+tables, and part number suffixes — and return ONLY JSON (no prose):
 {
-  "category":      "Part" or "Equipment",
-  "detected_type": "precise brand-agnostic type, e.g. Vertical Multi-Stage Centrifugal Pump",
-  "manufacturer":  "...",
-  "model":         "...",
-  "part_number":   "...",
-  "voltage":       "...",
-  "phase":         "3-phase or single-phase or null",
-  "hp":            "...",
-  "serial_number": "...",
-  "description":   "brief one-line description",
-  "gpm":           "...",
-  "psi":           "...",
-  "frame":         "..."
+  "category":       "Part" or "Equipment",
+  "detected_type":  "precise brand-agnostic type, e.g. Mechanical Seal or Vertical Multi-Stage Centrifugal Pump",
+  "manufacturer":   "...",
+  "model":          "...",
+  "part_number":    "full part number including any suffix, e.g. 84004-28-C238CBC",
+  "voltage":        "...",
+  "phase":          "3-phase or single-phase or null",
+  "hp":             "...",
+  "serial_number":  "...",
+  "description":    "one-line description including all key specs found",
+  "gpm":            "...",
+  "psi":            "...",
+  "frame":          "...",
+  "shaft_size":     "e.g. 1-5/8\" — look for [dimension] Shaft in title or description, or null",
+  "bore_diameter":  "bore or ID spec if stated, or null",
+  "seal_face_size": "for mechanical seals — face diameter if stated, or null",
+  "connection_size":"for fittings/valves/flanges — e.g. 1-1/2\" NPT, or null",
+  "material_spec":  "elastomer or material type, e.g. Viton EPDM Buna-N Carbon/SiC, or null"
 }
 
 Category: "Equipment" = full unit (pump, motor, compressor, blower, fan, conveyor).
           "Part"      = replacement component (relay, contactor, VFD, bearing, seal, sensor).
-phase / gpm / psi / frame: extract even if brand is unreadable. Use null for any field not visible.
+
+Rules:
+- For Parts (seals, bearings, etc.): set voltage, hp, rpm, gpm, psi, phase to null — those are
+  parent-equipment specs, not part specs.
+- shaft_size: product titles often read "[Mfr], [PN], [Type], [Shaft Size] Shaft, [Model]" —
+  extract the size value explicitly including units and fractions.
+- part_number: capture the FULL part number string including any material/suffix codes.
+- material_spec: for Gusher and similar brands, part number suffixes encode seal face and
+  elastomer combinations — note the suffix and infer the material if recognisable.
+- Use null for any field not visible. Never omit a field.
 """
 
 
@@ -833,6 +847,11 @@ def specs_from_image(image_bytes: bytes, filename: str, api_key: str):
             phase=d.get("phase"),
             detected_type=d.get("detected_type"),
             rpm=d.get("rpm"),
+            shaft_size=d.get("shaft_size") or None,
+            bore_diameter=d.get("bore_diameter") or None,
+            seal_face_size=d.get("seal_face_size") or None,
+            connection_size=d.get("connection_size") or None,
+            material_spec=d.get("material_spec") or None,
         )
     from utils.vision import extract_specs
     return extract_specs(filename)
@@ -1390,6 +1409,18 @@ def render_vendor_cards() -> None:
                     ("Found PN",       _found_pn_disp),
                     ("Description",    _orig.description or "—"),
                 ]
+                # Append dimensional fields only when populated
+                _dim_null = {None, "", "null", "N/A", "Unknown"}
+                for _dim_lbl, _dim_attr in [
+                    ("Shaft Size",      "shaft_size"),
+                    ("Bore Diameter",   "bore_diameter"),
+                    ("Seal Face Size",  "seal_face_size"),
+                    ("Connection Size", "connection_size"),
+                    ("Material Spec",   "material_spec"),
+                ]:
+                    _dim_val = getattr(_orig, _dim_attr, None)
+                    if _dim_val and _dim_val not in _dim_null:
+                        _orig_rows.append((_dim_lbl, _dim_val))
                 _footer = ("Verify dimensional fit, material compatibility, and shaft size "
                            "against manufacturer datasheet before installing.")
             else:
@@ -1895,40 +1926,45 @@ with st.sidebar:
         st.session_state.active_tab = "🔍 Active Sourcing"
         st.rerun()
 
-    # 2.1 — Urgency Factor control
-    # Buttons ordered left-to-right matching slider direction (Stocking→Predictive→Emergency).
-    # Three buttons with use_container_width=True fit in the sidebar without wrapping
-    # at the label lengths used here ("Stocking" / "Predictive" / "Emergency").
-    st.markdown('<div class="sb-sec">Urgency</div>', unsafe_allow_html=True)
+    _urgency_tip = (
+        "Urgency tells Arkim how quickly the part is needed. "
+        "Emergency: equipment is currently down — prioritises speed above cost. "
+        "Predictive: failure expected within 30 days — balances speed and cost. "
+        "Stocking: no immediate need — optimises for lowest cost."
+    )
+    st.markdown(
+        f'<div class="sb-sec">Urgency &nbsp;'
+        f'<span style="cursor:help;color:#8b949e;font-size:.7rem;" title="{_urgency_tip}">ⓘ</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
     _UF_PRESETS = [("Stocking", 0.0), ("Predictive", 0.3), ("Emergency", 1.0)]
     _cur_uf = st.session_state.get("urgency_factor", 0.3)
-    _uf_btn_cols = st.columns(3)
-    for _uf_col, (_uf_lbl, _uf_preset_val) in zip(_uf_btn_cols, _UF_PRESETS):
+    for _uf_lbl, _uf_preset_val in _UF_PRESETS:
         _is_active = abs(_uf_preset_val - _cur_uf) < 0.01
-        with _uf_col:
-            if st.button(
-                _uf_lbl,
-                key=f"uf_btn_{_uf_lbl}",
-                type="primary" if _is_active else "secondary",
-                use_container_width=True,
-            ):
-                st.session_state.urgency_factor = _uf_preset_val
-                st.session_state["uf_slider"] = _uf_preset_val
-                st.rerun()
-    _uf_val = st.slider(
-        "Urgency factor",
-        min_value=0.0, max_value=1.0,
-        value=_cur_uf,
-        step=0.05,
-        key="uf_slider",
-        label_visibility="collapsed",
-        help="0.0 = stocking (ignore downtime), 0.3 = predictive (default), 1.0 = emergency (full downtime cost). Values >=0.8 boost Speed weight in TCA scoring.",
-    )
-    if abs(_uf_val - _cur_uf) > 0.001:
-        st.session_state.urgency_factor = _uf_val
+        if st.button(
+            _uf_lbl,
+            key=f"uf_btn_{_uf_lbl}",
+            type="primary" if _is_active else "secondary",
+            use_container_width=True,
+        ):
+            st.session_state.urgency_factor = _uf_preset_val
+            st.rerun()
 
     # 2.2 — Warranty Status control
-    st.markdown('<div class="sb-sec">Asset Warranty</div>', unsafe_allow_html=True)
+    _warranty_tip = (
+        "Warranty status affects which parts Arkim recommends. "
+        "In Warranty: OEM parts only — protects manufacturer coverage. "
+        "Out of Warranty: all options including aftermarket considered. "
+        "Warranty Waived: aftermarket allowed despite active warranty. "
+        "Unknown: all options shown with a warranty caution banner."
+    )
+    st.markdown(
+        f'<div class="sb-sec">Asset Warranty &nbsp;'
+        f'<span style="cursor:help;color:#8b949e;font-size:.7rem;" title="{_warranty_tip}">ⓘ</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
     _WS_OPTS = {
         "Unknown": None,
         "In Warranty": "in_warranty",
@@ -2346,15 +2382,15 @@ elif active_tab == "🔍 Active Sourcing":
                 if st.session_state.workflow_mode == "replacement"
                 else "e.g. Source a Square D 8536SCG3V02 for La Mirada"
             )
-            chat_input = st.text_input(
-                "Message",
-                placeholder=_placeholder,
-                label_visibility="collapsed",
-                key=f"user_input_{st.session_state.input_key_counter}",
-            )
-            if st.button("Send", use_container_width=True) and chat_input.strip():
+            with st.form(key="chat_form", clear_on_submit=True):
+                chat_input = st.text_input(
+                    "Message",
+                    placeholder=_placeholder,
+                    label_visibility="collapsed",
+                )
+                submitted = st.form_submit_button("Send", use_container_width=True)
+            if submitted and chat_input.strip():
                 prompt = chat_input.strip()
-                st.session_state.input_key_counter += 1  # new key → blank widget on next render
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 st.session_state.active_tab = "🔍 Active Sourcing"
                 if not ant_key:
