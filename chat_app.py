@@ -363,8 +363,9 @@ st.markdown("""
   /* ── TLV metric ── */
   .tlv-xl { font-size: 1.5rem; font-weight: 800; color: #d29922; line-height: 1.1; }
   /* ── Misc ── */
-  #MainMenu, footer, header { visibility: hidden; }
-  [data-testid="collapsedControl"] { visibility: visible !important; }
+  #MainMenu, footer { visibility: hidden; }
+  header { background: transparent !important; box-shadow: none !important; }
+  header [data-testid="stToolbar"] { visibility: hidden; }
   code { background: #21262d; border-radius: 4px; padding: .1rem .3rem; }
 </style>
 """, unsafe_allow_html=True)
