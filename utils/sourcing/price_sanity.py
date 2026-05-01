@@ -1,9 +1,11 @@
 """
 utils/sourcing/price_sanity.py
-Price sanity checking: tiered thresholds, N>=4 guard, single-price market reference.
+Price sanity checking: tiered thresholds, N>=4 guard, single-price market reference,
+and extreme outlier filter (N>=2, 10x peer median).
 """
 
 import re
+import statistics as _stats
 
 
 def _sanity_threshold(avg_price: float) -> float:
@@ -89,3 +91,39 @@ def _apply_price_sanity(items: list[dict], specs=None) -> list[dict]:
             item["price"]                = None
             item["price_sanity_flagged"] = True
     return items
+
+
+def _apply_extreme_price_filter(options: list) -> list:
+    """Hard-reject options whose price is >10x the peer median at N>=2 priced options.
+
+    Catches category-mismatch results (e.g. a full pump at $2,621 when searching for a
+    $53 seal). Sets rejection_reason="price_outlier_extreme" — the option remains in the
+    list so vendors_considered in the audit log captures the rejection reason.
+
+    Distinct from _apply_price_sanity which operates on raw parsed dicts and catches
+    suspiciously LOW prices. This operates on SourcingOption objects and catches extreme
+    HIGH prices.
+    """
+    priced = [
+        (o, getattr(o, "base_price", 0.0))
+        for o in options
+        if not getattr(o, "price_tbd", False)
+        and not getattr(o, "rejection_reason", None)
+        and getattr(o, "base_price", 0.0) > 0
+    ]
+
+    if len(priced) < 2:
+        return options
+
+    for opt, price in priced:
+        others = [p for o, p in priced if o is not opt]
+        if not others:
+            continue
+        median_others = _stats.median(others)
+        if median_others > 0 and price > 10 * median_others:
+            opt.rejection_reason = "price_outlier_extreme"
+            print(
+                f"[Sourcing] Rejected (price_outlier_extreme): {opt.vendor_name} "
+                f"@ ${price:.2f} is {price / median_others:.1f}x peer median ${median_others:.2f}"
+            )
+    return options

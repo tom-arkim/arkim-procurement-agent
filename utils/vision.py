@@ -17,7 +17,15 @@ _SYSTEM = """You are an industrial equipment data extractor.
 Given raw nameplate text, a product listing title/description, or any text describing industrial equipment,
 extract ALL visible specifications.
 
-CRITICAL: Extract ALL dimensional and fit specifications visible ANYWHERE in the input — including
+CRITICAL — SHAFT SIZE (check this first):
+Scan the ENTIRE input for shaft size patterns:
+  - "[number]-[fraction]\" Shaft"  → shaft_size = "1-5/8\""
+  - "[number].[number]\" shaft"    → shaft_size = "1.625\""
+  - "[number]mm Shaft"             → shaft_size = "42mm"
+Product listing titles VERY OFTEN encode shaft size as "[Mfr], [PN], [Type], [SIZE] Shaft, [Model]".
+Extract the SIZE VALUE only. If shaft size text is present, you MUST populate shaft_size.
+
+Extract ALL dimensional and fit specifications visible ANYWHERE in the input — including
 product titles, subtitles, description text, specification tables, and part number suffixes.
 Do not limit extraction to nameplate-style fields only.
 Return null for any field not visible. Never omit a field — always return the key with null if not found.

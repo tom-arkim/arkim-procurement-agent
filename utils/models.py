@@ -84,6 +84,9 @@ class SourcingOption:
     export_control_classification: Optional[str] = None  # EAR/ITAR classification if applicable
     ship_from_country: Optional[str] = None       # ISO country code for origin (counterfeit risk signal)
     is_oem_direct: Optional[bool] = None          # True when vendor domain matches manufacturer (home field bonus)
+    # Quality filter annotation — set by post-processing guards; non-None = excluded from UI
+    # Values: "confidence_below_floor" | "price_outlier_extreme" | "category_mismatch_suspected"
+    rejection_reason: Optional[str] = None
 
 
 @dataclass

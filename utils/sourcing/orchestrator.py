@@ -1,13 +1,36 @@
 """
 utils/sourcing/orchestrator.py
 Public entry point: find_vendors() orchestrates all tiers and post-processing.
+
+Post-processing steps (in order):
+  1. Registry enrichment       — populate onboarding_status / vendor_authorization_status
+  2. Warranty filter            — gate interchange results when asset is in-warranty
+  3. Aftermarket pass           — spec-based third-party discovery (Parts, non-in-warranty)
+  4. Extreme price filter       — reject 10x+ price outliers at N>=2 (price_outlier_extreme)
+  5. Category mismatch guard    — reject >5x peer median for Parts (category_mismatch_suspected)
+  6. Confidence floor           — reject confidence_score < 50 (confidence_below_floor)
+
+Filters 4-6 annotate rejected options with rejection_reason rather than removing them,
+so vendors_considered in the audit log captures each option + rejection reason.
+The UI skips options whose rejection_reason is set.
 """
 
 from typing import Optional
 
 from utils.models import AssetSpecs, SourcingOption
-from utils.sourcing.enterprise_search import _call_enterprise_api, _discover_national_specialists
-from utils.sourcing.filtering import _apply_warranty_filter, _apply_registry_enrichment
+from utils.sourcing.enterprise_search import (
+    _call_enterprise_api,
+    _discover_national_specialists,
+    _discover_aftermarket_specialists,
+)
+from utils.sourcing.filtering import (
+    _apply_warranty_filter,
+    _apply_registry_enrichment,
+    _apply_confidence_floor,
+    _apply_category_mismatch_guard,
+)
+from utils.sourcing.price_sanity import _apply_extreme_price_filter
+from utils.sourcing.constants import TIER_SURFACE_MIN_CONFIDENCE
 
 
 def find_vendors(specs: AssetSpecs,
@@ -15,18 +38,10 @@ def find_vendors(specs: AssetSpecs,
                  force_refresh: bool = False,
                  search_mode: str = "exact",
                  workflow: str = "spare_parts") -> tuple[list[SourcingOption], Optional[str]]:
-    """
-    Run multi-tier sourcing.
+    """Run multi-tier sourcing and return (all_options, warranty_banner_or_None).
 
-    workflow:     "spare_parts" | "replacement" | "capex"
-                  CapEx skips Tier 1/2 price search and goes straight to specialist discovery.
-    search_mode:  "exact" | "equivalents" — controls competitor injection in Equipment queries.
-    Returns: (all_options, warranty_banner_message_or_None)
-
-    Post-processing steps (in order):
-      1. Registry enrichment  — populate onboarding_status / vendor_authorization_status
-      2. Warranty filter       — gate interchange results when asset is in-warranty
-    The warranty_banner is returned for the UI to display; it is None when no warning needed.
+    all_options includes rejected options annotated with rejection_reason — callers
+    must filter these out for display but should include them in audit log capture.
     """
     try:
         from utils.spec_lookup import enrich_equipment_specs
@@ -55,5 +70,24 @@ def find_vendors(specs: AssetSpecs,
     filtered, warranty_banner = _apply_warranty_filter(specs, all_options)
     if warranty_banner:
         print(f"[Sourcing] Warranty banner: {warranty_banner}")
+
+    # Aftermarket pass — spec-based third-party discovery (runs after warranty filter so
+    # in-warranty assets are correctly gated; aftermarket options join filtered list)
+    if workflow != "capex":
+        print(f"\n[Sourcing] Aftermarket pass — spec-based third-party discovery...")
+        aftermarket = _discover_aftermarket_specialists(specs, filtered)
+        filtered = filtered + aftermarket
+
+    # Quality filters — annotate rejected options with rejection_reason (do NOT remove).
+    # Audit log captures all options; UI skips options with rejection_reason set.
+    print(f"\n[Sourcing] Applying quality filters...")
+    _apply_extreme_price_filter(filtered)
+    _apply_category_mismatch_guard(filtered, specs)
+    _apply_confidence_floor(filtered, TIER_SURFACE_MIN_CONFIDENCE)
+
+    active   = sum(1 for o in filtered if not getattr(o, "rejection_reason", None))
+    rejected = len(filtered) - active
+    if rejected:
+        print(f"[Sourcing] Quality filters: {rejected} option(s) rejected, {active} active")
 
     return filtered, warranty_banner

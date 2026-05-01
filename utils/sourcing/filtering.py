@@ -6,11 +6,13 @@ Post-processing filters applied after vendor options are collected:
   - Supplier registry enrichment
 """
 
+import statistics as _stats
 from typing import Optional
 
 from utils.sourcing.constants import (
     _HIGH_COUNTERFEIT_RISK_CATEGORIES,
     _MARKETPLACE_DOMAINS,
+    TIER_SURFACE_MIN_CONFIDENCE,
 )
 
 
@@ -42,6 +44,69 @@ def _counterfeit_risk_flag(specs, url: str,
     is_unauthorized = vendor_authorization_status not in ("Authorized",)
 
     return is_marketplace or is_unauthorized
+
+
+# ---------------------------------------------------------------------------
+# Confidence floor (new)
+# ---------------------------------------------------------------------------
+
+def _apply_confidence_floor(options: list,
+                             threshold: float = TIER_SURFACE_MIN_CONFIDENCE) -> list:
+    """Reject options whose confidence_score is below the surface threshold.
+
+    Sets rejection_reason="confidence_below_floor" so the option remains in the list
+    and appears in vendors_considered in the audit log, but is excluded from the UI.
+    Does not override an earlier rejection_reason.
+    """
+    for o in options:
+        if getattr(o, "rejection_reason", None):
+            continue
+        cs = getattr(o, "confidence_score", 0.0)
+        if cs < threshold:
+            o.rejection_reason = "confidence_below_floor"
+            print(
+                f"[Sourcing] Rejected (confidence_below_floor): {o.vendor_name} "
+                f"confidence={cs:.1f}% < {threshold:.0f}% floor"
+            )
+    return options
+
+
+# ---------------------------------------------------------------------------
+# Category mismatch guard (new)
+# ---------------------------------------------------------------------------
+
+def _apply_category_mismatch_guard(options: list, specs=None) -> list:
+    """When sourcing a Part and a price is >5x the peer median, suspect wrong product category.
+
+    A $2,621 result alongside a $53 median strongly indicates the candidate is a full
+    equipment unit, not the replacement part being sourced. Sets
+    rejection_reason="category_mismatch_suspected". Does not override earlier rejections.
+    """
+    if not specs or getattr(specs, "category", "Part") != "Part":
+        return options
+
+    priced = [
+        (o, getattr(o, "base_price", 0.0))
+        for o in options
+        if not getattr(o, "price_tbd", False)
+        and not getattr(o, "rejection_reason", None)
+        and getattr(o, "base_price", 0.0) > 0
+    ]
+
+    if len(priced) < 2:
+        return options
+
+    all_prices   = [p for _, p in priced]
+    median_price = _stats.median(all_prices)
+
+    for opt, price in priced:
+        if price > 5 * median_price:
+            opt.rejection_reason = "category_mismatch_suspected"
+            print(
+                f"[Sourcing] Rejected (category_mismatch_suspected): {opt.vendor_name} "
+                f"@ ${price:.2f} is {price / median_price:.1f}x peer median ${median_price:.2f}"
+            )
+    return options
 
 
 # ---------------------------------------------------------------------------

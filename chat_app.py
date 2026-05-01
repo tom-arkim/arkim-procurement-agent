@@ -623,7 +623,15 @@ def _execute_pipeline(specs, site: str,
             inq_note = f" · **{national_inq}** inquiry-required" if national_inq else ""
             st.write(f"✅ **{national_priced}** priced{inq_note}")
 
-        priced_options = [o for o in options if not getattr(o, "price_tbd", False)]
+        # Exclude rejected options and aftermarket equivalents from the main TCA table.
+        # Aftermarket options are rendered in their own section; rejected ones are logged
+        # in vendors_considered but never shown in the UI.
+        priced_options = [
+            o for o in options
+            if not getattr(o, "price_tbd", False)
+            and not getattr(o, "rejection_reason", None)
+            and getattr(o, "match_type", "") != "Aftermarket Equivalent"
+        ]
         all_quotes: list = []
 
         if not priced_options:
@@ -782,49 +790,62 @@ def classify_message(text: str, api_key: str) -> dict:
     return {"intent": "GENERAL"}
 
 
-_VISION_PROMPT = """This is an industrial equipment nameplate photo or product listing image.
-Read ALL visible text — including product titles, subtitles, description text, specification
-tables, and part number suffixes — and return ONLY JSON (no prose):
+_VISION_PROMPT = """You are an industrial equipment data extractor looking at a nameplate photo
+or product listing image. Your primary task is to extract ALL specification information visible
+anywhere in the image — product titles, subtitles, spec tables, part number suffixes, and labels.
+
+STEP 1 — SHAFT SIZE (do this first, before anything else):
+Scan the ENTIRE image for text matching any of these patterns:
+  - "[number]-[fraction]\" Shaft"  e.g. 1-5/8" Shaft → shaft_size = "1-5/8\""
+  - "[number].[number]\" shaft"    e.g. 1.625" shaft → shaft_size = "1.625\""
+  - "[number]mm Shaft"             e.g. 42mm Shaft → shaft_size = "42mm"
+  - "[number] inch shaft"          e.g. 1.5 inch shaft → shaft_size = "1.5 inch"
+Product listing titles VERY OFTEN contain shaft size in this format:
+  "[Manufacturer], [PN], [Type], [SIZE] Shaft, [Model]"
+Extract the SIZE VALUE only (e.g. "1-5/8\"" from "1-5/8\" Shaft").
+If you find shaft size text anywhere in the image, you MUST populate shaft_size.
+
+STEP 2 — Return ONLY this JSON object (no prose before or after):
 {
   "category":       "Part" or "Equipment",
-  "detected_type":  "precise brand-agnostic type, e.g. Mechanical Seal or Vertical Multi-Stage Centrifugal Pump",
-  "manufacturer":   "...",
-  "model":          "...",
-  "part_number":    "full part number including any suffix, e.g. 84004-28-C238CBC",
-  "voltage":        "...",
-  "phase":          "3-phase or single-phase or null",
-  "hp":             "...",
-  "serial_number":  "...",
-  "description":    "one-line description including all key specs found",
-  "gpm":            "...",
-  "psi":            "...",
-  "frame":          "...",
-  "shaft_size":     "e.g. 1-5/8\" — look for [dimension] Shaft in title or description, or null",
-  "bore_diameter":  "bore or ID spec if stated, or null",
-  "seal_face_size": "for mechanical seals — face diameter if stated, or null",
-  "connection_size":"for fittings/valves/flanges — e.g. 1-1/2\" NPT, or null",
-  "material_spec":  "elastomer or material type, e.g. Viton EPDM Buna-N Carbon/SiC, or null"
+  "detected_type":  string or null,
+  "manufacturer":   string or null,
+  "model":          string or null,
+  "part_number":    string or null,
+  "voltage":        string or null,
+  "phase":          string or null,
+  "hp":             string or null,
+  "serial_number":  string or null,
+  "description":    string,
+  "gpm":            string or null,
+  "psi":            string or null,
+  "frame":          string or null,
+  "shaft_size":     string or null,
+  "bore_diameter":  string or null,
+  "seal_face_size": string or null,
+  "connection_size":string or null,
+  "material_spec":  string or null
 }
 
 Category: "Equipment" = full unit (pump, motor, compressor, blower, fan, conveyor).
-          "Part"      = replacement component (relay, contactor, VFD, bearing, seal, sensor).
+          "Part"      = replacement component (seal, bearing, relay, VFD, contactor, belt).
 
 Rules:
-- For Parts (seals, bearings, etc.): set voltage, hp, rpm, gpm, psi, phase to null — those are
-  parent-equipment specs, not part specs.
-- shaft_size: product titles often read "[Mfr], [PN], [Type], [Shaft Size] Shaft, [Model]" —
-  extract the size value explicitly including units and fractions.
-- part_number: capture the FULL part number string including any material/suffix codes.
-- material_spec: for Gusher and similar brands, part number suffixes encode seal face and
-  elastomer combinations — note the suffix and infer the material if recognisable.
-- Use null for any field not visible. Never omit a field.
+- For Parts: set voltage, hp, rpm, gpm, psi, phase to null (those are parent-equipment specs).
+- part_number: capture the FULL string including any suffix codes (e.g. 84004-28-C238CBC).
+- material_spec: for Gusher-style part numbers, the suffix encodes seal face/elastomer material
+  (e.g. C238CBC) — record the suffix in part_number AND infer material in material_spec.
+- description: one concise line including all key specs found.
+- Return null for any field not visible. Never omit a field — always include the key.
 """
 
 
 def specs_from_image(image_bytes: bytes, filename: str, api_key: str):
     from utils.models import AssetSpecs
     media_type = _detect_media_type(image_bytes)
+    print(f"[Vision] specs_from_image: sending {len(image_bytes)} bytes ({media_type}) to Claude")
     raw = _claude_vision(image_bytes, media_type, _VISION_PROMPT, api_key)
+    print(f"[Vision] Raw response ({len(raw)} chars): {raw[:400]}")
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if m:
         d   = json.loads(m.group(0))
@@ -1076,7 +1097,10 @@ def render_asset_card() -> None:
 def render_vendor_cards() -> None:
     quotes   = st.session_state.all_quotes
     all_opts = st.session_state.all_options
-    tbd_count = sum(1 for o in all_opts if getattr(o, "price_tbd", False))
+    tbd_count = sum(1 for o in all_opts
+                   if getattr(o, "price_tbd", False)
+                   and not getattr(o, "rejection_reason", None)
+                   and getattr(o, "match_type", "") != "Aftermarket Equivalent")
 
     if not quotes:
         # No priced options — show CTA pointing to Tier 3 section below
@@ -1637,6 +1661,83 @@ def render_purchase_confirmed() -> None:
         st.rerun()
 
 
+def render_aftermarket_results() -> None:
+    """Render the Aftermarket / Third-Party Specialists section for Parts.
+
+    Positioned between the OEM Tier 1/2 cards and the Broader Outreach section.
+    Only renders when:
+    - specs.category == "Part"
+    - warranty_status is not "in_warranty"
+    - at least one Aftermarket Equivalent option is present and not rejected
+    """
+    all_opts = st.session_state.all_options
+    specs    = st.session_state.specs
+
+    if not specs or specs.category != "Part":
+        return
+
+    warranty = (getattr(specs, "warranty_status", None) or "").lower()
+    if warranty == "in_warranty":
+        return
+
+    am_opts = [
+        o for o in all_opts
+        if getattr(o, "match_type", "") == "Aftermarket Equivalent"
+        and not getattr(o, "rejection_reason", None)
+    ]
+    if not am_opts:
+        return
+
+    st.markdown(
+        '<div class="tier-hdr" style="border-left-color:#d29922;">'
+        '&#9679; Aftermarket / Third-Party Specialists</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not warranty or warranty in ("unknown", "none"):
+        st.warning(
+            "Confirm warranty status before sourcing aftermarket equivalents — "
+            "third-party parts may affect manufacturer warranty coverage.",
+            icon="⚠️",
+        )
+
+    st.markdown(
+        '<div style="font-size:.78rem;color:#8b949e;margin:.2rem 0 .7rem;">'
+        'These vendors supply functionally equivalent parts from third-party manufacturers. '
+        'Verify dimensional fit and material compatibility before ordering — '
+        '<b>these are not OEM part number matches.</b></div>',
+        unsafe_allow_html=True,
+    )
+
+    for o in am_opts:
+        price_str = f"${o.base_price:.2f}" if not o.price_tbd and o.base_price > 0 else "Price TBD"
+        conf      = getattr(o, "confidence_score", 0.0)
+        conf_col  = "#3fb950" if conf >= 70 else ("#d29922" if conf >= 50 else "#f85149")
+        url       = getattr(o, "source_url", None) or ""
+        url_html  = (
+            f'<a href="{url}" target="_blank" style="color:#58a6ff;font-size:.72rem;">'
+            f'View listing &#8599;</a>'
+            if url else ""
+        )
+        st.markdown(f"""
+        <div class="q-card" style="border-left:3px solid #d29922;">
+          <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.35rem;">
+            <span style="font-weight:700;font-size:.92rem;color:#e6edf3;">{o.vendor_name}</span>
+            <span class="chip chip-a" style="font-size:.6rem;letter-spacing:.04em;">AFTERMARKET EQUIV.</span>
+            <span style="font-size:.78rem;font-weight:700;color:#e6edf3;margin-left:auto;">{price_str}</span>
+          </div>
+          <div style="font-size:.75rem;color:#8b949e;margin-bottom:.3rem;">
+            Lead: {o.lead_time_days}d &nbsp;|&nbsp;
+            Confidence: <span style="color:{conf_col};font-weight:600;">{conf:.0f}%</span>
+            &nbsp;|&nbsp; {url_html}
+          </div>
+          <div style="font-size:.7rem;color:#d29922;font-style:italic;">
+            &#9888; Verify dimensional fit and material compatibility before installing —
+            third-party equivalent, not OEM PN match
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+
 def _t3_match_label(suit: float) -> str:
     """Replace raw suitability % with a quality label for the Tier 3 outreach view.
 
@@ -1666,10 +1767,13 @@ def render_tier3_outreach() -> None:
         return
 
     # Apply minimum match-score threshold -- vendors below this are noise, not candidates.
+    # Also exclude rejected options and aftermarket equivalents (handled in their own section).
     rfq_options = [
         o for o in all_options
         if getattr(o, "price_tbd", False)
         and getattr(o, "suitability_score", 0.0) >= BROADER_OUTREACH_MIN_MATCH_SCORE
+        and not getattr(o, "rejection_reason", None)
+        and getattr(o, "match_type", "") != "Aftermarket Equivalent"
     ]
     if not rfq_options:
         return
@@ -2469,6 +2573,7 @@ elif active_tab == "🔍 Active Sourcing":
                     }
                     st.rerun()
             render_vendor_cards()
+            render_aftermarket_results()
             render_tier3_outreach()
             if st.session_state.pipeline_error:
                 st.error(f"Pipeline error: {st.session_state.pipeline_error}")

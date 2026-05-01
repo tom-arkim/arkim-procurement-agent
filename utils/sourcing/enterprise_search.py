@@ -383,3 +383,184 @@ def _discover_national_specialists(specs: AssetSpecs,
     if not options:
         print("[Sourcing] Tier 2: no qualifying national specialists found")
     return options
+
+
+# ---------------------------------------------------------------------------
+# Aftermarket / Third-Party Specialist Discovery
+# ---------------------------------------------------------------------------
+
+_AFTERMARKET_SPECIALIST_SYSTEM = """You are a procurement data extractor for industrial parts.
+Given web search results, identify third-party manufacturers and aftermarket specialists
+who supply functionally equivalent replacement parts — NOT the OEM manufacturer.
+
+Return ONLY valid JSON — a list of up to 5 objects:
+[
+  {
+    "name":      "Vendor Business Name",
+    "website":   "https://...",
+    "email":     null,
+    "price":     null,
+    "lead_days": 7
+  }
+]
+
+Rules:
+- Include aftermarket manufacturers, independent seal/bearing/belt suppliers, third-party specialists.
+- EXCLUDE the OEM manufacturer that makes the original part.
+- EXCLUDE major national distributors: Grainger, McMaster-Carr, MSC Industrial, Amazon, eBay.
+- price: a number if a specific unit price is explicitly visible in the snippet; null if not shown.
+- lead_days: use stated shipping time; default 7 if unknown.
+- Return [] if no qualifying aftermarket vendors are found.
+"""
+
+
+def _build_aftermarket_query(specs: AssetSpecs) -> str:
+    """Spec-based query — omits OEM brand and part number to find aftermarket equivalents."""
+    parts: list[str] = []
+
+    detected = (getattr(specs, "detected_type", None) or "").lower()
+    if detected:
+        parts.append(detected)
+
+    if getattr(specs, "shaft_size", None):
+        size = re.sub(r'"', " inch", specs.shaft_size)
+        parts.append(f"{size} shaft")
+    if getattr(specs, "bore_diameter", None):
+        parts.append(specs.bore_diameter)
+    if getattr(specs, "material_spec", None):
+        parts.append(specs.material_spec)
+    if getattr(specs, "connection_size", None):
+        parts.append(specs.connection_size)
+
+    # Type number from description (e.g. "Type 21")
+    desc = specs.description or ""
+    type_m = re.search(r"\bType\s+\d+\b", desc, re.IGNORECASE)
+    if type_m:
+        parts.append(type_m.group(0))
+
+    parts.append("aftermarket equivalent supplier price buy")
+    return " ".join(filter(None, parts))
+
+
+def _discover_aftermarket_specialists(
+    specs: AssetSpecs,
+    all_existing_options: list[SourcingOption],
+) -> list[SourcingOption]:
+    """Spec-based aftermarket discovery — finds third-party equivalents by description.
+
+    Only runs when:
+    - specs.category == "Part"
+    - detected_type contains a term from AFTERMARKET_VIABLE_CATEGORIES
+    - warranty_status is not "in_warranty"
+    """
+    import utils.sourcing as _pkg
+    from utils.sourcing.constants import AFTERMARKET_VIABLE_CATEGORIES
+
+    warranty = (getattr(specs, "warranty_status", None) or "").lower()
+    if warranty == "in_warranty":
+        print("[Sourcing] Aftermarket pass skipped — asset is in warranty")
+        return []
+
+    if specs.category != "Part":
+        return []
+
+    dtype_lower = (getattr(specs, "detected_type", None) or "").lower()
+    if not any(cat in dtype_lower for cat in AFTERMARKET_VIABLE_CATEGORIES):
+        print(f"[Sourcing] Aftermarket pass skipped — '{dtype_lower}' not in viable categories")
+        return []
+
+    if not _pkg._tavily:
+        print("[Sourcing] Aftermarket pass skipped — Tavily not initialised")
+        return []
+
+    query = _build_aftermarket_query(specs)
+    print(f"[Sourcing] Aftermarket spec-based query: {query!r}")
+
+    try:
+        response = _pkg._tavily.search(query=query, search_depth="advanced", max_results=8)
+        results  = response.get("results", [])
+    except Exception as exc:
+        print(f"[Sourcing] Aftermarket Tavily error: {exc}")
+        return []
+
+    if not results or not _pkg.ANTHROPIC_API_KEY:
+        return []
+
+    snippet_map = {
+        r.get("url", ""): (r.get("title", "") + " " + r.get("content", "")).strip()
+        for r in results if r.get("url")
+    }
+    snippets = [
+        f"URL: {r.get('url', '')}\nTitle: {r.get('title', '')}\nSnippet: {r.get('content', '')}\n"
+        for r in results
+    ]
+    equip_term = getattr(specs, "detected_type", None) or specs.description or "industrial part"
+    user_msg   = f"Finding aftermarket suppliers for: {equip_term}\n\n" + "\n---\n".join(snippets)
+
+    existing_lower = {o.vendor_name.lower() for o in all_existing_options}
+    oem_lower      = (specs.manufacturer or "").lower()
+
+    try:
+        raw   = _anthropic_complete(_AFTERMARKET_SPECIALIST_SYSTEM, user_msg)
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        if not match:
+            return []
+        vendors = [v for v in json.loads(match.group(0))
+                   if isinstance(v, dict) and v.get("name")]
+        print(f"[Sourcing] Aftermarket found {len(vendors)} potential vendor(s)")
+    except Exception as exc:
+        print(f"[Sourcing] Aftermarket LLM error: {exc}")
+        return []
+
+    options: list[SourcingOption] = []
+
+    for v in vendors[:5]:
+        name = (v.get("name") or "").strip()
+        if not name:
+            continue
+        if oem_lower and name.lower() == oem_lower:
+            continue
+        if name.lower() in existing_lower:
+            continue
+
+        url   = (v.get("website") or "").strip() or None
+        price = v.get("price")
+        lead  = max(1, int(v.get("lead_days") or 7))
+
+        tbd        = price is None
+        base_price = float(price) if price is not None else 0.0
+
+        snippet = snippet_map.get(url or "", "")
+        if not snippet:
+            slug = re.sub(r"[^a-z0-9]", "", name.lower())
+            for surl, stext in snippet_map.items():
+                if slug[:6] in surl.lower():
+                    snippet = stext
+                    break
+
+        suit = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
+        # Aftermarket: -15 confidence penalty (match by inference, not by PN)
+        conf = max(0.0, _compute_confidence_score(specs, suit, "Aftermarket Equivalent", "Unknown") - 15.0)
+
+        options.append(SourcingOption(
+            vendor_name=name,
+            base_price=base_price,
+            lead_time_days=lead,
+            reliability_score=_base_reliability("Quote Request"),
+            merchant_type="Aftermarket Specialist",
+            requires_rfq=tbd,
+            source_url=url,
+            price_tbd=tbd,
+            match_type="Aftermarket Equivalent",
+            suitability_score=suit,
+            confidence_score=conf,
+            vendor_authorization_status="Unknown",
+            onboarding_status="Not Onboarded",
+            notes=f"Aftermarket equivalent — {url}" if url else "Aftermarket equivalent",
+        ))
+        tag = "TBD" if tbd else f"${base_price:.2f}"
+        print(f"  Aftermarket: {name} — {tag} | {lead}d | suit={suit:.0f}% | conf={conf:.0f}%")
+
+    if not options:
+        print("[Sourcing] Aftermarket: no qualifying vendors found")
+    return options

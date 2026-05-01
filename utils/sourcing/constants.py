@@ -83,6 +83,25 @@ HIGH_RISK_ELECTRICAL_CATEGORIES = {
     "power_supply", "vfd", "variable frequency drive",
 }
 
+# ---------------------------------------------------------------------------
+# Quality filter thresholds
+# ---------------------------------------------------------------------------
+
+# Minimum confidence_score (0-100) for a result to surface in any tier.
+# Results below this are annotated with rejection_reason="confidence_below_floor".
+TIER_SURFACE_MIN_CONFIDENCE: float = 50.0
+
+# ---------------------------------------------------------------------------
+# Aftermarket sourcing
+# ---------------------------------------------------------------------------
+
+# Part categories for which spec-based aftermarket discovery runs (when not in-warranty).
+AFTERMARKET_VIABLE_CATEGORIES: set[str] = {
+    "mechanical seal", "seal kit", "bearing", "gasket",
+    "o-ring", "belt", "coupling", "motor", "valve",
+    "shaft seal", "lip seal", "v-belt",
+}
+
 # 1.9 — Categories with elevated counterfeit risk in the industrial supply chain.
 _HIGH_COUNTERFEIT_RISK_CATEGORIES: set[str] = {
     "bearing", "seal", "vfd", "variable frequency drive", "contactor",

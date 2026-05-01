@@ -44,6 +44,8 @@ from utils.sourcing.constants import (           # noqa: E402
     _COLLECTION_URL_PATTERNS,
     _HIGH_COUNTERFEIT_RISK_CATEGORIES,
     _MARKETPLACE_DOMAINS,
+    TIER_SURFACE_MIN_CONFIDENCE,
+    AFTERMARKET_VIABLE_CATEGORIES,
 )
 from utils.sourcing.tier3_outreach import (      # noqa: E402
     draft_rfq_email,
@@ -75,6 +77,7 @@ from utils.sourcing.llm_parsing import (         # noqa: E402
 from utils.sourcing.price_sanity import (        # noqa: E402
     _apply_price_sanity,
     _sanity_threshold,
+    _apply_extreme_price_filter,
 )
 from utils.sourcing.market_confidence import (   # noqa: E402
     _fetch_market_confidence,
@@ -83,10 +86,13 @@ from utils.sourcing.filtering import (           # noqa: E402
     _counterfeit_risk_flag,
     _apply_warranty_filter,
     _apply_registry_enrichment,
+    _apply_confidence_floor,
+    _apply_category_mismatch_guard,
 )
 from utils.sourcing.enterprise_search import (   # noqa: E402
     _call_enterprise_api,
     _discover_national_specialists,
+    _discover_aftermarket_specialists,
     _vendor_merchant_type,
     _base_reliability,
     _is_heavy_item,
