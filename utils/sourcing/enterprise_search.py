@@ -250,12 +250,14 @@ Given web search results, identify national specialist vendors that sell or dist
 Return ONLY valid JSON — a list of up to 5 objects:
 [
   {
-    "name":      "Vendor Business Name",
-    "website":   "https://...",
-    "email":     null,
-    "phone":     null,
-    "lead_days": 7,
-    "price":     null
+    "name":              "Vendor Business Name",
+    "website":           "https://...",
+    "email":             null,
+    "phone":             null,
+    "lead_days":         7,
+    "price":             null,
+    "found_part_number": null,
+    "pn_match_status":   "not_visible"
   }
 ]
 
@@ -266,6 +268,14 @@ Rules:
 - lead_days: use stated shipping time, otherwise default 7.
 - Set email/phone to null if not in the snippets — do not invent contact details.
 - Return [] if no qualifying national specialist vendors appear.
+
+Part number matching (required for every result):
+- found_part_number: the exact part number string visible in the snippet or page title. null if none shown.
+- pn_match_status: classify the match against the searched part number:
+    "exact_match"   — snippet shows a part number identical to the searched PN
+    "partial_match" — snippet shows a related or variant PN (different suffix/prefix, but clearly related)
+    "no_match"      — a clearly different part number is shown that does not match the searched PN
+    "not_visible"   — no part number is visible in the snippet at all
 """
 
 
@@ -328,10 +338,14 @@ def _discover_national_specialists(specs: AssetSpecs,
         name = (v.get("name") or "").strip()
         if any(t in name.lower() for t in tier1_lower):
             continue
-        url   = (v.get("website") or "").strip() or None
-        price = v.get("price")
-        lead  = max(1, int(v.get("lead_days") or 7))
-        email = v.get("email") or None
+        url      = (v.get("website") or "").strip() or None
+        price    = v.get("price")
+        lead     = max(1, int(v.get("lead_days") or 7))
+        email    = v.get("email") or None
+        found_pn = (v.get("found_part_number") or "").strip() or None
+        pn_status = (v.get("pn_match_status") or "not_visible").strip()
+        if pn_status not in ("exact_match", "partial_match", "no_match", "not_visible"):
+            pn_status = "not_visible"
 
         tbd        = price is None
         base_price = float(price) if price is not None else 0.0
@@ -343,7 +357,44 @@ def _discover_national_specialists(specs: AssetSpecs,
                 if slug[:6] in surl.lower():
                     snippet = stext
                     break
-        suit      = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
+
+        # PN enforcement: no_match → annotate and skip scoring
+        if pn_status == "no_match":
+            print(f"[Sourcing] Tier 2 PN no_match (pn_mismatch): {name} — "
+                  f"found '{found_pn}' vs searched '{specs.part_number}'")
+            options.append(SourcingOption(
+                vendor_name=name,
+                base_price=0.0,
+                lead_time_days=lead,
+                reliability_score=_base_reliability("Quote Request"),
+                merchant_type="Quote Request",
+                requires_rfq=True,
+                contact_email=email,
+                source_url=url,
+                price_tbd=True,
+                found_part_number=found_pn,
+                pn_match_status=pn_status,
+                rejection_reason="pn_mismatch",
+                match_type="Functional Alternative",
+            ))
+            continue
+
+        # Determine match_type from pn_status
+        if pn_status == "exact_match":
+            match_type = "Exact OEM"
+        elif pn_status == "partial_match":
+            match_type = "Aftermarket Compatible"
+        else:
+            match_type = "Functional Alternative"
+
+        # Pass found_pn to scoring only when we have a confirmed match
+        scoring_pn = found_pn if pn_status in ("exact_match", "partial_match") else None
+        suit = _compute_suitability_score(specs, snippet, url or "", found_pn=scoring_pn)
+
+        # not_visible: cap suitability at 45
+        if pn_status == "not_visible" and suit > 45:
+            suit = 45.0
+
         stier     = _suitability_tier(name, suit)
         t2_is_oem = _home_field_bonus(specs, url or "", snippet) > 0
 
@@ -353,9 +404,13 @@ def _discover_national_specialists(specs: AssetSpecs,
         assert isinstance(_VERIFIED_PARTNERS, set), "_VERIFIED_PARTNERS must be a set"
         t2_merchant = "Direct Buy via Arkim" if name in _VERIFIED_PARTNERS else "Quote Request"
 
-        t2_auth  = "Authorized" if name in _VERIFIED_PARTNERS else "Unknown"
-        t2_cf    = _counterfeit_risk_flag(specs, url or "", t2_auth)
-        t2_conf  = _compute_confidence_score(specs, suit, "Functional Alternative", t2_auth)
+        t2_auth = "Authorized" if name in _VERIFIED_PARTNERS else "Unknown"
+        t2_cf   = _counterfeit_risk_flag(specs, url or "", t2_auth)
+        t2_conf = _compute_confidence_score(specs, suit, match_type, t2_auth)
+
+        # not_visible: -20 confidence penalty
+        if pn_status == "not_visible":
+            t2_conf = max(0.0, t2_conf - 20.0)
 
         options.append(SourcingOption(
             vendor_name=name,
@@ -376,9 +431,13 @@ def _discover_national_specialists(specs: AssetSpecs,
             onboarding_status="Active" if name in _VERIFIED_PARTNERS else "Not Onboarded",
             confidence_score=t2_conf,
             is_oem_direct=t2_is_oem,
+            found_part_number=found_pn,
+            pn_match_status=pn_status,
+            match_type=match_type,
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | {stier or 'no tier'}")
+        print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | "
+              f"{stier or 'no tier'} | pn={pn_status}")
 
     if not options:
         print("[Sourcing] Tier 2: no qualifying national specialists found")

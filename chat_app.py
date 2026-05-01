@@ -606,13 +606,18 @@ def _execute_pipeline(specs, site: str,
         st.session_state.rfq_draft     = None
         st.session_state.rfq_emails    = {}
 
-        national_priced = sum(1 for o in options
+        # Post-filter counts — exclude rejected options and aftermarket equivalents
+        # so the spinner summary matches what the UI will actually render
+        _active_opts = [o for o in options
+                        if not getattr(o, "rejection_reason", None)
+                        and getattr(o, "match_type", "") != "Aftermarket Equivalent"]
+        national_priced = sum(1 for o in _active_opts
                               if o.merchant_type in ("Enterprise", "National Specialist")
                               and not getattr(o, "price_tbd", False))
-        national_inq    = sum(1 for o in options
+        national_inq    = sum(1 for o in _active_opts
                               if o.merchant_type in ("Enterprise", "National Specialist")
                               and getattr(o, "price_tbd", False))
-        tbd_count       = sum(1 for o in options if getattr(o, "price_tbd", False))
+        tbd_count       = sum(1 for o in _active_opts if getattr(o, "price_tbd", False))
 
         if national_priced == 0 and national_inq == 0:
             st.write(

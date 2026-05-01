@@ -86,7 +86,11 @@ class SourcingOption:
     is_oem_direct: Optional[bool] = None          # True when vendor domain matches manufacturer (home field bonus)
     # Quality filter annotation — set by post-processing guards; non-None = excluded from UI
     # Values: "confidence_below_floor" | "price_outlier_extreme" | "category_mismatch_suspected"
+    #         | "pn_mismatch"
     rejection_reason: Optional[str] = None
+    # PN match status from Tier 2 LLM extraction (mirrors Tier 1's found_part_number logic)
+    # Values: "exact_match" | "partial_match" | "no_match" | "not_visible" | None (Tier 1)
+    pn_match_status: Optional[str] = None
 
 
 @dataclass
