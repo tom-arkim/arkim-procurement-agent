@@ -1771,13 +1771,28 @@ def render_tier3_outreach() -> None:
     if len(priced_options) >= 3 and not _all_outreach:
         return
 
-    # Apply minimum match-score threshold -- vendors below this are noise, not candidates.
-    # Also exclude rejected options and aftermarket equivalents (handled in their own section).
+    # Tier 3 is the inquiry-required outreach path — it surfaces vendors we found
+    # but couldn't confirm a direct buy price for. Confidence-floor annotations are
+    # appropriate for the TCA comparison table (transactional decisions), but they
+    # must NOT block Tier 3: low confidence is exactly the signal that makes Tier 3
+    # outreach valuable (we need a human contact to confirm fit and pricing).
+    #
+    # Only block Tier 3 when the LLM affirmatively ruled the result out:
+    #   pn_mismatch           — LLM saw a definitively different PN on the vendor page
+    #   price_outlier_extreme — 10x+ peer median → almost certainly a wrong product
+    #   category_mismatch_suspected — >5x peer median for a Part → wrong product category
+    # confidence_below_floor intentionally omitted — these vendors still belong in Tier 3.
+    TIER3_BLOCKING_REJECTION_REASONS = {
+        "pn_mismatch",
+        "price_outlier_extreme",
+        "category_mismatch_suspected",
+    }
+
     rfq_options = [
         o for o in all_options
         if getattr(o, "price_tbd", False)
         and getattr(o, "suitability_score", 0.0) >= BROADER_OUTREACH_MIN_MATCH_SCORE
-        and not getattr(o, "rejection_reason", None)
+        and getattr(o, "rejection_reason", None) not in TIER3_BLOCKING_REJECTION_REASONS
         and getattr(o, "match_type", "") != "Aftermarket Equivalent"
     ]
     if not rfq_options:

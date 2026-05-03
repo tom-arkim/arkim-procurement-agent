@@ -407,10 +407,11 @@ def _discover_national_specialists(specs: AssetSpecs,
         t2_auth = "Authorized" if name in _VERIFIED_PARTNERS else "Unknown"
         t2_cf   = _counterfeit_risk_flag(specs, url or "", t2_auth)
         t2_conf = _compute_confidence_score(specs, suit, match_type, t2_auth)
-
-        # not_visible: -20 confidence penalty
-        if pn_status == "not_visible":
-            t2_conf = max(0.0, t2_conf - 20.0)
+        # not_visible: the suitability cap at 45 already signals uncertainty.
+        # An additional confidence penalty was redundant and caused a regression
+        # where legitimate Tier 2 results with any non-visible PN scored below
+        # the confidence floor (42.5 → floor 40, barely passing; 22.5 with penalty
+        # → always failed). Removed per regression fix.
 
         options.append(SourcingOption(
             vendor_name=name,
@@ -520,9 +521,12 @@ def _discover_aftermarket_specialists(
         print("[Sourcing] Aftermarket pass skipped — asset is in warranty")
         return []
 
-    if specs.category != "Part":
-        return []
-
+    # Gate by AFTERMARKET_VIABLE_CATEGORIES rather than category field.
+    # The old `category != "Part"` guard incorrectly blocked Equipment items like
+    # motors, which are in AFTERMARKET_VIABLE_CATEGORIES and have a healthy
+    # aftermarket (WEG, Baldor, Marathon equivalents). The category check was
+    # redundant — if detected_type doesn't match a viable category, the next
+    # guard below catches it anyway.
     dtype_lower = (getattr(specs, "detected_type", None) or "").lower()
     if not any(cat in dtype_lower for cat in AFTERMARKET_VIABLE_CATEGORIES):
         print(f"[Sourcing] Aftermarket pass skipped — '{dtype_lower}' not in viable categories")

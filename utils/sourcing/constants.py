@@ -87,9 +87,22 @@ HIGH_RISK_ELECTRICAL_CATEGORIES = {
 # Quality filter thresholds
 # ---------------------------------------------------------------------------
 
-# Minimum confidence_score (0-100) for a result to surface in any tier.
-# Results below this are annotated with rejection_reason="confidence_below_floor".
-TIER_SURFACE_MIN_CONFIDENCE: float = 50.0
+# Minimum confidence_score (0-100) for a result to surface in the TCA comparison table.
+# Results below this are annotated with rejection_reason="confidence_below_floor" and
+# excluded from the priced-option table, but NOT from Tier 3 outreach (see Fix 1).
+#
+# Calibration: the maximum achievable confidence for a "Functional Alternative" result
+# with no OEM PN in the snippet is 42.5 (suit_pts=22.5 + match_pts=10 + spec_pts=10).
+# Setting the floor at 40.0 allows these legitimate candidates to surface while still
+# filtering genuinely low-quality results (confidence < 40 means poor suitability AND
+# no PN confirmation AND incomplete specs).
+#
+# The extreme_price_outlier filter and pn_mismatch annotation are the primary defenses
+# against wrong-product results. This floor is a secondary backstop, not the first line.
+#
+# Future refinement (Option B): apply a tighter floor (50) only to priced TCA candidates
+# and a looser floor (35) to price_tbd inquiry candidates, with no floor for Tier 3.
+TIER_SURFACE_MIN_CONFIDENCE: float = 40.0
 
 # ---------------------------------------------------------------------------
 # Aftermarket sourcing
