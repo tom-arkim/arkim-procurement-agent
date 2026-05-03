@@ -482,6 +482,19 @@ def _build_aftermarket_query(specs: AssetSpecs) -> str:
     if detected:
         parts.append(detected)
 
+    # Motor/Equipment fit specs — hp and frame are primary for cross-referencing
+    # equivalent motors (e.g., 150HP 447T narrows to the right frame class).
+    # voltage and rpm further constrain to compatible units.
+    if getattr(specs, "hp", None):
+        parts.append(f"{specs.hp}")
+    if getattr(specs, "frame", None):
+        parts.append(f"{specs.frame} frame")
+    if getattr(specs, "voltage", None) and specs.voltage not in ("N/A", "Unknown"):
+        parts.append(specs.voltage)
+    if getattr(specs, "rpm", None):
+        parts.append(specs.rpm)
+
+    # Part/seal dimensional specs
     if getattr(specs, "shaft_size", None):
         size = re.sub(r'"', " inch", specs.shaft_size)
         parts.append(f"{size} shaft")
