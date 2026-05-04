@@ -739,6 +739,13 @@ def _execute_pipeline(specs, site: str,
         })
     except Exception as _audit_exc:
         print(f"[AuditLog] Non-fatal write error: {_audit_exc}")
+        # Record in the in-process failure buffer so the admin view can surface it.
+        # Do NOT show this to the end user — the pipeline continues normally.
+        try:
+            from utils.audit_log import record_write_failure as _al_rec_fail
+            _al_rec_fail(run_id, _audit_exc)
+        except Exception:
+            pass
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2842,7 +2849,27 @@ elif active_tab == "🔧 Admin" and SHOW_ADMIN_VIEW:
 
     # ── Audit Log Viewer ──────────────────────────────────────────────────────
     with _adm_tab_audit:
-        from utils.audit_log import recent_entries as _al_recent, get_entry as _al_get
+        from utils.audit_log import (recent_entries as _al_recent,
+                                     recent_write_failures as _al_failures)
+
+        # Write-failure banner — admin-only, never shown in main UI
+        try:
+            _al_fail_list = _al_failures(hours=24)
+            if _al_fail_list:
+                _fail_noun = "write" if len(_al_fail_list) == 1 else "writes"
+                st.error(
+                    f"⚠️ {len(_al_fail_list)} audit log {_fail_noun} failed "
+                    f"in the last 24 hours — entries may be incomplete."
+                )
+                with st.expander("Failure details", expanded=False):
+                    for _f in _al_fail_list:
+                        st.caption(
+                            f"[{_f['timestamp'][:19]}]  "
+                            f"run …{(_f['sourcing_run_id'] or '')[-8:]}  ·  "
+                            f"{_f['exception_class']}: {_f['exception_message']}"
+                        )
+        except Exception:
+            pass
 
         _al_col1, _al_col2, _al_col3 = st.columns([3, 2, 1])
         with _al_col1:

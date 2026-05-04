@@ -30,8 +30,37 @@ import json
 import os
 import sqlite3
 import uuid
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timedelta
 from typing import Optional
+
+# ---------------------------------------------------------------------------
+# In-process write-failure ring buffer
+#
+# Module state survives Streamlit reruns (same server process), so failures
+# accumulate until the server restarts. The admin view reads this to surface
+# a warning banner when writes have been failing silently.
+# ---------------------------------------------------------------------------
+
+_write_failures: deque = deque(maxlen=100)
+
+
+def record_write_failure(run_id: str, exc: Exception,
+                         context: str = "audit_log_write_failed") -> None:
+    """Append a write-failure record to the in-process ring buffer."""
+    _write_failures.appendleft({
+        "timestamp":         datetime.utcnow().isoformat(),
+        "sourcing_run_id":   run_id,
+        "exception_class":   type(exc).__name__,
+        "exception_message": str(exc),
+        "context":           context,
+    })
+
+
+def recent_write_failures(hours: int = 24) -> list[dict]:
+    """Return failure records from the last N hours, newest first."""
+    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    return [f for f in _write_failures if f["timestamp"] >= cutoff]
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _DB_PATH  = os.path.join(_DATA_DIR, "audit_log.sqlite")
