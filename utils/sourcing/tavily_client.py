@@ -137,13 +137,16 @@ def _build_tier2_query(specs) -> str:
             q_parts.append('("seal cross reference" OR "aftermarket" OR "equivalent" OR "interchange")')
         return " AND ".join(q_parts)
     else:
-        # Build manufacturer anchor: prefer explicit authorized_service_brands if available
+        # Build manufacturer anchor: always keep broad word matching so vendors that say
+        # "authorized stocking dealer" or "service center" (not the exact phrase
+        # "authorized distributor") continue to surface.  Brand names from brand
+        # intelligence are ORed in as supplements — not replacements — so the query
+        # expands when known channel partners are available.
         if _auth_brands:
-            # Quote each brand name and OR them together with the manufacturer itself
             _brand_terms = " OR ".join(
                 f'"{ab}"' for ab in _auth_brands[:4] if ab
             )
-            auth_anchor = f'("authorized distributor" OR "authorized dealer" OR {_brand_terms})'
+            auth_anchor = f'(authorized OR distributor OR "service center" OR {_brand_terms})'
         else:
             auth_anchor = '(authorized OR distributor OR "service center")'
 

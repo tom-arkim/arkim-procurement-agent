@@ -276,7 +276,7 @@ def _is_oem_authorized_distributor(
     Checks (in order):
     1. Vendor name appears in brand intelligence authorized_service_brands list.
     2. URL path contains an explicit authorized-distributor / OEM-dealer pattern.
-    3. URL path embeds the manufacturer name in a products/brands/manufacturer sub-path.
+    3. (Removed — see inline comment.)
     4. Snippet contains an authorized-distributor phrase AND the manufacturer name.
     """
     u_lower  = (url     or "").lower()
@@ -295,13 +295,12 @@ def _is_oem_authorized_distributor(
     if any(p in u_lower for p in _OEM_AUTH_URL_PATTERNS):
         return True
 
-    # 3 — URL embeds manufacturer name in a products/brands/manufacturer sub-path
-    if mfg_slug and len(mfg_slug) >= 4:
-        for prefix in (f"products/{mfg_slug}", f"brands/{mfg_slug}", f"brand/{mfg_slug}",
-                       f"manufacturer/{mfg_slug}", f"manufacturers/{mfg_slug}",
-                       f"/{mfg_slug}-authorized", f"/{mfg_slug}-distributor"):
-            if prefix in u_lower:
-                return True
+    # Check 3 (products/{slug}, brands/{slug} URL sub-path) was removed.
+    # Substring matching on short slugs like "gusher" or "hyundai" produced false
+    # positives for any catalog-organized distributor whose URL contains those words
+    # (e.g. sealit123.com/brands/gusher/...), falsely tagging them as OEM Authorized
+    # regardless of actual channel relationship.  If a vendor is truly OEM-authorized,
+    # add them to brand intelligence authorized_service_brands (check 1 path) instead.
 
     # 4 — snippet contains authorized phrase AND manufacturer name
     if mfg_slug and len(mfg_slug) >= 4 and mfg_slug in s_lower:
