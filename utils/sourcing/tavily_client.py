@@ -15,7 +15,7 @@ from utils.sourcing.constants import (
     _DYNAMIC_FALLBACK_MIN_VIABLE,
 )
 from utils.sourcing.scoring import _is_collection_url
-from utils.brand_intelligence import get_competitors, get_subcategory_refinement
+from utils.brand_intelligence import get_competitors, get_subcategory_refinement, get_brand_relationships
 from utils.sourcing.scoring import _detect_equip_type
 
 
@@ -97,6 +97,8 @@ def _build_tier2_query(specs) -> str:
     """Build an asset-specific national specialist discovery query.
 
     Equipment: boolean AND/OR targeting authorized distributors and service centers.
+             When brand intelligence returns authorized_service_brands, those brand names
+             are added as an OR anchor so Tavily surfaces the OEM channel directly.
     Parts: cross-reference and stockist focused -- no "service center" requirement.
     """
     detected = (getattr(specs, "detected_type", None) or "").lower()
@@ -109,7 +111,16 @@ def _build_tier2_query(specs) -> str:
     if not niche_term:
         niche_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
 
+    # Fetch authorized_service_brands for Equipment queries so we can anchor on OEM channel
+    _auth_brands: list[str] = []
     known_mfg = specs.manufacturer not in ("Unknown", "N/A", "null", None)
+    if known_mfg and _equip_kw and specs.category == "Equipment":
+        try:
+            _br = get_brand_relationships(specs.manufacturer, _equip_kw)
+            _auth_brands = _br.get("authorized_service_brands") or []
+        except Exception:
+            pass
+
     pn        = specs.part_number
     known_pn  = pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown", None)
 
@@ -126,17 +137,28 @@ def _build_tier2_query(specs) -> str:
             q_parts.append('("seal cross reference" OR "aftermarket" OR "equivalent" OR "interchange")')
         return " AND ".join(q_parts)
     else:
-        q_parts = [
-            '(authorized OR distributor OR "service center")',
-            f'"{niche_term}"',
-        ]
+        # Build manufacturer anchor: prefer explicit authorized_service_brands if available
+        if _auth_brands:
+            # Quote each brand name and OR them together with the manufacturer itself
+            _brand_terms = " OR ".join(
+                f'"{ab}"' for ab in _auth_brands[:4] if ab
+            )
+            auth_anchor = f'("authorized distributor" OR "authorized dealer" OR {_brand_terms})'
+        else:
+            auth_anchor = '(authorized OR distributor OR "service center")'
+
+        q_parts = [auth_anchor, f'"{niche_term}"']
         if known_mfg:
             q_parts.append(f'"{specs.manufacturer}"')
         if specs.hp and specs.hp not in ("N/A", "None", "null"):
             q_parts.append(f'"{re.sub(r"\\s+", "", specs.hp).upper()}"')
         elif getattr(specs, "gpm", None):
             q_parts.append(f'"{re.sub(r"\\s+", "", specs.gpm).upper()}"')
-        return " AND ".join(q_parts)
+
+        query = " AND ".join(q_parts)
+        if _auth_brands:
+            print(f"[Sourcing] Tier 2 query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
+        return query
 
 
 # ---------------------------------------------------------------------------

@@ -286,9 +286,12 @@ def _compute_confidence_score(specs, suitability: float,
     """
     suit_pts = round(min(suitability, 100.0) * 0.50, 1)
 
-    match_pts = {"Exact OEM": 30, "Aftermarket Compatible": 20, "Functional Alternative": 10}.get(
-        match_type, 10
-    )
+    match_pts = {
+        "Exact OEM":               30,
+        "OEM Authorized Distributor": 25,  # channel-authentic: no PN uncertainty, just sourcing via distributor
+        "Aftermarket Compatible":  20,
+        "Functional Alternative":  10,
+    }.get(match_type, 10)
 
     _null = {None, "", "null", "N/A", "Unknown", "UNKNOWN-PN"}
     spec_fields = [specs.manufacturer, specs.model, specs.part_number]

@@ -241,6 +241,77 @@ def _call_enterprise_api(specs: AssetSpecs,
 
 
 # ---------------------------------------------------------------------------
+# OEM Authorized Distributor detection (Issue 2)
+# ---------------------------------------------------------------------------
+
+_OEM_AUTH_URL_PATTERNS = (
+    "authorized-distributor", "authorized_distributor",
+    "authorized-dealer",      "authorized_dealer",
+    "oem-dealer",             "factory-authorized", "factory_authorized",
+    "factory-auth",           "authorized-reseller", "authorized_reseller",
+    "official-distributor",   "officialdealer",
+)
+
+_OEM_AUTH_SNIPPET_PHRASES = (
+    "authorized distributor",
+    "authorized dealer",
+    "factory authorized",
+    "authorized reseller",
+    "authorized service center",
+    "official distributor",
+    "official dealer",
+    "authorized representative",
+)
+
+
+def _is_oem_authorized_distributor(
+    vendor_name: str,
+    url: str,
+    snippet: str,
+    manufacturer: str,
+    brand_rels: dict,
+) -> bool:
+    """Return True when strong evidence shows vendor is an OEM-authorized channel partner.
+
+    Checks (in order):
+    1. Vendor name appears in brand intelligence authorized_service_brands list.
+    2. URL path contains an explicit authorized-distributor / OEM-dealer pattern.
+    3. URL path embeds the manufacturer name in a products/brands/manufacturer sub-path.
+    4. Snippet contains an authorized-distributor phrase AND the manufacturer name.
+    """
+    u_lower  = (url     or "").lower()
+    s_lower  = (snippet or "").lower()
+    mfg_slug = re.sub(r"[^a-z0-9]", "", (manufacturer or "").lower())
+    vnd_slug = re.sub(r"[^a-z0-9]", "", (vendor_name  or "").lower())
+
+    # 1 — brand intelligence
+    auth_brands = brand_rels.get("authorized_service_brands") or []
+    for ab in auth_brands:
+        ab_slug = re.sub(r"[^a-z0-9]", "", ab.lower())
+        if ab_slug and (ab_slug in vnd_slug or vnd_slug in ab_slug):
+            return True
+
+    # 2 — URL path contains explicit authorized-distributor pattern
+    if any(p in u_lower for p in _OEM_AUTH_URL_PATTERNS):
+        return True
+
+    # 3 — URL embeds manufacturer name in a products/brands/manufacturer sub-path
+    if mfg_slug and len(mfg_slug) >= 4:
+        for prefix in (f"products/{mfg_slug}", f"brands/{mfg_slug}", f"brand/{mfg_slug}",
+                       f"manufacturer/{mfg_slug}", f"manufacturers/{mfg_slug}",
+                       f"/{mfg_slug}-authorized", f"/{mfg_slug}-distributor"):
+            if prefix in u_lower:
+                return True
+
+    # 4 — snippet contains authorized phrase AND manufacturer name
+    if mfg_slug and len(mfg_slug) >= 4 and mfg_slug in s_lower:
+        if any(p in s_lower for p in _OEM_AUTH_SNIPPET_PHRASES):
+            return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Tier 2 — National Specialist Discovery
 # ---------------------------------------------------------------------------
 
@@ -288,6 +359,11 @@ def _discover_national_specialists(specs: AssetSpecs,
     No price estimation — if price not found in snippet, the option is price_tbd=True (-> Tier 3).
     """
     import utils.sourcing as _pkg
+    from utils.brand_intelligence import get_brand_relationships
+    from utils.sourcing.scoring import _detect_equip_type
+
+    _equip_kw_t2 = _detect_equip_type(specs)
+    _brand_rels  = get_brand_relationships(specs.manufacturer, _equip_kw_t2 or "general")
 
     query = _build_tier2_query(specs)
     print(f"[Sourcing] Tier 2 national query: {query!r}")
@@ -391,9 +467,22 @@ def _discover_national_specialists(specs: AssetSpecs,
         scoring_pn = found_pn if pn_status in ("exact_match", "partial_match") else None
         suit = _compute_suitability_score(specs, snippet, url or "", found_pn=scoring_pn)
 
-        # not_visible: cap suitability at 45
-        if pn_status == "not_visible" and suit > 45:
+        # Check for OEM Authorized Distributor BEFORE the suitability cap so we can bypass it
+        _is_oem_auth = _is_oem_authorized_distributor(
+            name, url or "", snippet, specs.manufacturer, _brand_rels
+        )
+
+        # not_visible: cap suitability at 45 — unless vendor is OEM Authorized
+        # (OEM channel partners are legitimate even without PN visibility)
+        if pn_status == "not_visible" and suit > 45 and not _is_oem_auth:
             suit = 45.0
+
+        # Override match_type for OEM Authorized Distributors regardless of PN status
+        if _is_oem_auth:
+            match_type = "OEM Authorized Distributor"
+            if suit < 50:
+                suit = 50.0  # floor for confirmed OEM channel vendors
+            print(f"  [Sourcing] OEM Authorized Distributor detected: {name} | suit={suit:.0f}%")
 
         stier     = _suitability_tier(name, suit)
         t2_is_oem = _home_field_bonus(specs, url or "", snippet) > 0

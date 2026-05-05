@@ -32,27 +32,38 @@ Return null for any field not visible. Never omit a field — always return the 
 
 Return ONLY valid JSON with these exact keys:
 {
-  "category":           "Part" or "Equipment",
-  "detected_type":      string or null,
-  "manufacturer":       string or null,
-  "model":              string or null,
-  "part_number":        string or null,
-  "voltage":            string or null,
-  "phase":              string or null,
-  "hp":                 string or null,
-  "rpm":                string or null,
-  "serial_number":      string or null,
-  "description":        string,
-  "gpm":                string or null,
-  "psi":                string or null,
-  "frame":              string or null,
-  "physical_magnitude": "parcel" | "heavy_parcel" | "LTL_freight",
-  "shaft_size":         string or null,
-  "bore_diameter":      string or null,
-  "seal_face_size":     string or null,
-  "connection_size":    string or null,
-  "material_spec":      string or null
+  "category":                "Part" or "Equipment",
+  "detected_type":           string or null,
+  "manufacturer":            string or null,
+  "manufacturer_confidence": integer 0-100,
+  "manufacturer_candidates": list of strings,
+  "model":                   string or null,
+  "part_number":             string or null,
+  "voltage":                 string or null,
+  "phase":                   string or null,
+  "hp":                      string or null,
+  "rpm":                     string or null,
+  "serial_number":           string or null,
+  "description":             string,
+  "gpm":                     string or null,
+  "psi":                     string or null,
+  "frame":                   string or null,
+  "physical_magnitude":      "parcel" | "heavy_parcel" | "LTL_freight",
+  "shaft_size":              string or null,
+  "bore_diameter":           string or null,
+  "seal_face_size":          string or null,
+  "connection_size":         string or null,
+  "material_spec":           string or null
 }
+
+manufacturer_confidence rules (integer 0-100):
+  90-100: manufacturer name is EXPLICITLY VISIBLE in the text — name literally present.
+  60-79:  manufacturer CONFIDENTLY INFERRED from a well-known PN prefix or model pattern
+          (e.g. "PMC" prefix → Endress Hauser, "8536SC" → Square D, "22B-D" → Allen-Bradley).
+  30-59:  manufacturer GUESSED from partial context — possible but uncertain.
+  0-29:   manufacturer unknown or PN has no recognisable OEM pattern.
+manufacturer_candidates: up to 3 plausible manufacturer names ranked by likelihood.
+  REQUIRED when manufacturer_confidence < 80.  Empty list [] when confidence >= 80.
 
 Category rules:
 - "Equipment" = full assembled unit: pump, motor, compressor, blower, drive unit, conveyor, fan.
@@ -147,10 +158,19 @@ def extract_specs(image_description: str) -> AssetSpecs:
         cat = d.get("category", "Part")
         if cat not in ("Part", "Equipment"):
             cat = "Part"
+
+        mfg_conf = d.get("manufacturer_confidence")
+        try:
+            mfg_conf = int(mfg_conf) if mfg_conf is not None else 100
+        except (TypeError, ValueError):
+            mfg_conf = 100
+        mfg_conf = max(0, min(100, mfg_conf))
+
         print(
             f"[Vision] Extracted → [{cat}] {d.get('detected_type')} | "
-            f"{d.get('manufacturer')} {d.get('model')} | PN: {d.get('part_number')} | "
-            f"Phase: {d.get('phase')} | GPM: {d.get('gpm')} | PSI: {d.get('psi')}"
+            f"{d.get('manufacturer')} {d.get('model')} (conf={mfg_conf}) | "
+            f"PN: {d.get('part_number')} | Phase: {d.get('phase')} | "
+            f"GPM: {d.get('gpm')} | PSI: {d.get('psi')}"
         )
         mag = d.get("physical_magnitude", "")
         if mag not in ("parcel", "heavy_parcel", "LTL_freight"):
@@ -192,6 +212,7 @@ def extract_specs(image_description: str) -> AssetSpecs:
             seal_face_size=d.get("seal_face_size") or None,
             connection_size=d.get("connection_size") or None,
             material_spec=d.get("material_spec") or None,
+            manufacturer_confidence=mfg_conf,
         )
     except Exception as exc:
         print(f"[Vision] Sonnet call failed ({exc}) — using regex fallback")

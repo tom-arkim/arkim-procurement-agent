@@ -49,6 +49,19 @@ class AssetSpecs:
     seal_face_size: Optional[str] = None   # for mechanical seals
     connection_size: Optional[str] = None  # for fittings, valves, flanged connections
     material_spec: Optional[str] = None    # e.g. "Viton", "EPDM", "Carbon/Silicon"
+    # Manufacturer identification confidence: 0-100.
+    # 90+: name explicitly visible in image or stated by user.
+    # 60-79: inferred from recognizable PN prefix/pattern.
+    # 30-59: guessed from partial information.
+    # <30: unknown / unrecognizable.
+    # Default 100 keeps backward-compatible behaviour for programmatically-built specs.
+    manufacturer_confidence: int = 100
+    # Set only when detected_type/category were corrected post manufacturer-confirmation.
+    # Shape: {"original_manufacturer": str, "original_detected_type": str,
+    #         "original_category": str, "corrected_manufacturer": str,
+    #         "corrected_detected_type": str, "corrected_category": str}
+    # Captured by dataclasses.asdict() and written to audit log automatically.
+    classification_correction: Optional[dict] = None
 
 
 @dataclass

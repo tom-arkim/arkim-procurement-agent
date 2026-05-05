@@ -402,6 +402,8 @@ _DEFAULTS: dict = {
     "recorded_intents":           {},    # {quote_id: intent_record} — captured Accept Offer events
     "pending_verification_specs": None,  # specs waiting for user to confirm missing fields
     "pending_verification_site":  None,
+    # Manufacturer confidence gate: holds specs + candidates when confidence < 70
+    "pending_manufacturer_confirmation": None,
     "pending_search_strategy":    None,  # run_data held while user answers OEM-vs-aftermarket
     "seal_enhanced_done":         False, # True once dimensional question has been asked for this seal
 "search_mode":                "equivalents",  # "exact" | "equivalents" — always equivalents
@@ -756,20 +758,22 @@ _INTENT_SYS = """You are a classifier for Arkim, an industrial procurement AI.
 
 Classify the user message and return ONLY JSON (no prose):
 {
-  "intent":        "SOURCING" | "FOLLOW_UP" | "GENERAL" | "SPEC_CLARIFICATION",
-  "category":      "Part" | "Equipment",
-  "detected_type": string or null,
-  "manufacturer":  string or null,
-  "model":         string or null,
-  "part_number":   string or null,
-  "voltage":       string or null,
-  "phase":         string or null,
-  "hp":            string or null,
-  "gpm":           string or null,
-  "psi":           string or null,
-  "frame":         string or null,
-  "description":   string or null,
-  "site":          string or null
+  "intent":                   "SOURCING" | "FOLLOW_UP" | "GENERAL" | "SPEC_CLARIFICATION",
+  "category":                 "Part" | "Equipment",
+  "detected_type":            string or null,
+  "manufacturer":             string or null,
+  "manufacturer_confidence":  integer 0-100,
+  "manufacturer_candidates":  list of strings,
+  "model":                    string or null,
+  "part_number":              string or null,
+  "voltage":                  string or null,
+  "phase":                    string or null,
+  "hp":                       string or null,
+  "gpm":                      string or null,
+  "psi":                      string or null,
+  "frame":                    string or null,
+  "description":              string or null,
+  "site":                     string or null
 }
 
 Intent rules:
@@ -786,6 +790,16 @@ Category rules:
 detected_type: a precise, brand-agnostic searchable category, e.g.
   "Vertical Multi-Stage Centrifugal Pump", "3-Phase TEFC Induction Motor",
   "Variable Frequency Drive", "Horizontal Belt Conveyor", "Magnetic Motor Starter".
+
+manufacturer_confidence (integer 0-100): your certainty that the manufacturer is correctly identified.
+  90-100: manufacturer name EXPLICITLY stated by the user in this message.
+  60-79:  CONFIDENTLY inferred from a well-known PN prefix or model pattern
+          (e.g. "PMC" prefix → Endress Hauser, "8536SC" → Square D, "22B-D" → Allen-Bradley,
+               "1336" → Allen-Bradley, "FRN" → Fuji Electric, "ATV" → Schneider/Telemecanique).
+  30-59:  GUESSED from partial context — possible but uncertain.
+  0-29:   unknown or PN has no recognisable OEM pattern.
+manufacturer_candidates: up to 3 plausible manufacturer names ranked by likelihood.
+  REQUIRED when manufacturer_confidence < 80. Empty list [] when confidence >= 80.
 
 Return ONLY valid JSON.
 """
@@ -819,28 +833,38 @@ If you find shaft size text anywhere in the image, you MUST populate shaft_size.
 
 STEP 2 — Return ONLY this JSON object (no prose before or after):
 {
-  "category":       "Part" or "Equipment",
-  "detected_type":  string or null,
-  "manufacturer":   string or null,
-  "model":          string or null,
-  "part_number":    string or null,
-  "voltage":        string or null,
-  "phase":          string or null,
-  "hp":             string or null,
-  "serial_number":  string or null,
-  "description":    string,
-  "gpm":            string or null,
-  "psi":            string or null,
-  "frame":          string or null,
-  "shaft_size":     string or null,
-  "bore_diameter":  string or null,
-  "seal_face_size": string or null,
-  "connection_size":string or null,
-  "material_spec":  string or null
+  "category":                "Part" or "Equipment",
+  "detected_type":           string or null,
+  "manufacturer":            string or null,
+  "manufacturer_confidence": integer 0-100,
+  "manufacturer_candidates": list of strings,
+  "model":                   string or null,
+  "part_number":             string or null,
+  "voltage":                 string or null,
+  "phase":                   string or null,
+  "hp":                      string or null,
+  "serial_number":           string or null,
+  "description":             string,
+  "gpm":                     string or null,
+  "psi":                     string or null,
+  "frame":                   string or null,
+  "shaft_size":              string or null,
+  "bore_diameter":           string or null,
+  "seal_face_size":          string or null,
+  "connection_size":         string or null,
+  "material_spec":           string or null
 }
 
 Category: "Equipment" = full unit (pump, motor, compressor, blower, fan, conveyor).
           "Part"      = replacement component (seal, bearing, relay, VFD, contactor, belt).
+
+manufacturer_confidence (integer 0-100):
+  90-100: manufacturer name or logo is EXPLICITLY VISIBLE in the image — no guessing needed.
+  60-79:  CONFIDENTLY inferred from a well-known PN prefix or nameplate pattern.
+  30-59:  GUESSED from partial information — possible but uncertain.
+  0-29:   unknown, unreadable, or PN has no recognisable OEM pattern.
+manufacturer_candidates: up to 3 plausible names ranked by likelihood.
+  REQUIRED when manufacturer_confidence < 80. Empty list [] when confidence >= 80.
 
 Rules:
 - For Parts: set voltage, hp, rpm, gpm, psi, phase to null (those are parent-equipment specs).
@@ -853,6 +877,7 @@ Rules:
 
 
 def specs_from_image(image_bytes: bytes, filename: str, api_key: str):
+    """Returns (AssetSpecs, manufacturer_candidates: list[str])."""
     from utils.models import AssetSpecs
     media_type = _detect_media_type(image_bytes)
     print(f"[Vision] specs_from_image: sending {len(image_bytes)} bytes ({media_type}) to Claude")
@@ -864,6 +889,13 @@ def specs_from_image(image_bytes: bytes, filename: str, api_key: str):
         cat = d.get("category", "Part")
         if cat not in ("Part", "Equipment"):
             cat = "Part"
+        mfg_conf = d.get("manufacturer_confidence")
+        try:
+            mfg_conf = int(mfg_conf) if mfg_conf is not None else 100
+        except (TypeError, ValueError):
+            mfg_conf = 100
+        mfg_conf = max(0, min(100, mfg_conf))
+        candidates = [c for c in (d.get("manufacturer_candidates") or []) if isinstance(c, str)]
         return AssetSpecs(
             manufacturer=d.get("manufacturer") or "Unknown",
             model=d.get("model") or "Unknown",
@@ -885,9 +917,10 @@ def specs_from_image(image_bytes: bytes, filename: str, api_key: str):
             seal_face_size=d.get("seal_face_size") or None,
             connection_size=d.get("connection_size") or None,
             material_spec=d.get("material_spec") or None,
-        )
+            manufacturer_confidence=mfg_conf,
+        ), candidates
     from utils.vision import extract_specs
-    return extract_specs(filename)
+    return extract_specs(filename), []
 
 
 def specs_from_classification(classified: dict):
@@ -898,6 +931,12 @@ def specs_from_classification(classified: dict):
     cat = classified.get("category", "Part")
     if cat not in ("Part", "Equipment"):
         cat = "Part"
+    mfg_conf = classified.get("manufacturer_confidence")
+    try:
+        mfg_conf = int(mfg_conf) if mfg_conf is not None else 100
+    except (TypeError, ValueError):
+        mfg_conf = 100
+    mfg_conf = max(0, min(100, mfg_conf))
     if mfg or mdl or pn or classified.get("gpm") or classified.get("psi"):
         return AssetSpecs(
             manufacturer=mfg or "Unknown",
@@ -914,10 +953,69 @@ def specs_from_classification(classified: dict):
             phase=classified.get("phase"),
             detected_type=classified.get("detected_type"),
             rpm=classified.get("rpm"),
+            manufacturer_confidence=mfg_conf,
         )
     from utils.vision import extract_specs
     return extract_specs(str(classified))
 
+
+
+_RECLASSIFY_SYS = """You are an industrial parts classification assistant.
+Given a manufacturer name and part number, return ONLY valid JSON (no prose):
+{
+  "detected_type": "precise, brand-agnostic searchable description",
+  "category":      "Part" | "Equipment"
+}
+
+category: "Equipment" = full assembled unit (pump, motor, compressor, blower, fan, conveyor).
+          "Part"      = replacement component (seal, bearing, sensor, transmitter, relay,
+                        VFD, contactor, belt, controller, transducer, switch, valve).
+
+detected_type: a precise, searchable description that a distributor would recognise, e.g.:
+  "Hydrostatic Pressure Transmitter"
+  "Variable Frequency Drive"
+  "Mechanical Seal"
+  "3-Phase TEFC Induction Motor"
+  "Electromagnetic Flow Meter"
+  "Centrifugal Pump"
+
+Use the manufacturer's known product lines to inform the classification.
+Return ONLY valid JSON.
+"""
+
+
+def _reclassify_part_type(manufacturer: str, part_number: str,
+                           existing_desc: str, api_key: str) -> dict:
+    """Re-classify detected_type and category given a corrected manufacturer name.
+
+    Returns {"detected_type": str|None, "category": "Part"|"Equipment"}.
+    Falls back to {"detected_type": None, "category": "Part"} on any failure.
+    """
+    _fallback = {"detected_type": None, "category": "Part"}
+    if not api_key:
+        return _fallback
+    pn_line   = f"Part number: {part_number}" if part_number not in ("UNKNOWN-PN", None, "") else ""
+    desc_line = f"Existing description: {existing_desc}" if existing_desc else ""
+    user_msg  = "\n".join(filter(None, [
+        f"Manufacturer: {manufacturer}",
+        pn_line,
+        desc_line,
+    ]))
+    try:
+        raw = _claude(_RECLASSIFY_SYS, user_msg, api_key, max_tokens=120)
+        m   = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return _fallback
+        d    = json.loads(m.group(0))
+        cat  = d.get("category", "Part")
+        if cat not in ("Part", "Equipment"):
+            cat = "Part"
+        dtype = d.get("detected_type") or None
+        print(f"[Reclassify] {manufacturer} {part_number} → [{cat}] {dtype}")
+        return {"detected_type": dtype, "category": cat}
+    except Exception as exc:
+        print(f"[Reclassify] LLM call failed: {exc}")
+        return _fallback
 
 
 def _missing_critical_specs(specs) -> list[str]:
@@ -1837,12 +1935,13 @@ def render_tier3_outreach() -> None:
 
     from utils.sourcing import draft_rfq_email
 
-    # Sort: OEM Direct first (highest warranty value), then by suitability descending.
+    # Sort: OEM Direct first → OEM Authorized Distributor second → then by suitability desc.
     # Cap to top 5 after threshold filtering.
     rfq_options_sorted = sorted(
         rfq_options,
         key=lambda o: (
-            not getattr(o, "is_oem_direct", False),  # False=0 -> OEM first
+            not getattr(o, "is_oem_direct", False),                             # OEM Direct first
+            getattr(o, "match_type", "") != "OEM Authorized Distributor",       # OEM Auth second
             -getattr(o, "suitability_score", 0.0),
         ),
     )[:5]
@@ -1852,15 +1951,20 @@ def render_tier3_outreach() -> None:
         suit       = getattr(o, "suitability_score", 0.0)
         pstat      = getattr(o, "suitability_tier", "")
         _is_oem    = getattr(o, "is_oem_direct", False)
-        match_lbl  = _t3_match_label(suit)
+        _t3_mt_now = getattr(o, "match_type", "")
 
-        # Match label colour class
-        if suit >= 70:
-            suit_cls = "suit-hi"
-        elif suit >= 40:
-            suit_cls = "suit-mid"
+        # OEM Authorized Distributors always render at top quality regardless of suitability score
+        if _t3_mt_now == "OEM Authorized Distributor":
+            match_lbl = "OEM Authorized"
+            suit_cls  = "suit-hi"
         else:
-            suit_cls = "suit-lo"
+            match_lbl = _t3_match_label(suit)
+            if suit >= 70:
+                suit_cls = "suit-hi"
+            elif suit >= 40:
+                suit_cls = "suit-mid"
+            else:
+                suit_cls = "suit-lo"
 
         # OEM Direct badge -- always shown when is_oem_direct=True
         _oem_t3_badge = (
@@ -1883,10 +1987,14 @@ def render_tier3_outreach() -> None:
         else:
             badge_html = ""
 
-        _t3_mt = getattr(o, "match_type", "Exact OEM")
-        if _t3_mt == "Aftermarket Compatible":
+        if _t3_mt_now == "OEM Authorized Distributor":
+            alt_badge = (
+                '<span class="best-badge" style="border-color:#58a6ff;color:#58a6ff;'
+                'margin-left:.3rem;" title="Verified OEM channel partner">&#10003; OEM Authorized</span>'
+            )
+        elif _t3_mt_now == "Aftermarket Compatible":
             alt_badge = '<span class="best-badge" style="border-color:#a855f7;color:#a855f7;margin-left:.3rem;">&#9733; Aftermarket</span>'
-        elif _t3_mt == "Functional Alternative":
+        elif _t3_mt_now == "Functional Alternative":
             alt_badge = '<span class="best-badge" style="border-color:#fb923c;color:#fb923c;margin-left:.3rem;">&#8645; Alternative</span>'
         else:
             alt_badge = ""
@@ -1915,8 +2023,8 @@ def render_tier3_outreach() -> None:
         )
         st.markdown(card_html, unsafe_allow_html=True)
 
-        # Checkbox default: OEM Direct always checked; >=50% suitability checked; below 50% unchecked.
-        _default_checked = _is_oem or suit >= 50.0
+        # Checkbox default: OEM Direct + OEM Authorized always checked; >=50% suitability checked.
+        _default_checked = _is_oem or _t3_mt_now == "OEM Authorized Distributor" or suit >= 50.0
 
         # "Invite to Partner Network" button for high-suitability non-Gold vendors
         from utils.sourcing import _onboarding_url as _ourl
@@ -2171,14 +2279,36 @@ if st.session_state.pending_image:
     with st.status("Reading nameplate image…", expanded=True) as _img_status:
         st.write("Sending image to Claude Vision…")
         try:
-            specs = specs_from_image(img_data["bytes"], img_data["filename"], ant_key)
+            specs, _img_candidates = specs_from_image(img_data["bytes"], img_data["filename"], ant_key)
             st.write(f"Identified: **{specs.manufacturer} {specs.model}** — PN: `{specs.part_number}`")
             _img_status.update(label="Nameplate read successfully", state="complete", expanded=False)
-            st.session_state.pending_run = {
-                "specs": specs, "site": img_data["site"],
-                "search_mode": "equivalents",
-                "workflow": st.session_state.workflow_mode,
-            }
+            _img_mfg_conf = getattr(specs, "manufacturer_confidence", 100)
+            if _img_mfg_conf < 70:
+                # Manufacturer identification uncertain — ask user before proceeding
+                _img_pn = specs.part_number if specs.part_number not in ("UNKNOWN-PN", None, "") else "unknown"
+                _img_cands = _img_candidates[:3] if _img_candidates else []
+                _img_cand_str = (
+                    ", ".join(f"**{c}**" for c in _img_cands) if _img_cands else "none identified"
+                )
+                _img_confirm_msg = (
+                    f"I see a part number **{_img_pn}** but I'm not certain of the manufacturer "
+                    f"(confidence {_img_mfg_conf}%). "
+                    f"Can you confirm? Common possibilities include {_img_cand_str}, "
+                    f"or you can provide the manufacturer name freely."
+                )
+                st.session_state.pending_manufacturer_confirmation = {
+                    "specs": specs,
+                    "site":  img_data["site"],
+                    "candidates": _img_cands,
+                    "workflow": st.session_state.workflow_mode,
+                }
+                st.session_state.messages.append({"role": "assistant", "content": _img_confirm_msg})
+            else:
+                st.session_state.pending_run = {
+                    "specs": specs, "site": img_data["site"],
+                    "search_mode": "equivalents",
+                    "workflow": st.session_state.workflow_mode,
+                }
         except Exception as e:
             st.error(f"Image processing failed: {e}")
             _img_status.update(label="Image read failed", state="error", expanded=True)
@@ -2531,7 +2661,120 @@ elif active_tab == "🔍 Active Sourcing":
                     })
                 else:
                     try:
-                        if st.session_state.pending_verification_specs is not None:
+                        if st.session_state.pending_manufacturer_confirmation is not None:
+                            # ── Manufacturer confirmation response ──────────────────────────
+                            _pmc = st.session_state.pending_manufacturer_confirmation
+                            _pmc_specs: object = _pmc["specs"]
+                            _pmc_site: str     = _pmc.get("site") or site_sel
+                            _pmc_cands: list   = _pmc.get("candidates") or []
+                            _pmc_wf: str       = _pmc.get("workflow") or st.session_state.workflow_mode
+
+                            st.session_state.pending_manufacturer_confirmation = None
+
+                            if re.search(r"\bsearch anyway\b|\bproceed\b|\bskip\b", prompt, re.I):
+                                # User wants to proceed without confirming — use whatever was inferred
+                                _pmc_specs.manufacturer_confidence = 50  # mark as unconfirmed
+                                st.session_state.pending_run = {
+                                    "specs": _pmc_specs, "site": _pmc_site,
+                                    "search_mode": "equivalents", "workflow": _pmc_wf,
+                                }
+                            else:
+                                # Extract manufacturer from free-text response
+                                _confirmed_mfg = prompt.strip()
+                                # If user said one of the candidate names, use canonical form
+                                for _cand in _pmc_cands:
+                                    if _cand.lower() in prompt.lower():
+                                        _confirmed_mfg = _cand
+                                        break
+                                # Strip filler phrases so "It's Endress Hauser" → "Endress Hauser"
+                                _confirmed_mfg = re.sub(
+                                    r"^(?:it'?s?\s+|the\s+manufacturer\s+is\s+|it\s+is\s+|this\s+is\s+a?\s*)",
+                                    "", _confirmed_mfg, flags=re.I
+                                ).strip(" .,")
+                                if not _confirmed_mfg:
+                                    _confirmed_mfg = prompt.strip()
+
+                                old_mfg   = getattr(_pmc_specs, "manufacturer",    "Unknown")
+                                old_dtype = getattr(_pmc_specs, "detected_type",   None)
+                                old_cat   = getattr(_pmc_specs, "category",        "Part")
+
+                                _pmc_specs.manufacturer           = _confirmed_mfg
+                                _pmc_specs.manufacturer_confidence = 95
+
+                                # Re-classify detected_type and category using corrected manufacturer
+                                _reclass = _reclassify_part_type(
+                                    _confirmed_mfg,
+                                    getattr(_pmc_specs, "part_number", "") or "",
+                                    getattr(_pmc_specs, "description", "")  or "",
+                                    ant_key,
+                                )
+                                new_dtype = _reclass["detected_type"]
+                                new_cat   = _reclass["category"]
+
+                                # Apply corrected classification
+                                _pmc_specs.detected_type = new_dtype
+                                _pmc_specs.category      = new_cat
+
+                                # If category changed Equipment → Part, clear equipment-only specs
+                                if old_cat == "Equipment" and new_cat == "Part":
+                                    _pmc_specs.voltage = "N/A"
+                                    _pmc_specs.hp      = None
+                                    _pmc_specs.rpm     = None
+                                    _pmc_specs.gpm     = None
+                                    _pmc_specs.psi     = None
+                                    _pmc_specs.phase   = None
+                                    _pmc_specs.missing_critical_specs = False
+
+                                # Clear motor-specific missing-specs flag if no longer a motor
+                                if new_dtype and "motor" not in new_dtype.lower():
+                                    _pmc_specs.missing_critical_specs = False
+
+                                # Update description to reflect corrected identity
+                                if new_dtype:
+                                    _pmc_specs.description = (
+                                        f"{_confirmed_mfg} {getattr(_pmc_specs, 'part_number', '')} "
+                                        f"({new_dtype})"
+                                    ).strip()
+
+                                # Record correction trail for audit log
+                                if old_dtype != new_dtype or old_cat != new_cat or old_mfg != _confirmed_mfg:
+                                    _pmc_specs.classification_correction = {
+                                        "original_manufacturer":  old_mfg,
+                                        "original_detected_type": old_dtype,
+                                        "original_category":      old_cat,
+                                        "corrected_manufacturer":  _confirmed_mfg,
+                                        "corrected_detected_type": new_dtype,
+                                        "corrected_category":      new_cat,
+                                    }
+
+                                # Invalidate stale brand intel cached under the old (wrong) manufacturer
+                                if old_mfg.lower() not in ("unknown", "n/a", "null", "none", ""):
+                                    try:
+                                        from utils.brand_intelligence import invalidate as _bi_inv
+                                        from utils.sourcing.scoring import _detect_equip_type
+                                        _bi_inv(old_mfg, _detect_equip_type(_pmc_specs))
+                                    except Exception:
+                                        pass
+
+                                _dtype_note = (
+                                    f" — reclassified as **{new_dtype}**" if new_dtype else ""
+                                )
+                                st.session_state.messages.append({
+                                    "role": "assistant",
+                                    "content": (
+                                        f"Got it — proceeding with **{_confirmed_mfg}** as the manufacturer"
+                                        f"{_dtype_note}. Running sourcing now…"
+                                    ),
+                                })
+                                st.session_state.accepted_quote    = None
+                                st.session_state.rfq_campaign_sent = False
+                                st.session_state.seal_enhanced_done = False
+                                st.session_state.pending_run = {
+                                    "specs": _pmc_specs, "site": _pmc_site,
+                                    "search_mode": "equivalents", "workflow": _pmc_wf,
+                                }
+
+                        elif st.session_state.pending_verification_specs is not None:
                             pv_specs = st.session_state.pending_verification_specs
                             pv_site  = st.session_state.pending_verification_site or site_sel
                             if re.search(r"\bsearch anyway\b|\bproceed\b|\bskip\b", prompt, re.I):
@@ -2566,11 +2809,42 @@ elif active_tab == "🔍 Active Sourcing":
                                 st.session_state.rfq_campaign_sent = False
                                 st.session_state.seal_enhanced_done = False
                                 specs = specs_from_classification(classified)
-                                st.session_state.pending_run = {
-                                    "specs": specs, "site": req_site,
-                                    "workflow": st.session_state.workflow_mode,
-                                    "search_mode": "equivalents",
-                                }
+                                _txt_conf = getattr(specs, "manufacturer_confidence", 100)
+                                _txt_cands = [
+                                    c for c in (classified.get("manufacturer_candidates") or [])
+                                    if isinstance(c, str)
+                                ]
+                                if _txt_conf < 70:
+                                    # Manufacturer identity uncertain — gate and ask user
+                                    _txt_pn = specs.part_number if specs.part_number not in (
+                                        "UNKNOWN-PN", None, ""
+                                    ) else "unknown"
+                                    _txt_cand_str = (
+                                        ", ".join(f"**{c}**" for c in _txt_cands[:3])
+                                        if _txt_cands else "none identified"
+                                    )
+                                    _txt_confirm_msg = (
+                                        f"I see a part number **{_txt_pn}** but I'm not certain "
+                                        f"of the manufacturer (confidence {_txt_conf}%). "
+                                        f"Can you confirm? Common possibilities include "
+                                        f"{_txt_cand_str}, or you can provide the manufacturer "
+                                        f"name freely."
+                                    )
+                                    st.session_state.pending_manufacturer_confirmation = {
+                                        "specs":      specs,
+                                        "site":       req_site,
+                                        "candidates": _txt_cands[:3],
+                                        "workflow":   st.session_state.workflow_mode,
+                                    }
+                                    st.session_state.messages.append({
+                                        "role": "assistant", "content": _txt_confirm_msg,
+                                    })
+                                else:
+                                    st.session_state.pending_run = {
+                                        "specs": specs, "site": req_site,
+                                        "workflow": st.session_state.workflow_mode,
+                                        "search_mode": "equivalents",
+                                    }
                             else:
                                 reply = chat_respond(prompt, ant_key)
                                 st.session_state.messages.append({"role": "assistant", "content": reply})
