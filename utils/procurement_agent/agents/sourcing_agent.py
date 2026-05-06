@@ -248,14 +248,27 @@ class SourcingAgent:
         )
 
     def _patch_sourcing_keys(self) -> None:
-        """Inject API keys into the sourcing_archieved package namespace."""
+        """Inject API keys into both the shim and sourcing_archieved namespaces.
+
+        llm_parsing._anthropic_complete() reads from utils.sourcing (the shim).
+        enterprise_search and tavily_client read _tavily from utils.sourcing_archieved.
+        Both must be patched so call-time lazy reads find the correct values.
+        """
         try:
-            import utils.sourcing as _pkg
+            import utils.sourcing as _shim
+            import utils.sourcing_archieved as _arch
+
             if self._anthropic_key:
-                _pkg.ANTHROPIC_API_KEY = self._anthropic_key
-            if self._tavily_key and not _pkg._tavily:
+                _shim.ANTHROPIC_API_KEY = self._anthropic_key
+                _arch.ANTHROPIC_API_KEY = self._anthropic_key
+
+            if self._tavily_key:
                 from tavily import TavilyClient
-                _pkg._tavily      = TavilyClient(api_key=self._tavily_key)
-                _pkg.TAVILY_API_KEY = self._tavily_key
+                if not getattr(_shim, "_tavily", None):
+                    _shim._tavily = TavilyClient(api_key=self._tavily_key)
+                if not getattr(_arch, "_tavily", None):
+                    _arch._tavily = TavilyClient(api_key=self._tavily_key)
+                _shim.TAVILY_API_KEY = self._tavily_key
+                _arch.TAVILY_API_KEY = self._tavily_key
         except Exception as exc:
             print(f"[SourcingAgent] Key patch failed: {exc}")
