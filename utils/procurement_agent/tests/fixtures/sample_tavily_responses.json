@@ -1,0 +1,39 @@
+{
+  "tier2_bearing": {
+    "results": [
+      {
+        "url": "https://www.grainger.com/product/6205-2RS-bearing",
+        "title": "6205-2RS Deep Groove Ball Bearing SKF",
+        "content": "SKF 6205-2RS deep groove ball bearing. Part number 6205-2RS. In stock. Price: $14.99. Free shipping on orders over $150. Add to cart."
+      },
+      {
+        "url": "https://www.mcmaster.com/5972K36/",
+        "title": "Deep-Groove Ball Bearing 25mm Bore 6205-2RS",
+        "content": "Double-sealed deep-groove ball bearing, 25mm bore diameter, 52mm OD, 15mm width. In stock. Unit price $12.50 each. SKF 6205-2RS."
+      }
+    ]
+  },
+  "tier2_motor": {
+    "results": [
+      {
+        "url": "https://www.grainger.com/product/30HP-motor-460V",
+        "title": "30 HP Industrial Motor 460V TEFC",
+        "content": "US Motors 30HP TEFC motor, 460V 3-phase, 1800RPM, 326T frame. Part: EM7054T. In stock. Price: $2,145.00. LTL freight required."
+      }
+    ]
+  },
+  "tier3_national_specialists": {
+    "results": [
+      {
+        "url": "https://pumpman.com/grundfos-cr32",
+        "title": "Grundfos CR32 Pump Specialists",
+        "content": "Authorized Grundfos distributor. Grundfos CR32-5 vertical multistage pump. In stock for quick delivery. Contact us for pricing."
+      },
+      {
+        "url": "https://pumpproducts.com/cr-series",
+        "title": "CR Series Centrifugal Pumps",
+        "content": "Grundfos CR series pumps. We are an authorized Grundfos service center. Ships within 3-5 business days."
+      }
+    ]
+  }
+}

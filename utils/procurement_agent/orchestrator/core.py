@@ -27,7 +27,7 @@ from utils.audit_log import write_audit_log
 logger = logging.getLogger(__name__)
 
 # Build version written to every audit log entry produced by this orchestrator.
-_AGENT_VERSION = "2.0.0-phase1"
+_AGENT_VERSION = "2.0.0-phase2"
 
 # Mapping from current phase to the stub function that handles it.
 # Phase 2-4 replace these stubs with imports from the real agent classes.
@@ -149,15 +149,34 @@ class Orchestrator:
         )
 
     def _stub_sourcing(self, data: dict) -> None:
-        """Stub: Phase 2 replaces with SourcingAgent.run() — three-tier parallel search."""
+        """Phase 2: calls the real SourcingAgent — three-tier parallel search."""
+        import os
+        from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+
+        run   = self._dict_to_model(data)
+        agent = SourcingAgent(
+            tavily_api_key=os.environ.get("TAVILY_API_KEY"),
+            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        )
+        try:
+            result = agent.run(run)
+        except Exception as exc:
+            logger.error("[%s] SourcingAgent failed: %s", self.run_id, exc)
+            result = {
+                "tier_1": {"results": [], "count": 0, "status": "error"},
+                "tier_2": {"results": [], "count": 0, "status": "error"},
+                "tier_3": {"results": [], "count": 0, "status": "error"},
+                "warranty_banner": None,
+                "urgency_applied": "unknown",
+                "filters_applied": [],
+                "error": str(exc),
+            }
+
         self._advance(
             data,
             Phase.COMPARISON,
             output_key="sourcing_results_json",
-            output_value={
-                "tier1": [], "tier2": [], "tier3": [],
-                "stub": True, "message": "Sourcing agent not yet implemented (Phase 2).",
-            },
+            output_value=result,
         )
 
     def _stub_comparison(self, data: dict) -> None:

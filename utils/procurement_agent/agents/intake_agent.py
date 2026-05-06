@@ -3,62 +3,380 @@ Intake Agent — multimodal data extraction, sufficiency assessment, clarificati
 
 Brief reference: Section 3.1, Section 8.1.
 
-Phase 1: run() is a stub that returns a synthetic AssetSpecs dict and marks
-the run as ready to proceed. Phase 2 implements:
-  - Multimodal vision extraction (Claude Sonnet for image-heavy, Haiku for text-only)
-  - Per-field confidence scoring
-  - Sufficiency gate: manufacturer_confidence ≥ 70 AND part_id_confidence ≥ 70
-  - Dynamic single-question clarification loop
-  - "search anyway" force-proceed escape hatch
+Phase 2 implementation:
+  - Multimodal extraction: text (Claude Sonnet) or text + image (Claude Sonnet vision)
+  - Confidence scoring: manufacturer_confidence and part_id_confidence (0-100)
+  - Sufficiency gate: both confidences >= 70 AND category-required fields populated
+  - Dynamic single-question clarification via Claude Haiku when not sufficient
+  - Manufacturer correction cascade preserves classification_correction for audit log
+  - "force_proceed" escapes the sufficiency gate regardless of confidence
 """
 
-from typing import Optional
+import base64
+import json
+import re
+import requests
+from typing import Optional, Tuple
+
 from utils.models import ProcurementRun
 
+# Per-category fields that must be populated before sourcing can start.
+# Key: substring of detected_type (lowercased).
+CATEGORY_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "motor":                    ["detected_type", "hp", "voltage", "frame", "rpm"],
+    "vfd":                      ["detected_type", "voltage", "hp"],
+    "variable frequency drive": ["detected_type", "voltage", "hp"],
+    "mechanical seal":          ["detected_type", "shaft_size", "material_spec"],
+    "bearing":                  ["detected_type", "bore_diameter"],
+    "pressure sensor":          ["detected_type", "psi"],
+    "valve":                    ["detected_type", "connection_size"],
+}
+
+SUFFICIENCY_THRESHOLD = 70  # both manufacturer_confidence and part_id_confidence must reach this
+
+_NULL_VALUES = {None, "", "null", "N/A", "Unknown", "UNKNOWN-PN", "none", "unknown"}
+
+# ---------------------------------------------------------------------------
+# LLM prompts
+# ---------------------------------------------------------------------------
+
+_EXTRACTION_SYSTEM = """You are an industrial procurement data extractor.
+Given user input (text and/or images of equipment nameplates), extract structured specifications.
+
+Return ONLY valid JSON with exactly these keys — no additional keys, no markdown fences:
+{
+  "manufacturer": string or null,
+  "model": string or null,
+  "part_number": string or null,
+  "voltage": string or null,
+  "category": "Part" or "Equipment",
+  "hp": string or null,
+  "serial_number": string or null,
+  "description": string or null,
+  "gpm": string or null,
+  "psi": string or null,
+  "frame": string or null,
+  "phase": string or null,
+  "detected_type": string or null,
+  "rpm": string or null,
+  "shaft_size": string or null,
+  "bore_diameter": string or null,
+  "seal_face_size": string or null,
+  "connection_size": string or null,
+  "material_spec": string or null,
+  "use_case": string or null,
+  "manufacturer_confidence": integer 0-100,
+  "part_id_confidence": integer 0-100,
+  "confidence_reasoning": string
+}
+
+category rules:
+  "Equipment" — full assembled units: pump, motor, compressor, blower, conveyor
+  "Part"      — replacement components: VFD, bearing, seal, relay, sensor, valve, belt, coupling
+
+detected_type: specific equipment/part type e.g. "centrifugal pump", "induction motor", "mechanical seal"
+
+manufacturer_confidence scoring:
+  95+  manufacturer name is explicitly stated or clearly visible in image
+  75-94 inferred from recognizable part number prefix or well-known model number
+  50-74 guessed from partial information or context clues
+  0-29  unknown or unrecognizable — manufacturer not determinable
+
+part_id_confidence scoring:
+  90+  exact part number explicitly provided and unambiguous
+  70-89 part type clearly identified with key specs present
+  50-69 part type inferred but missing key specs
+  <50  part type uncertain — cannot reliably source without more info
+
+Rules:
+  - Extract ALL visible technical specs; be thorough
+  - Set fields to null if not determinable — never invent or estimate values
+  - description: one line summarizing what the item is, from the input
+  - If prior specs are provided, merge carefully: only update fields with new information"""
+
+_CLARIFICATION_SYSTEM = """You are an industrial procurement assistant.
+The user is trying to source a replacement part or piece of equipment.
+Given the partial specs and the specific missing field, generate exactly ONE focused question.
+The question must be specific and actionable — ask for precisely one piece of information.
+Return ONLY the question text. No preamble, no explanation, no numbered list."""
+
+# Default fallback questions when the LLM is unavailable.
+_DEFAULT_QUESTIONS: dict[str, str] = {
+    "manufacturer":    "Who is the manufacturer of this equipment? (Check the nameplate or documentation.)",
+    "part_type":       "What type of part or equipment is this? (e.g., motor, pump, bearing, mechanical seal)",
+    "hp":              "What is the horsepower (HP) rating shown on the nameplate?",
+    "voltage":         "What is the operating voltage? (e.g., 460V, 230V, 208V)",
+    "frame":           "What is the NEMA frame size? (usually a 3-4 digit code like 213T, 256T, 447T — found on the nameplate)",
+    "rpm":             "What is the RPM (speed) rating shown on the nameplate? (typically 1200, 1800, or 3600)",
+    "shaft_size":      "What is the shaft diameter? (e.g., 1.5 inch, 42mm — critical for seal sizing)",
+    "bore_diameter":   "What is the bore diameter of this bearing? (the inner diameter in mm or inches)",
+    "material_spec":   "What are the seal face materials? (e.g., Carbon/Silicon Carbide, Viton elastomers)",
+    "psi":             "What is the operating pressure rating in PSI?",
+    "connection_size": "What is the connection size or pipe diameter? (e.g., 2 inch NPT, DN50)",
+    "detected_type":   "What type of equipment or part is this exactly? (e.g., centrifugal pump, induction motor, mechanical seal)",
+}
+
+
+# ---------------------------------------------------------------------------
+# IntakeAgent
+# ---------------------------------------------------------------------------
 
 class IntakeAgent:
-    """Extracts structured AssetSpecs from user input and assesses sufficiency."""
+    """Extracts structured AssetSpecs from user input and assesses sufficiency.
 
-    # Phase 2 will inject these at construction time from app config.
+    Supports multi-turn clarification: on each call, prior specs from
+    run.asset_specs_json are merged with newly extracted fields (new values win).
+    """
+
     def __init__(self, anthropic_api_key: Optional[str] = None):
         self._api_key = anthropic_api_key
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def run(self, run: ProcurementRun, user_input: dict) -> dict:
         """Extract AssetSpecs from user_input and assess sufficiency.
 
-        Phase 1 stub — returns a synthetic populated spec dict so the orchestrator
-        can advance to INVENTORY without real extraction logic.
-
         Args:
-            run: the current ProcurementRun (provides prior context on follow-up turns)
+            run: current ProcurementRun (provides prior context on follow-up turns)
             user_input: dict with keys:
                 - "text": str — the user's chat message
                 - "images": list[bytes] — uploaded image data (optional)
                 - "force_proceed": bool — bypass sufficiency gate if True
 
         Returns:
-            dict with keys:
-                - "asset_specs": dict — populated AssetSpecs fields
+            dict with:
+                - "asset_specs": dict — merged AssetSpecs fields
                 - "manufacturer_confidence": float 0-100
                 - "part_id_confidence": float 0-100
-                - "sufficient": bool — True = proceed, False = ask follow-up
-                - "follow_up_question": str | None — single focused question when not sufficient
-                - "stub": bool — True in Phase 1
+                - "sufficient": bool
+                - "follow_up_question": str | None
+                - "confidence_summary": dict
         """
+        text         = user_input.get("text", "") or ""
+        images       = user_input.get("images") or []
+        force_proceed = bool(user_input.get("force_proceed", False))
+        prior_specs  = run.asset_specs_json or {}
+
+        # Extract from this turn's input
+        if images:
+            extracted = self._extract_multimodal(text, images, prior_specs)
+        else:
+            extracted = self._extract_text(text, prior_specs)
+
+        # Merge with prior specs — new non-null values win
+        merged = dict(prior_specs)
+        for k, v in extracted.items():
+            if v not in _NULL_VALUES:
+                merged[k] = v
+
+        mfg_conf  = float(extracted.get("manufacturer_confidence") or 0)
+        part_conf = float(extracted.get("part_id_confidence") or 0)
+
+        if force_proceed:
+            return {
+                "asset_specs":             merged,
+                "manufacturer_confidence": mfg_conf,
+                "part_id_confidence":      part_conf,
+                "sufficient":              True,
+                "follow_up_question":      None,
+                "confidence_summary": {
+                    "manufacturer_confidence": mfg_conf,
+                    "part_id_confidence":      part_conf,
+                    "forced":                  True,
+                    "reasoning":               extracted.get("confidence_reasoning"),
+                },
+            }
+
+        sufficient, missing_field = self._assess_sufficiency(merged, mfg_conf, part_conf)
+
+        follow_up = None
+        if not sufficient:
+            follow_up = self._generate_clarification(merged, missing_field or "detected_type")
+
         return {
-            "asset_specs": {
-                "manufacturer":          user_input.get("text", "Unknown Manufacturer"),
-                "model":                 "STUB-MODEL-001",
-                "part_number":           "PN-STUB-001",
-                "voltage":               "460V",
-                "category":              "Part",
-                "detected_type":         "Motor",
-                "manufacturer_confidence": 95.0,
-                "part_id_confidence":    90.0,
+            "asset_specs":             merged,
+            "manufacturer_confidence": mfg_conf,
+            "part_id_confidence":      part_conf,
+            "sufficient":              sufficient,
+            "follow_up_question":      follow_up,
+            "confidence_summary": {
+                "manufacturer_confidence": mfg_conf,
+                "part_id_confidence":      part_conf,
+                "missing_field":           missing_field,
+                "reasoning":               extracted.get("confidence_reasoning"),
             },
-            "manufacturer_confidence": 95.0,
-            "part_id_confidence":      90.0,
-            "sufficient":              True,
-            "follow_up_question":      None,
-            "stub":                    True,
         }
+
+    # ------------------------------------------------------------------
+    # Extraction helpers
+    # ------------------------------------------------------------------
+
+    def _extract_text(self, text: str, prior_specs: dict) -> dict:
+        if not self._api_key:
+            return self._fallback_extract(prior_specs)
+
+        context = ""
+        if prior_specs:
+            summary = {k: v for k, v in prior_specs.items()
+                       if k not in ("manufacturer_confidence", "part_id_confidence",
+                                    "confidence_reasoning") and v not in _NULL_VALUES}
+            context = f"Previously extracted specs:\n{json.dumps(summary)}\n\nUser follow-up: "
+
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key":           self._api_key,
+                    "anthropic-version":   "2023-06-01",
+                    "content-type":        "application/json",
+                },
+                json={
+                    "model":      "claude-sonnet-4-6",
+                    "max_tokens": 1024,
+                    "system":     _EXTRACTION_SYSTEM,
+                    "messages":   [{"role": "user", "content": f"{context}{text}"}],
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return self._parse_llm_json(resp.json()["content"][0]["text"])
+        except Exception as exc:
+            print(f"[IntakeAgent] Text extraction failed: {exc}")
+            return self._fallback_extract(prior_specs)
+
+    def _extract_multimodal(self, text: str, images: list, prior_specs: dict) -> dict:
+        if not self._api_key:
+            return self._fallback_extract(prior_specs)
+
+        content: list = []
+
+        for img_bytes in images[:4]:
+            b64 = base64.b64encode(img_bytes).decode("utf-8")
+            content.append({
+                "type":   "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+            })
+
+        context = ""
+        if prior_specs:
+            summary = {k: v for k, v in prior_specs.items()
+                       if k not in ("manufacturer_confidence", "part_id_confidence",
+                                    "confidence_reasoning") and v not in _NULL_VALUES}
+            context = f"Previously extracted specs:\n{json.dumps(summary)}\n\n"
+
+        content.append({
+            "type": "text",
+            "text": (
+                f"{context}Extract all equipment/part specifications visible in the "
+                f"image(s) and from the text below.\n\n{text or '(no additional text)'}"
+            ),
+        })
+
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key":           self._api_key,
+                    "anthropic-version":   "2023-06-01",
+                    "content-type":        "application/json",
+                },
+                json={
+                    "model":      "claude-sonnet-4-6",
+                    "max_tokens": 1024,
+                    "system":     _EXTRACTION_SYSTEM,
+                    "messages":   [{"role": "user", "content": content}],
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return self._parse_llm_json(resp.json()["content"][0]["text"])
+        except Exception as exc:
+            print(f"[IntakeAgent] Multimodal extraction failed: {exc}")
+            return self._fallback_extract(prior_specs)
+
+    def _fallback_extract(self, prior_specs: dict) -> dict:
+        return {
+            **(prior_specs or {}),
+            "manufacturer_confidence": 0,
+            "part_id_confidence":      0,
+            "confidence_reasoning":    "No API key — extraction skipped",
+        }
+
+    @staticmethod
+    def _parse_llm_json(raw: str) -> dict:
+        raw = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+        raw = re.sub(r"\s*```$", "", raw)
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"manufacturer_confidence": 0, "part_id_confidence": 0,
+                    "confidence_reasoning": "JSON parse failed"}
+
+    # ------------------------------------------------------------------
+    # Sufficiency assessment
+    # ------------------------------------------------------------------
+
+    def _assess_sufficiency(self, specs: dict, mfg_conf: float, part_conf: float) -> Tuple[bool, Optional[str]]:
+        """Return (sufficient, first_missing_field_name)."""
+        if mfg_conf < SUFFICIENCY_THRESHOLD:
+            return False, "manufacturer"
+        if part_conf < SUFFICIENCY_THRESHOLD:
+            return False, "part_type"
+
+        detected = (specs.get("detected_type") or "").lower()
+        required_fields: list[str] = []
+        for key, fields in CATEGORY_REQUIRED_FIELDS.items():
+            if key in detected:
+                required_fields = fields
+                break
+
+        for field_name in required_fields:
+            if specs.get(field_name) in _NULL_VALUES:
+                return False, field_name
+
+        return True, None
+
+    # ------------------------------------------------------------------
+    # Clarification generation
+    # ------------------------------------------------------------------
+
+    def _generate_clarification(self, specs: dict, missing_field: str) -> str:
+        if not self._api_key:
+            return _DEFAULT_QUESTIONS.get(missing_field,
+                                          f"Can you provide the {missing_field.replace('_', ' ')}?")
+
+        specs_summary = {k: v for k, v in specs.items()
+                         if v not in _NULL_VALUES
+                         and k not in ("manufacturer_confidence", "part_id_confidence",
+                                       "confidence_reasoning")}
+        user_msg = (
+            f"Current specs: {json.dumps(specs_summary)}\n"
+            f"Missing field: {missing_field}\n"
+            f"Equipment type: {specs.get('detected_type', 'unknown')}\n\n"
+            f"Ask one focused question to obtain the {missing_field.replace('_', ' ')} value."
+        )
+
+        try:
+            resp = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key":           self._api_key,
+                    "anthropic-version":   "2023-06-01",
+                    "content-type":        "application/json",
+                },
+                json={
+                    "model":      "claude-haiku-4-5-20251001",
+                    "max_tokens": 150,
+                    "system":     _CLARIFICATION_SYSTEM,
+                    "messages":   [{"role": "user", "content": user_msg}],
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()["content"][0]["text"].strip()
+        except Exception as exc:
+            print(f"[IntakeAgent] Clarification generation failed: {exc}")
+            return _DEFAULT_QUESTIONS.get(missing_field,
+                                          f"Can you provide the {missing_field.replace('_', ' ')}?")

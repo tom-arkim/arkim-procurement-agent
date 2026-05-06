@@ -111,8 +111,12 @@ def test_execute_phase_populates_sourcing_results(db_url):
     orch.execute_current_phase()  # SOURCING → COMPARISON
     state = orch.get_state()
     assert state["sourcing_results_json"] is not None
-    assert "tier1" in state["sourcing_results_json"]
-    assert state["sourcing_results_json"]["stub"] is True
+    sr = state["sourcing_results_json"]
+    # Phase 2: SourcingAgent output uses tier_1/tier_2/tier_3 keys
+    assert "tier_1" in sr
+    assert "tier_2" in sr
+    assert "tier_3" in sr
+    assert "urgency_applied" in sr
 
 
 # ---------------------------------------------------------------------------
