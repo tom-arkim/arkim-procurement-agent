@@ -13,7 +13,7 @@ it belongs in an agent class instead.
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -234,13 +234,13 @@ class Orchestrator:
     def _dict_to_model(data: dict) -> ProcurementRun:
         def _dt(v):
             if v is None:
-                return datetime.utcnow()
+                return datetime.now(timezone.utc)
             if isinstance(v, datetime):
                 return v
             try:
                 return datetime.fromisoformat(v)
             except Exception:
-                return datetime.utcnow()
+                return datetime.now(timezone.utc)
 
         return ProcurementRun(
             id=data["id"],

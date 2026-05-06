@@ -12,7 +12,7 @@ Design notes:
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
@@ -66,7 +66,7 @@ class ProcurementRunORM(Base):
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     facility_id = Column(String(36), nullable=False, index=True)
     initiated_by_user_id = Column(String(36), nullable=True)
-    initiated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    initiated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     current_phase = Column(String(40), nullable=False, default=Phase.INTAKE.value, index=True)
     urgency_factor = Column(Float, nullable=False, default=0.3)
@@ -86,8 +86,8 @@ class ProcurementRunORM(Base):
     audit_log_run_id = Column(String(36), nullable=True)
     agent_version = Column(String(40), nullable=False, default="2.0.0-phase1")
 
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     approval_history = relationship(
         "ApprovalHistoryORM",
@@ -110,7 +110,7 @@ class ApprovalHistoryORM(Base):
     approver_role = Column(String(80), nullable=True)
     action = Column(String(20), nullable=False)   # "approved" | "rejected" | "requested_changes"
     notes = Column(Text, nullable=True)
-    acted_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    acted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     run = relationship("ProcurementRunORM", back_populates="approval_history")
 
@@ -185,15 +185,15 @@ def create_run(
             id=str(uuid.uuid4()),
             facility_id=facility_id,
             initiated_by_user_id=initiated_by_user_id,
-            initiated_at=datetime.utcnow(),
+            initiated_at=datetime.now(timezone.utc),
             current_phase=Phase.INTAKE.value,
             urgency_factor=urgency_factor,
             warranty_status=warranty_status,
             asset_specs_json=_j(asset_specs),
             approval_history_json="[]",
             agent_version=agent_version,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
         session.add(row)
         session.commit()
@@ -232,7 +232,7 @@ def update_run(run_id: str, updates: dict, db_url: Optional[str] = None) -> Opti
             else:
                 setattr(row, key, value)
 
-        row.updated_at = datetime.utcnow()
+        row.updated_at = datetime.now(timezone.utc)
         session.commit()
         return _orm_to_dict(row)
     finally:
@@ -277,7 +277,7 @@ def append_approval(
             approver_role=approver_role,
             action=action,
             notes=notes,
-            acted_at=datetime.utcnow(),
+            acted_at=datetime.now(timezone.utc),
         )
         session.add(entry)
 
@@ -288,10 +288,10 @@ def append_approval(
             "approver_role": approver_role,
             "action": action,
             "notes": notes,
-            "acted_at": datetime.utcnow().isoformat(),
+            "acted_at": datetime.now(timezone.utc).isoformat(),
         })
         row.approval_history_json = _j(history)
-        row.updated_at = datetime.utcnow()
+        row.updated_at = datetime.now(timezone.utc)
         session.commit()
         return True
     finally:

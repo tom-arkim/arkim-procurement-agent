@@ -35,6 +35,10 @@ _FORWARD: dict[Phase, Set[Phase]] = {
     Phase.INVENTORY:                {Phase.SOURCING},
     Phase.SOURCING:                 {Phase.COMPARISON},
     Phase.COMPARISON:               {Phase.PENDING_FIRST_APPROVAL},
+    # Single-approver path:  pending_first_approval → approved
+    # Dual-approver path:    pending_first_approval → pending_second_approval → approved
+    # The Approval Rules Engine (Phase 3) chooses the path based on the dollar
+    # threshold in the facility's approval config. Both paths are legal here.
     Phase.PENDING_FIRST_APPROVAL:   {Phase.PENDING_SECOND_APPROVAL, Phase.APPROVED},
     Phase.PENDING_SECOND_APPROVAL:  {Phase.APPROVED},
     Phase.APPROVED:                 {Phase.EXECUTING},
