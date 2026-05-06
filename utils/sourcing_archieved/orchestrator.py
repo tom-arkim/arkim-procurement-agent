@@ -18,19 +18,19 @@ The UI skips options whose rejection_reason is set.
 from typing import Optional
 
 from utils.models import AssetSpecs, SourcingOption
-from utils.sourcing.enterprise_search import (
+from utils.sourcing_archieved.enterprise_search import (
     _call_enterprise_api,
     _discover_national_specialists,
     _discover_aftermarket_specialists,
 )
-from utils.sourcing.filtering import (
+from utils.sourcing_archieved.filtering import (
     _apply_warranty_filter,
     _apply_registry_enrichment,
     _apply_confidence_floor,
     _apply_category_mismatch_guard,
 )
-from utils.sourcing.price_sanity import _apply_extreme_price_filter
-from utils.sourcing.constants import TIER_SURFACE_MIN_CONFIDENCE
+from utils.sourcing_archieved.price_sanity import _apply_extreme_price_filter
+from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_CONFIDENCE
 
 
 def find_vendors(specs: AssetSpecs,

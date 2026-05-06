@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from utils.vision    import extract_specs
 from utils.inventory import check_internal
-from utils.sourcing  import find_vendors
+from utils.sourcing_archieved  import find_vendors
 from utils.quoting   import generate_arkim_quote
 from utils.models    import SourcingOption, ArkimQuote, ProcurementReport
 

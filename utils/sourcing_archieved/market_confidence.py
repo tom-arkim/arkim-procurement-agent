@@ -7,7 +7,7 @@ import json
 import re
 from typing import Optional
 
-from utils.sourcing.llm_parsing import _anthropic_complete
+from utils.sourcing_archieved.llm_parsing import _anthropic_complete
 
 
 _RELIABILITY_SYSTEM = """You are an industrial reliability analyst.
@@ -36,7 +36,7 @@ def _fetch_market_confidence(specs) -> Optional[float]:
     """Search the web for reliability/MTBF data on this specific brand+model.
     Returns a 1-10 Market Confidence Score, or None if unavailable.
     """
-    import utils.sourcing as _pkg
+    import utils.sourcing_archieved as _pkg
 
     if not _pkg._tavily or not _pkg.ANTHROPIC_API_KEY:
         return None

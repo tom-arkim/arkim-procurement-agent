@@ -539,7 +539,7 @@ def _claude_vision(image_bytes: bytes, media_type: str,
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _patch_sourcing_keys(tavily_key: str, anthropic_key: str) -> None:
-    import utils.sourcing as sm
+    import utils.sourcing_archieved as sm
     try:
         from tavily import TavilyClient as _TC
     except ImportError:
@@ -559,7 +559,7 @@ def _execute_pipeline(specs, site: str,
                       downtime_cost_per_day: float = 500.0,
                       urgency_factor: float = 0.3) -> None:
     from utils.inventory   import check_internal
-    from utils.sourcing    import find_vendors
+    from utils.sourcing_archieved    import find_vendors
     from utils.quoting     import generate_arkim_quote
     from utils.audit_log   import write_audit_log
     from utils.llm_tracker import start_run as _llm_start, finish_run as _llm_finish
@@ -1024,7 +1024,7 @@ def _missing_critical_specs(specs) -> list[str]:
     Category-aware: Parts only need Manufacturer + PN to run a search.
     Equipment needs Voltage, Phase, and at least one performance spec.
     """
-    from utils.sourcing import HIGH_RISK_ELECTRICAL_CATEGORIES
+    from utils.sourcing_archieved import HIGH_RISK_ELECTRICAL_CATEGORIES
     _null = {"N/A", "Unknown", "null", "None", "UNKNOWN-PN", None, ""}
     missing = []
 
@@ -1933,7 +1933,7 @@ def render_tier3_outreach() -> None:
         unsafe_allow_html=True,
     )
 
-    from utils.sourcing import draft_rfq_email
+    from utils.sourcing_archieved import draft_rfq_email
 
     # Sort: OEM Direct first → OEM Authorized Distributor second → then by suitability desc.
     # Cap to top 5 after threshold filtering.
@@ -2027,7 +2027,7 @@ def render_tier3_outreach() -> None:
         _default_checked = _is_oem or _t3_mt_now == "OEM Authorized Distributor" or suit >= 50.0
 
         # "Invite to Partner Network" button for high-suitability non-Gold vendors
-        from utils.sourcing import _onboarding_url as _ourl
+        from utils.sourcing_archieved import _onboarding_url as _ourl
         if suit >= 75 and pstat != "Gold":
             _invite_url = _ourl(o.vendor_name, specs) if specs else "#"
             _inv_col1, _inv_col2 = st.columns([3, 1])
@@ -2751,7 +2751,7 @@ elif active_tab == "🔍 Active Sourcing":
                                 if old_mfg.lower() not in ("unknown", "n/a", "null", "none", ""):
                                     try:
                                         from utils.brand_intelligence import invalidate as _bi_inv
-                                        from utils.sourcing.scoring import _detect_equip_type
+                                        from utils.sourcing_archieved.scoring import _detect_equip_type
                                         _bi_inv(old_mfg, _detect_equip_type(_pmc_specs))
                                     except Exception:
                                         pass

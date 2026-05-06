@@ -2,9 +2,10 @@
 Arkim Procure Agent — Data Models (stdlib dataclasses, no third-party deps)
 """
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 from datetime import datetime
+import uuid
 
 
 @dataclass
@@ -56,6 +57,11 @@ class AssetSpecs:
     # <30: unknown / unrecognizable.
     # Default 100 keeps backward-compatible behaviour for programmatically-built specs.
     manufacturer_confidence: int = 100
+    # Part identification confidence: 0-100.
+    # 90+: part number explicitly provided and confirmed.
+    # 60-79: part type inferred from description/image.
+    # <60: part type uncertain — agent should ask clarifying question.
+    part_id_confidence: Optional[float] = None
     # Set only when detected_type/category were corrected post manufacturer-confirmation.
     # Shape: {"original_manufacturer": str, "original_detected_type": str,
     #         "original_category": str, "corrected_manufacturer": str,
@@ -151,3 +157,44 @@ class ProcurementReport:
     recommended_quote: ArkimQuote
     internal_location: Optional[str] = None
     rfq_email_draft: Optional[str] = None
+
+
+@dataclass
+class ProcurementRun:
+    """In-memory representation of a durable procurement workflow.
+
+    The SQLAlchemy persistence model lives in
+    utils/procurement_agent/state/persistence.py and mirrors this schema.
+    This dataclass is what the orchestrator and agents pass around at runtime.
+    """
+    # Identity
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    facility_id: str = "00000000-0000-0000-0000-000000000000"  # placeholder for prototype
+    initiated_by_user_id: Optional[str] = None
+
+    # Workflow state
+    current_phase: str = "intake"
+    urgency_factor: float = 0.3
+    warranty_status: str = "unknown"
+
+    # Phase outputs (populated as the run progresses)
+    asset_specs_json: Optional[dict] = None
+    inventory_result_json: Optional[dict] = None
+    sourcing_results_json: Optional[dict] = None
+    selected_candidate_json: Optional[dict] = None
+    approval_history_json: List[dict] = field(default_factory=list)
+
+    # Execution outputs
+    vendor_order_id: Optional[str] = None
+    fulfillment_status: Optional[str] = None
+    inventory_update_json: Optional[dict] = None
+    work_order_link: Optional[str] = None
+
+    # Audit linkage
+    audit_log_run_id: Optional[str] = None
+    agent_version: str = "2.0.0-phase1"
+
+    # Timestamps
+    initiated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)

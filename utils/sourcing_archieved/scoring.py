@@ -9,7 +9,7 @@ The brand_intelligence module provides dynamic manufacturer context.
 import re
 from typing import Optional
 
-from utils.sourcing.constants import (
+from utils.sourcing_archieved.constants import (
     _COLLECTION_URL_PATTERNS,
     _LOW_VALUE_SUBDOMAINS,
     _HIGH_COUNTERFEIT_RISK_CATEGORIES,

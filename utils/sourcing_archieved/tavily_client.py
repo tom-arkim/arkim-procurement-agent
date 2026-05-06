@@ -8,15 +8,15 @@ time so that _patch_sourcing_keys() in chat_app.py takes effect.
 
 import re
 
-from utils.sourcing.constants import (
+from utils.sourcing_archieved.constants import (
     _VENDOR_DOMAINS,
     _BLACKLISTED_DOMAINS,
     _AUTHORITY_VIABLE_THRESHOLD,
     _DYNAMIC_FALLBACK_MIN_VIABLE,
 )
-from utils.sourcing.scoring import _is_collection_url
+from utils.sourcing_archieved.scoring import _is_collection_url
 from utils.brand_intelligence import get_competitors, get_subcategory_refinement, get_brand_relationships
-from utils.sourcing.scoring import _detect_equip_type
+from utils.sourcing_archieved.scoring import _detect_equip_type
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +215,7 @@ def _search_vendor_prices(specs, search_mode: str = "exact") -> list[dict]:
     _DYNAMIC_FALLBACK_MIN_VIABLE authoritative results are found, ensuring
     existing vetted vendors always surface even for obscure part queries.
     """
-    import utils.sourcing as _pkg
+    import utils.sourcing_archieved as _pkg
 
     query = _build_search_query(specs, search_mode=search_mode)
     print(f"[Sourcing] Tavily query ({search_mode}): {query!r}")
