@@ -133,6 +133,55 @@ def _counterfeit_suitability_penalty(url: str,
 
 
 # ---------------------------------------------------------------------------
+# PN match classification (5-tier)
+# ---------------------------------------------------------------------------
+
+PN_MATCH_POINTS: dict[str, int] = {
+    "exact":      40,
+    "normalized": 40,  # delimiter difference only — same PN
+    "stem":       25,  # same model family
+    "substring":  15,  # weaker snippet evidence
+    "none":        0,
+}
+
+
+def _classify_pn_match(searched_pn: str, found_pn: Optional[str],
+                       snippet: str, manufacturer: Optional[str]) -> str:
+    """Return the match tier for a vendor's found_pn against the searched PN.
+
+    Tiers: "exact" | "normalized" | "stem" | "substring" | "none"
+    "none" with a non-null found_pn is the only case that warrants a mismatch penalty.
+    """
+    from utils.procurement_agent.agents.sourcing_agent import (
+        normalize_part_number, stem_part_number,
+    )
+    if not searched_pn:
+        return "none"
+
+    searched_upper = searched_pn.upper().strip()
+    found_upper    = (found_pn or "").upper().strip()
+
+    if found_upper and found_upper == searched_upper:
+        return "exact"
+
+    searched_norm = normalize_part_number(searched_pn)
+    found_norm    = normalize_part_number(found_pn) if found_pn else ""
+    if found_norm and searched_norm == found_norm:
+        return "normalized"
+
+    searched_stem = stem_part_number(searched_pn, manufacturer)
+    found_stem    = stem_part_number(found_pn, manufacturer) if found_pn else None
+    if searched_stem and found_stem and searched_stem == found_stem:
+        return "stem"
+
+    snippet_norm = normalize_part_number(snippet) if snippet else ""
+    if searched_norm and snippet_norm and searched_norm in snippet_norm:
+        return "substring"
+
+    return "none"
+
+
+# ---------------------------------------------------------------------------
 # Main suitability score
 # ---------------------------------------------------------------------------
 
@@ -176,20 +225,12 @@ def _compute_suitability_score(specs, snippet: str, url: str,
             return 0.0
 
     # PN match (primary key)
-    searched_pn = (specs.part_number or "").upper().strip()
-    found_upper = (found_pn or "").upper().strip()
-    pn_exact   = bool(found_upper and found_upper == searched_pn)
-    pn_in_snip = bool(searched_pn and searched_pn.lower() in s)
-    pn_alt     = bool(found_pn and not pn_exact)
-
-    if pn_exact:
-        pn_pts = 40
-    elif pn_in_snip:
-        pn_pts = 25
-    elif pn_alt:
-        pn_pts = 10
-    else:
-        pn_pts = 0
+    searched_pn    = (specs.part_number or "").upper().strip()
+    pn_match_level = _classify_pn_match(
+        searched_pn, found_pn, snippet,
+        getattr(specs, "manufacturer", None),
+    )
+    pn_pts = PN_MATCH_POINTS[pn_match_level]
 
     # Equipment type match
     detected = (getattr(specs, "detected_type", "") or "").lower()
@@ -237,7 +278,7 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     is_coll = _is_collection_url(url)
     url_pts = 0 if is_coll else 10
 
-    pn_mismatch_penalty = 30 if pn_alt else 0
+    pn_mismatch_penalty = 30 if (pn_match_level == "none" and found_pn) else 0
 
     home_bonus = _home_field_bonus(specs, url, snippet)
 

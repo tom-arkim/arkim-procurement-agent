@@ -39,13 +39,16 @@ _NULL_VALUES = {None, "", "null", "N/A", "Unknown", "UNKNOWN-PN", "none", "unkno
 # Each rule: (required_fields_set, new_detected_type, new_category, priority)
 # Higher priority wins when multiple rules match.
 UNIT_CLASSIFICATION_RULES: list[tuple] = [
-    # Strong motor signals: NEMA frame or RPM are rarely found on non-motor nameplates.
-    (frozenset({"hp", "frame"}),    "induction motor",  "Equipment", 10),
-    (frozenset({"hp", "rpm"}),      "induction motor",  "Equipment",  9),
+    # Three motor signals → most specific label wins.
+    (frozenset({"hp", "rpm", "frame"}), "3-Phase Electric Motor", "Equipment", 11),
+    # Two motor signals — NEMA frame or RPM alone with HP is sufficient.
+    (frozenset({"hp", "frame"}),        "Electric Motor",         "Equipment", 10),
+    (frozenset({"hp", "rpm"}),          "Electric Motor",         "Equipment",  9),
     # hp+voltage alone is too ambiguous (pumps, compressors also carry both) — omitted.
-    (frozenset({"gpm", "psi"}),     "centrifugal pump", "Equipment",  8),
-    (frozenset({"bore_diameter"}),  "bearing",          "Part",       6),
-    (frozenset({"shaft_size"}),     "mechanical seal",  "Part",       6),
+    (frozenset({"gpm", "psi"}),         "Centrifugal Pump",       "Equipment",  8),
+    (frozenset({"gpm", "head"}),        "Centrifugal Pump",       "Equipment",  7),
+    (frozenset({"bore_diameter"}),      "Bearing",                "Part",       6),
+    (frozenset({"shaft_size"}),         "Mechanical Seal",        "Part",       6),
 ]
 
 
@@ -72,7 +75,7 @@ def classify_by_units(specs: dict) -> tuple:
 
     current_type = (specs.get("detected_type") or "").lower()
     # Skip if the key equipment word (last word of best_type) is already in the current type.
-    best_base = best_type.split()[-1]
+    best_base = best_type.split()[-1].lower()
     if best_base in current_type:
         return None, None, False
 

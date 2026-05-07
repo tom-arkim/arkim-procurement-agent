@@ -470,6 +470,61 @@ class TestUnitsClassification:
 
         assert "motor" in result["asset_specs"].get("detected_type", "").lower()
 
+    # Fix 3 — loosened motor classification (hp+frame sufficient; 3-field → more specific)
+
+    def test_motor_hp_frame_no_rpm_classifies_as_electric_motor(self):
+        """hp + frame alone (no RPM) → 'Electric Motor'."""
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": "industrial equipment",
+            "hp":            "150",
+            "frame":         "447T",
+            "rpm":           None,
+        }
+        new_type, new_cat, override = classify_by_units(specs)
+        assert override is True
+        assert new_type == "Electric Motor"
+        assert new_cat == "Equipment"
+
+    def test_motor_hp_rpm_frame_classifies_as_three_phase(self):
+        """hp + rpm + frame → '3-Phase Electric Motor' (more specific than 2-field rule)."""
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": "industrial equipment",
+            "hp":            "150",
+            "rpm":           "1185",
+            "frame":         "447T",
+        }
+        new_type, new_cat, override = classify_by_units(specs)
+        assert override is True
+        assert new_type == "3-Phase Electric Motor"
+
+    def test_three_phase_rule_beats_two_field_rule(self):
+        """When all three motor signals present, 3-Phase label wins over Electric Motor."""
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": "unknown device",
+            "hp":            "30",
+            "rpm":           "1800",
+            "frame":         "326T",
+        }
+        new_type, _, override = classify_by_units(specs)
+        assert override is True
+        assert "3-phase" in new_type.lower()
+
+    def test_motor_classifies_regardless_of_brand(self):
+        """hp + frame triggers motor classification independent of manufacturer name."""
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": "industrial device",
+            "manufacturer":  "Hyundai",
+            "hp":            "30",
+            "frame":         "256T",
+        }
+        new_type, _, override = classify_by_units(specs)
+        assert override is True
+        assert "motor" in new_type.lower()
+
 
 # ---------------------------------------------------------------------------
 # Fix 3 — Asymmetric stop condition
