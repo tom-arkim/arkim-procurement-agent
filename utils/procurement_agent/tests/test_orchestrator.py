@@ -20,10 +20,10 @@ def test_start_new_run_returns_orchestrator(db_url):
 
 
 def test_load_returns_procurement_run_model(db_url):
-    from utils.models import ProcurementRun
+    from utils.models import SourcingRun
     orch = start_new_run(db_url=db_url)
     run = orch.load()
-    assert isinstance(run, ProcurementRun)
+    assert isinstance(run, SourcingRun)
     assert run.current_phase == Phase.INTAKE.value
 
 

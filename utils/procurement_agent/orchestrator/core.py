@@ -1,5 +1,5 @@
 """
-Orchestrator — coordinates agents and owns ProcurementRun state transitions.
+Orchestrator — coordinates agents and owns SourcingRun state transitions.
 
 Brief reference: Section 4 (Orchestrator pattern) and Section 5 (state model).
 
@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 from utils.procurement_agent.state.phases import Phase, validate_transition
 from utils.procurement_agent.state.persistence import (
     create_run, get_run, update_run, list_runs, append_approval,
@@ -59,7 +59,7 @@ _NEXT_PHASE: dict[str, Phase] = {
 
 
 class Orchestrator:
-    """Coordinates a single ProcurementRun through its lifecycle.
+    """Coordinates a single SourcingRun through its lifecycle.
 
     Usage:
         orch = Orchestrator(run_id)
@@ -76,18 +76,18 @@ class Orchestrator:
     # Public API
     # ------------------------------------------------------------------
 
-    def load(self) -> ProcurementRun:
-        """Load the current ProcurementRun from the database."""
+    def load(self) -> SourcingRun:
+        """Load the current SourcingRun from the database."""
         data = get_run(self.run_id, db_url=self._db_url)
         if data is None:
-            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+            raise ValueError(f"SourcingRun not found: {self.run_id}")
         return self._dict_to_model(data)
 
     def transition_to(self, next_phase: Phase) -> None:
         """Validate and apply a phase transition, then persist and write audit log."""
         data = get_run(self.run_id, db_url=self._db_url)
         if data is None:
-            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+            raise ValueError(f"SourcingRun not found: {self.run_id}")
 
         current = Phase(data["current_phase"])
         if not validate_transition(current, next_phase):
@@ -114,7 +114,7 @@ class Orchestrator:
         """
         data = get_run(self.run_id, db_url=self._db_url)
         if data is None:
-            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+            raise ValueError(f"SourcingRun not found: {self.run_id}")
 
         current_phase = data["current_phase"]
         handler_name = _PHASE_HANDLERS.get(current_phase)
@@ -129,7 +129,7 @@ class Orchestrator:
         """Return the current run state as a plain dict (for UI consumption)."""
         data = get_run(self.run_id, db_url=self._db_url)
         if data is None:
-            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+            raise ValueError(f"SourcingRun not found: {self.run_id}")
         return data
 
     def select_candidate(self, candidate: dict) -> None:
@@ -146,7 +146,7 @@ class Orchestrator:
         """
         data = get_run(self.run_id, db_url=self._db_url)
         if data is None:
-            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+            raise ValueError(f"SourcingRun not found: {self.run_id}")
 
         current = Phase(data["current_phase"])
         if current != Phase.COMPARISON:
@@ -212,7 +212,7 @@ class Orchestrator:
 
         data = get_run(self.run_id, db_url=self._db_url)
         if data is None:
-            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+            raise ValueError(f"SourcingRun not found: {self.run_id}")
 
         current = Phase(data["current_phase"])
         if current not in (Phase.PENDING_FIRST_APPROVAL, Phase.PENDING_SECOND_APPROVAL):
@@ -428,7 +428,7 @@ class Orchestrator:
             logger.warning("[%s] Audit log write failed: %s", self.run_id, exc)
 
     @staticmethod
-    def _dict_to_model(data: dict) -> ProcurementRun:
+    def _dict_to_model(data: dict) -> SourcingRun:
         def _dt(v):
             if v is None:
                 return datetime.now(timezone.utc)
@@ -439,7 +439,7 @@ class Orchestrator:
             except Exception:
                 return datetime.now(timezone.utc)
 
-        return ProcurementRun(
+        return SourcingRun(
             id=data["id"],
             facility_id=data["facility_id"],
             initiated_by_user_id=data.get("initiated_by_user_id"),
@@ -475,7 +475,7 @@ def start_new_run(
     initiated_by_user_id: Optional[str] = None,
     db_url: Optional[str] = None,
 ) -> "Orchestrator":
-    """Create a persisted ProcurementRun and return its Orchestrator."""
+    """Create a persisted SourcingRun and return its Orchestrator."""
     data = create_run(
         facility_id=facility_id,
         initiated_by_user_id=initiated_by_user_id,

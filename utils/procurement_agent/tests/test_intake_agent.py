@@ -9,11 +9,12 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 from utils.procurement_agent.agents.intake_agent import (
     IntakeAgent,
     CATEGORY_REQUIRED_FIELDS,
     SUFFICIENCY_THRESHOLD,
+    _detect_media_type,
 )
 
 
@@ -21,8 +22,8 @@ from utils.procurement_agent.agents.intake_agent import (
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
-def _make_run(specs: dict | None = None) -> ProcurementRun:
-    return ProcurementRun(asset_specs_json=specs)
+def _make_run(specs: dict | None = None) -> SourcingRun:
+    return SourcingRun(asset_specs_json=specs)
 
 
 def _mock_anthropic_response(payload: dict) -> MagicMock:
@@ -152,6 +153,48 @@ class TestMultimodalExtraction:
         call_body = mock_post.call_args[1]["json"]
         img_block = next(c for c in call_body["messages"][0]["content"] if c["type"] == "image")
         assert img_block["source"]["type"] == "base64"
+
+    def test_jpeg_media_type_sent_for_jpeg_bytes(self):
+        agent      = IntakeAgent(anthropic_api_key="test-key")
+        fake_jpeg  = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(_extracted())
+            agent.run(_make_run(), {"text": "", "images": [fake_jpeg], "force_proceed": False})
+
+        img_block = next(
+            c for c in mock_post.call_args[1]["json"]["messages"][0]["content"]
+            if c["type"] == "image"
+        )
+        assert img_block["source"]["media_type"] == "image/jpeg"
+
+    def test_png_media_type_sent_for_png_bytes(self):
+        agent    = IntakeAgent(anthropic_api_key="test-key")
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(_extracted())
+            agent.run(_make_run(), {"text": "", "images": [fake_png], "force_proceed": False})
+
+        img_block = next(
+            c for c in mock_post.call_args[1]["json"]["messages"][0]["content"]
+            if c["type"] == "image"
+        )
+        assert img_block["source"]["media_type"] == "image/png"
+
+    def test_webp_media_type_sent_for_webp_bytes(self):
+        agent     = IntakeAgent(anthropic_api_key="test-key")
+        fake_webp = b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 64
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(_extracted())
+            agent.run(_make_run(), {"text": "", "images": [fake_webp], "force_proceed": False})
+
+        img_block = next(
+            c for c in mock_post.call_args[1]["json"]["messages"][0]["content"]
+            if c["type"] == "image"
+        )
+        assert img_block["source"]["media_type"] == "image/webp"
 
     def test_caps_at_four_images(self):
         agent  = IntakeAgent(anthropic_api_key="test-key")
@@ -772,3 +815,24 @@ class TestClarificationLoopFix:
         assert result2["follow_up_question"] is None
         assert result2["manufacturer_confidence"] == 92
         assert result2["part_id_confidence"] == 72
+
+
+# ---------------------------------------------------------------------------
+# Media type detection
+# ---------------------------------------------------------------------------
+
+class TestDetectMediaType:
+    def test_jpeg_magic_bytes(self):
+        assert _detect_media_type(b"\xff\xd8\xff\xe0" + b"\x00" * 64) == "image/jpeg"
+
+    def test_png_magic_bytes(self):
+        assert _detect_media_type(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64) == "image/png"
+
+    def test_webp_magic_bytes(self):
+        assert _detect_media_type(b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 64) == "image/webp"
+
+    def test_unknown_bytes_default_to_jpeg(self):
+        assert _detect_media_type(b"\x00\x01\x02\x03" + b"\x00" * 64) == "image/jpeg"
+
+    def test_riff_without_webp_marker_defaults_to_jpeg(self):
+        assert _detect_media_type(b"RIFF\x00\x00\x00\x00AVI " + b"\x00" * 64) == "image/jpeg"

@@ -14,7 +14,18 @@ import re
 import requests
 from typing import Optional, Tuple
 
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
+
+
+def _detect_media_type(img_bytes: bytes) -> str:
+    """Return Anthropic-accepted media_type string inferred from image magic bytes."""
+    if img_bytes[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if img_bytes[:4] == b"\x89PNG":
+        return "image/png"
+    if img_bytes[:4] == b"RIFF" and img_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/jpeg"  # safe default for unknown formats
 
 # Per-category fields that must be populated before sourcing can start.
 # Key: substring of detected_type (lowercased).
@@ -238,11 +249,11 @@ class IntakeAgent:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, run: ProcurementRun, user_input: dict) -> dict:
+    def run(self, run: SourcingRun, user_input: dict) -> dict:
         """Extract AssetSpecs from user_input and assess sufficiency.
 
         Args:
-            run: current ProcurementRun (provides prior context on follow-up turns)
+            run: current SourcingRun (provides prior context on follow-up turns)
             user_input: dict with keys:
                 - "text": str — the user's chat message
                 - "images": list[bytes] — uploaded image data (optional)
@@ -397,10 +408,11 @@ class IntakeAgent:
         content: list = []
 
         for img_bytes in images[:4]:
+            media_type = _detect_media_type(img_bytes)
             b64 = base64.b64encode(img_bytes).decode("utf-8")
             content.append({
                 "type":   "image",
-                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+                "source": {"type": "base64", "media_type": media_type, "data": b64},
             })
 
         context = ""
@@ -437,7 +449,10 @@ class IntakeAgent:
             resp.raise_for_status()
             return self._parse_llm_json(resp.json()["content"][0]["text"])
         except Exception as exc:
-            print(f"[IntakeAgent] Multimodal extraction failed: {exc}")
+            detail = ""
+            if hasattr(exc, "response") and exc.response is not None:
+                detail = f" — API response: {exc.response.text[:300]}"
+            print(f"[IntakeAgent] Multimodal extraction failed: {exc}{detail}")
             return self._fallback_extract(prior_specs)
 
     def _fallback_extract(self, prior_specs: dict) -> dict:

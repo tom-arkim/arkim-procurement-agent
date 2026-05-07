@@ -13,15 +13,15 @@ from utils.procurement_agent.agents.comparison_helpers import (
     compare_frame,
 )
 from utils.procurement_agent.agents.spec_comparison_agent import SpecComparisonAgent
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-def _make_run(specs: dict) -> ProcurementRun:
-    return ProcurementRun(
+def _make_run(specs: dict) -> SourcingRun:
+    return SourcingRun(
         id="test-run-001",
         facility_id="00000000-0000-0000-0000-000000000000",
         current_phase="comparison",

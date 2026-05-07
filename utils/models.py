@@ -1,6 +1,9 @@
 """
 Arkim Procure Agent — Data Models (stdlib dataclasses, no third-party deps)
 """
+# SourcingRun is the user-facing workflow object (renamed from ProcurementRun).
+# The utils/procurement_agent/ module path is unchanged — it reflects the
+# system architecture, not the user-visible terminology.
 
 from dataclasses import dataclass, field
 from typing import Optional, List
@@ -160,8 +163,8 @@ class ProcurementReport:
 
 
 @dataclass
-class ProcurementRun:
-    """In-memory representation of a durable procurement workflow.
+class SourcingRun:
+    """In-memory representation of a durable sourcing workflow.
 
     The SQLAlchemy persistence model lives in
     utils/procurement_agent/state/persistence.py and mirrors this schema.

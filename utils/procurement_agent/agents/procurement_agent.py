@@ -20,19 +20,19 @@ There is no naming collision with the parent package because Python resolves
 unambiguously.
 """
 
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 
 
 class ProcurementAgent:
     """Manages the approval workflow and executes the vendor transaction."""
 
-    def run(self, run: ProcurementRun, action: str) -> dict:
+    def run(self, run: SourcingRun, action: str) -> dict:
         """Process an approval/execution action against the current run state.
 
         Phase 1 stub — records the action and returns a placeholder status.
 
         Args:
-            run:    ProcurementRun in an approval or execution phase
+            run:    SourcingRun in an approval or execution phase
             action: one of:
                     "approve"           — first or second approver approves
                     "reject"            — approver rejects; run moves to cancelled

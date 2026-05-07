@@ -1,5 +1,5 @@
 """
-Tests for ProcurementRun CRUD operations.
+Tests for SourcingRun CRUD operations.
 """
 
 import pytest

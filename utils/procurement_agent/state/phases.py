@@ -1,5 +1,5 @@
 """
-Phase enum and transition validator for ProcurementRun state machine.
+Phase enum and transition validator for SourcingRun state machine.
 
 Brief reference: Section 5 (state transitions) and Section 2 (workflow phases).
 """
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class Phase(str, Enum):
-    """All legal states of a ProcurementRun, matching the brief Section 5 schema."""
+    """All legal states of a SourcingRun, matching the brief Section 5 schema."""
     INTAKE = "intake"
     INVENTORY = "inventory"
     SOURCING = "sourcing"

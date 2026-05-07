@@ -1,5 +1,5 @@
 """
-Arkim Procurement Runs — Phase 2 UI.
+Arkim Sourcing Runs — Phase 2 UI.
 
 Phase-specific rendering:
   INTAKE      — chat interface with IntakeAgent (multimodal, clarification loop)
@@ -22,11 +22,11 @@ from datetime import datetime, timezone
 from utils.procurement_agent.state.persistence import list_runs, get_run, update_run
 from utils.procurement_agent.orchestrator.core import Orchestrator, start_new_run
 from utils.procurement_agent.state.phases import Phase
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 from utils.audit_log import recent_entries
 
 st.set_page_config(
-    page_title="Arkim · Procurement Runs",
+    page_title="Arkim · Sourcing Runs",
     page_icon="⚙",
     layout="wide",
 )
@@ -102,7 +102,7 @@ def _render_specs_table(specs: dict) -> None:
         st.caption("No specifications extracted yet.")
 
 
-def _dict_to_procurement_run(d: dict) -> ProcurementRun:
+def _dict_to_sourcing_run(d: dict) -> SourcingRun:
     def _dt(v):
         if v is None:
             return datetime.now(timezone.utc)
@@ -113,7 +113,7 @@ def _dict_to_procurement_run(d: dict) -> ProcurementRun:
         except Exception:
             return datetime.now(timezone.utc)
 
-    return ProcurementRun(
+    return SourcingRun(
         id=d["id"],
         facility_id=d["facility_id"],
         initiated_by_user_id=d.get("initiated_by_user_id"),
@@ -223,7 +223,7 @@ def _render_intake(run_id: str, run: dict) -> None:
         st.session_state[pending_key] = None
         from utils.procurement_agent.agents.intake_agent import IntakeAgent
         agent     = IntakeAgent(anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"))
-        run_model = _dict_to_procurement_run(run)
+        run_model = _dict_to_sourcing_run(run)
         run_model.asset_specs_json = st.session_state[specs_key]
 
         with st.spinner("Extracting specifications..."):
@@ -930,7 +930,7 @@ with st.sidebar:
 run_id = st.session_state.get("selected_run_id")
 
 if not run_id:
-    st.markdown("## Procurement Runs")
+    st.markdown("## Sourcing Runs")
     st.info("Create a new run using the sidebar to get started.")
 else:
     run = get_run(run_id)

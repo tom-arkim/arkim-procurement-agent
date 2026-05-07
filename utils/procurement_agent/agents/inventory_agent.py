@@ -10,13 +10,13 @@ Phase 5 implements:
   - Future CMMS integrations: Maximo, eMaint, Fiix, UpKeep, NetSuite
 """
 
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 
 
 class InventoryAgent:
     """Checks on-site inventory for the requested part before external sourcing."""
 
-    def run(self, run: ProcurementRun) -> dict:
+    def run(self, run: SourcingRun) -> dict:
         """Query connected inventory systems for the part in the run's AssetSpecs.
 
         Phase 1 stub — always returns "no data" so the workflow proceeds to sourcing.

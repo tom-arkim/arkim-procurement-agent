@@ -10,7 +10,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 from utils.procurement_agent.agents.sourcing_agent import (
     SourcingAgent,
     _URGENCY_WEIGHTS,
@@ -57,8 +57,8 @@ def _make_run(
     specs: dict | None = None,
     urgency: float = 0.3,
     warranty: str = "unknown",
-) -> ProcurementRun:
-    return ProcurementRun(
+) -> SourcingRun:
+    return SourcingRun(
         asset_specs_json=specs or {
             "manufacturer": "TestMfg",
             "model":        "TM-001",

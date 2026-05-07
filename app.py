@@ -5,4 +5,4 @@ Run with:  streamlit run app.py
 """
 import streamlit as st
 
-st.switch_page("pages/procurement_runs.py")
+st.switch_page("pages/sourcing_runs.py")

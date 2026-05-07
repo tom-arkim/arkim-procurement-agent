@@ -1,12 +1,14 @@
 """
-SQLAlchemy persistence layer for ProcurementRun.
+SQLAlchemy persistence layer for SourcingRun.
 
 Design notes:
 - SQLite for prototype; Postgres-ready schema (UUID PKs, JSON columns, indexed FKs).
 - Sessions are scoped per-call — no leaked sessions.
-- ApprovalHistory rows are separate ORM objects linked to ProcurementRun via FK,
+- ApprovalHistory rows are separate ORM objects linked to SourcingRun via FK,
   but also mirrored in the parent's approval_history_json for single-query reads.
 - Brief reference: Section 5.
+- DB file: data/sourcing_runs.sqlite (renamed from procurement_runs.sqlite in
+  Rectification Sprint — existing data not migrated; prototype only).
 """
 
 import json
@@ -31,7 +33,7 @@ _DATA_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
     "data",
 )
-_DB_PATH = os.path.join(_DATA_DIR, "procurement_runs.sqlite")
+_DB_PATH = os.path.join(_DATA_DIR, "sourcing_runs.sqlite")
 
 
 def _db_url(path: str = _DB_PATH) -> str:
@@ -60,8 +62,8 @@ class Base(DeclarativeBase):
     pass
 
 
-class ProcurementRunORM(Base):
-    __tablename__ = "procurement_runs"
+class SourcingRunORM(Base):
+    __tablename__ = "sourcing_runs"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     facility_id = Column(String(36), nullable=False, index=True)
@@ -97,7 +99,7 @@ class ProcurementRunORM(Base):
     )
 
     __table_args__ = (
-        Index("ix_procurement_runs_facility_phase", "facility_id", "current_phase"),
+        Index("ix_sourcing_runs_facility_phase", "facility_id", "current_phase"),
     )
 
 
@@ -105,7 +107,7 @@ class ApprovalHistoryORM(Base):
     __tablename__ = "approval_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(36), ForeignKey("procurement_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_id = Column(String(36), ForeignKey("sourcing_runs.id", ondelete="CASCADE"), nullable=False, index=True)
     sequence = Column(Integer, nullable=False, default=1)  # 1 = first approver, 2 = second
     approver_id = Column(String(36), nullable=True)
     approver_role = Column(String(80), nullable=True)
@@ -113,7 +115,7 @@ class ApprovalHistoryORM(Base):
     notes = Column(Text, nullable=True)
     acted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
-    run = relationship("ProcurementRunORM", back_populates="approval_history")
+    run = relationship("SourcingRunORM", back_populates="approval_history")
 
 
 class ApprovalRuleORM(Base):
@@ -157,7 +159,7 @@ def _pj(value: Optional[str]):
         return value
 
 
-def _orm_to_dict(row: ProcurementRunORM) -> dict:
+def _orm_to_dict(row: SourcingRunORM) -> dict:
     return {
         "id": row.id,
         "facility_id": row.facility_id,
@@ -195,10 +197,10 @@ def create_run(
     agent_version: str = "2.0.0-phase1",
     db_url: Optional[str] = None,
 ) -> dict:
-    """Insert a new ProcurementRun and return it as a dict."""
+    """Insert a new SourcingRun and return it as a dict."""
     session = _get_session(db_url)
     try:
-        row = ProcurementRunORM(
+        row = SourcingRunORM(
             id=str(uuid.uuid4()),
             facility_id=facility_id,
             initiated_by_user_id=initiated_by_user_id,
@@ -223,7 +225,7 @@ def get_run(run_id: str, db_url: Optional[str] = None) -> Optional[dict]:
     """Fetch a single run by ID. Returns None if not found."""
     session = _get_session(db_url)
     try:
-        row = session.get(ProcurementRunORM, run_id)
+        row = session.get(SourcingRunORM, run_id)
         return _orm_to_dict(row) if row else None
     finally:
         session.close()
@@ -233,7 +235,7 @@ def update_run(run_id: str, updates: dict, db_url: Optional[str] = None) -> Opti
     """Apply a dict of field updates to an existing run. Returns updated dict or None."""
     session = _get_session(db_url)
     try:
-        row = session.get(ProcurementRunORM, run_id)
+        row = session.get(SourcingRunORM, run_id)
         if row is None:
             return None
 
@@ -265,9 +267,9 @@ def list_runs(
     """Return recent runs ordered by created_at DESC."""
     session = _get_session(db_url)
     try:
-        q = session.query(ProcurementRunORM).order_by(ProcurementRunORM.created_at.desc())
+        q = session.query(SourcingRunORM).order_by(SourcingRunORM.created_at.desc())
         if facility_id:
-            q = q.filter(ProcurementRunORM.facility_id == facility_id)
+            q = q.filter(SourcingRunORM.facility_id == facility_id)
         rows = q.offset(offset).limit(limit).all()
         return [_orm_to_dict(r) for r in rows]
     finally:
@@ -286,7 +288,7 @@ def append_approval(
     """Add an ApprovalHistory row and keep the JSON mirror in sync. Returns True on success."""
     session = _get_session(db_url)
     try:
-        row = session.get(ProcurementRunORM, run_id)
+        row = session.get(SourcingRunORM, run_id)
         if row is None:
             return False
         entry = ApprovalHistoryORM(

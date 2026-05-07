@@ -17,7 +17,7 @@ import json
 import os
 from typing import Optional
 
-from utils.models import ProcurementRun
+from utils.models import SourcingRun
 from utils.procurement_agent.agents.comparison_helpers import (
     compare_dimensional,
     compare_material,
@@ -56,11 +56,11 @@ class SpecComparisonAgent:
     def __init__(self, anthropic_api_key: Optional[str] = None):
         self._anthropic_key = anthropic_api_key
 
-    def run(self, run: ProcurementRun, candidate: dict, tier: int = 3) -> dict:
+    def run(self, run: SourcingRun, candidate: dict, tier: int = 3) -> dict:
         """Compare a vendor candidate against the run's AssetSpecs.
 
         Args:
-            run:       ProcurementRun providing target AssetSpecs
+            run:       SourcingRun providing target AssetSpecs
             candidate: vendor result dict from SourcingAgent
             tier:      1 = Arkim Network, 2 = Marketplace, 3 = Broader Market
 

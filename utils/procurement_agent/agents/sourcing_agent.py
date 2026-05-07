@@ -16,7 +16,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Optional
 
-from utils.models import ProcurementRun, AssetSpecs, SourcingOption
+from utils.models import SourcingRun, AssetSpecs, SourcingOption
 
 _TIER1_CATALOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
@@ -90,7 +90,7 @@ class SourcingAgent:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, run: ProcurementRun) -> dict:
+    def run(self, run: SourcingRun) -> dict:
         """Execute all three sourcing tiers for the run's AssetSpecs.
 
         Tier 1 and Tier 2 run in parallel. Tier 3 runs after Tier 2 so it can
