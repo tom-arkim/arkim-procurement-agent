@@ -225,6 +225,10 @@ def _render_intake(run_id: str, run: dict) -> None:
         text_to_show = user_text or "(uploaded image)"
         st.session_state[chat_key].append({"role": "user", "content": text_to_show})
 
+        # Render user message immediately in this pass so it's visible during the agent call
+        with st.chat_message("user"):
+            st.write(text_to_show)
+
         images = [f.read() for f in (uploaded_files or [])]
 
         from utils.procurement_agent.agents.intake_agent import IntakeAgent
@@ -444,6 +448,10 @@ with st.sidebar:
         key="new_run_warranty",
     )
     if st.button("Create New Run", use_container_width=True, type="primary"):
+        # Clear any previously uploaded nameplate images from prior runs
+        for _k in list(st.session_state.keys()):
+            if _k.startswith("img_upload_"):
+                del st.session_state[_k]
         orch = start_new_run(
             urgency_factor=st.session_state.get("new_run_urgency", 0.3),
             warranty_status=warranty_new,
