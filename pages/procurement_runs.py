@@ -152,11 +152,12 @@ def _advance_run_through_inventory_to_sourcing(run_id: str) -> None:
 
 def _render_intake(run_id: str, run: dict) -> None:
     """Intake phase: chat interface with multi-turn clarification."""
-    chat_key       = f"intake_chat_{run_id}"
-    specs_key      = f"intake_specs_{run_id}"
-    followup_key   = f"intake_followup_{run_id}"
-    sufficient_key = f"intake_sufficient_{run_id}"
-    pending_key    = f"intake_pending_{run_id}"
+    chat_key         = f"intake_chat_{run_id}"
+    specs_key        = f"intake_specs_{run_id}"
+    followup_key     = f"intake_followup_{run_id}"
+    sufficient_key   = f"intake_sufficient_{run_id}"
+    pending_key      = f"intake_pending_{run_id}"
+    uploader_idx_key = f"intake_uploader_idx_{run_id}"
 
     if chat_key not in st.session_state:
         st.session_state[chat_key] = []
@@ -168,6 +169,8 @@ def _render_intake(run_id: str, run: dict) -> None:
         st.session_state[sufficient_key] = False
     if pending_key not in st.session_state:
         st.session_state[pending_key] = None
+    if uploader_idx_key not in st.session_state:
+        st.session_state[uploader_idx_key] = 0
 
     st.markdown("#### Intake — Part Specification")
     st.caption(
@@ -244,14 +247,18 @@ def _render_intake(run_id: str, run: dict) -> None:
             assistant_msg = result.get("follow_up_question") or "Could you provide more details?"
 
         st.session_state[chat_key].append({"role": "assistant", "content": assistant_msg})
+        # Rotate the uploader key so the file_uploader resets on the next render.
+        # Without this, Streamlit preserves the uploaded file across reruns and phase 1
+        # would fire again immediately, causing an infinite loop with empty image bytes.
+        st.session_state[uploader_idx_key] += 1
         st.rerun()
 
-    # --- Image upload ---
+    # --- Image upload (key rotates after each processed upload) ---
     uploaded_files = st.file_uploader(
         "Upload nameplate photo(s) (JPG / PNG)",
         type=["jpg", "jpeg", "png", "webp"],
         accept_multiple_files=True,
-        key=f"img_upload_{run_id}",
+        key=f"img_upload_{run_id}_{st.session_state[uploader_idx_key]}",
     )
 
     # --- Phase 1: record new message and rerun immediately ---
