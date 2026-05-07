@@ -236,12 +236,17 @@ def _render_intake(run_id: str, run: dict) -> None:
         run_model = _dict_to_procurement_run(run)
         run_model.asset_specs_json = st.session_state[specs_key]
 
+        prior_question = st.session_state.get(followup_key)
         with st.spinner("Extracting specifications..."):
             result = agent.run(run_model, {
-                "text":         user_text or "",
-                "images":       images,
-                "force_proceed": False,
+                "text":           user_text or "",
+                "images":         images,
+                "force_proceed":  False,
+                "prior_question": prior_question,
             })
+
+        if st.session_state.get(followup_key):
+            del st.session_state[followup_key]
 
         st.session_state[specs_key]      = result["asset_specs"]
         st.session_state[followup_key]   = result.get("follow_up_question")

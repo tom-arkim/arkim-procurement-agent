@@ -186,7 +186,16 @@ Rules:
   - Extract ALL visible technical specs; be thorough
   - Set fields to null if not determinable — never invent or estimate values
   - description: one line summarizing what the item is, from the input
-  - If prior specs are provided, merge carefully: only update fields with new information"""
+  - If prior specs are provided, merge carefully: only update fields with new information
+
+When the user is responding to a specific clarification question from the agent
+(indicated by "Agent asked: ..." in the input), treat their reply as an authoritative
+direct answer to that question. Score confidence accordingly:
+  - User provides a manufacturer name in response to "Who is the manufacturer?" → manufacturer_confidence = 95
+  - User provides dimensions in response to a sizing question → high confidence in those fields
+  - User provides a generic or evasive answer → moderate confidence
+The prior context summary shows what specs were already extracted. Confidence in those
+fields persists from the prior turn unless the user explicitly contradicts them."""
 
 _CLARIFICATION_SYSTEM = """You are an industrial procurement assistant.
 The user is trying to source a replacement part or piece of equipment.
@@ -249,16 +258,17 @@ class IntakeAgent:
                 - "manufacturer_caveat": str | None
                 - "confidence_summary": dict
         """
-        text          = user_input.get("text", "") or ""
-        images        = user_input.get("images") or []
-        force_proceed = bool(user_input.get("force_proceed", False))
-        prior_specs   = run.asset_specs_json or {}
+        text           = user_input.get("text", "") or ""
+        images         = user_input.get("images") or []
+        force_proceed  = bool(user_input.get("force_proceed", False))
+        prior_specs    = run.asset_specs_json or {}
+        prior_question = user_input.get("prior_question")
 
         # Extract from this turn's input
         if images:
             extracted = self._extract_multimodal(text, images, prior_specs)
         else:
-            extracted = self._extract_text(text, prior_specs)
+            extracted = self._extract_text(text, prior_specs, prior_question=prior_question)
 
         # Merge with prior specs — new non-null values win
         merged = dict(prior_specs)
@@ -275,8 +285,17 @@ class IntakeAgent:
             merged["classification_override"] = True
             print(f"[IntakeAgent] Units classification override: {old_type!r} → {new_type!r}")
 
-        mfg_conf  = float(extracted.get("manufacturer_confidence") or 0)
-        part_conf = float(extracted.get("part_id_confidence") or 0)
+        prior_mfg_conf      = float(prior_specs.get("manufacturer_confidence") or 0)
+        prior_part_conf     = float(prior_specs.get("part_id_confidence") or 0)
+        extracted_mfg_conf  = float(extracted.get("manufacturer_confidence") or 0)
+        extracted_part_conf = float(extracted.get("part_id_confidence") or 0)
+        # Confidence is monotonic: answering a clarification question can only add information,
+        # not remove previously-established confidence.
+        mfg_conf  = max(prior_mfg_conf, extracted_mfg_conf)
+        part_conf = max(prior_part_conf, extracted_part_conf)
+        # Write floor-corrected values back so next turn's prior_specs has correct baseline
+        merged["manufacturer_confidence"] = mfg_conf
+        merged["part_id_confidence"]      = part_conf
 
         if force_proceed:
             return {
@@ -325,16 +344,29 @@ class IntakeAgent:
     # Extraction helpers
     # ------------------------------------------------------------------
 
-    def _extract_text(self, text: str, prior_specs: dict) -> dict:
+    def _build_context_summary(self, prior_specs: dict) -> dict:
+        """Return all populated prior spec fields including confidence scores.
+
+        Confidence scores are intentionally included so the LLM knows what's already
+        established and can score new information relative to that baseline.
+        """
+        return {k: v for k, v in prior_specs.items() if v not in _NULL_VALUES}
+
+    def _extract_text(self, text: str, prior_specs: dict, prior_question: str | None = None) -> dict:
         if not self._api_key:
             return self._fallback_extract(prior_specs)
 
         context = ""
         if prior_specs:
-            summary = {k: v for k, v in prior_specs.items()
-                       if k not in ("manufacturer_confidence", "part_id_confidence",
-                                    "confidence_reasoning") and v not in _NULL_VALUES}
-            context = f"Previously extracted specs:\n{json.dumps(summary)}\n\nUser follow-up: "
+            summary = self._build_context_summary(prior_specs)
+            if prior_question:
+                context = (
+                    f"Previously extracted specs:\n{json.dumps(summary)}\n\n"
+                    f"Agent asked: \"{prior_question}\"\n"
+                    f"User replied: "
+                )
+            else:
+                context = f"Previously extracted specs:\n{json.dumps(summary)}\n\nUser input: "
 
         try:
             resp = requests.post(

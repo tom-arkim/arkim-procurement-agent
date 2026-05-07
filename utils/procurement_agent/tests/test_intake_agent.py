@@ -610,3 +610,165 @@ class TestAsymmetricStopCondition:
             result = agent.run(_make_run(), {"text": "Grundfos CR32-5", "images": [], "force_proceed": False})
 
         assert result["manufacturer_caveat"] is None
+
+
+# ---------------------------------------------------------------------------
+# Clarification loop bug fix — monotonic confidence + prior question passthrough
+# ---------------------------------------------------------------------------
+
+class TestClarificationLoopFix:
+    def test_monotonic_confidence_company_name_answer_proceeds(self):
+        """PMC11 → asks manufacturer → 'Endress Hauser' → must not re-ask same question.
+
+        Simulates turn 2: prior turn established part_id_confidence=72 (PMC11 recognised).
+        LLM sees "Endress Hauser" and scores mfg=90, part=30 (company name ≠ part info).
+        Without Fix A: part_conf=30 < 70 → blocked_need_part_id.
+        With Fix A: part_conf=max(72, 30)=72 ≥ 70, mfg_conf=max(0, 90)=90 ≥ 70 → proceeds.
+        """
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {
+            "detected_type":           "pressure sensor",
+            "model":                   "PMC11",
+            "psi":                     "150",
+            "manufacturer_confidence": 0,
+            "part_id_confidence":      72,
+        }
+        run = _make_run(specs=prior)
+        turn2_response = _extracted({
+            "manufacturer":            "Endress+Hauser",
+            "detected_type":           "pressure sensor",
+            "model":                   "PMC11",
+            "psi":                     "150",
+            "manufacturer_confidence": 90,
+            "part_id_confidence":      30,  # company name gives no part info
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(turn2_response)
+            result = agent.run(run, {
+                "text":           "Endress Hauser",
+                "images":         [],
+                "force_proceed":  False,
+                "prior_question": "Who is the manufacturer of this equipment?",
+            })
+
+        # Fix A: part_conf = max(72, 30) = 72 (floor preserved from prior turn)
+        # mfg_conf = max(0, 90) = 90
+        # assess_proceed_state(merged, 90, 72) → both ≥ 70 → proceed_full_confidence
+        assert result["manufacturer_confidence"] == 90
+        assert result["part_id_confidence"] == 72
+        assert result["sufficient"] is True
+        assert result["follow_up_question"] is None
+
+    def test_confidence_floor_prevents_regression(self):
+        """Prior part_id_confidence=65; clarification answer gives 30 — floor holds at 65."""
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {"manufacturer_confidence": 80, "part_id_confidence": 65}
+        run   = _make_run(specs=prior)
+        turn2_response = _extracted({
+            "manufacturer_confidence": 85,
+            "part_id_confidence":      30,
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(turn2_response)
+            result = agent.run(run, {
+                "text":          "Endress Hauser",
+                "images":        [],
+                "force_proceed": False,
+            })
+
+        assert result["part_id_confidence"] == 65
+        assert result["manufacturer_confidence"] == 85
+
+    def test_prior_question_included_in_llm_prompt(self):
+        """When prior_question is set, LLM prompt contains 'Agent asked:' prefix."""
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {"manufacturer_confidence": 0, "part_id_confidence": 65, "model": "PMC11"}
+        run   = _make_run(specs=prior)
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(_extracted())
+            agent.run(run, {
+                "text":           "Endress Hauser",
+                "images":         [],
+                "force_proceed":  False,
+                "prior_question": "Who is the manufacturer?",
+            })
+
+        call_body    = mock_post.call_args[1]["json"]
+        user_content = call_body["messages"][0]["content"]
+        assert 'Agent asked: "Who is the manufacturer?"' in user_content
+        assert "User replied: " in user_content
+
+    def test_prior_question_absent_on_initial_turn(self):
+        """On first turn (no prior_question), prompt uses plain 'User input:' framing."""
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {"manufacturer_confidence": 80, "part_id_confidence": 70, "model": "PMC11"}
+        run   = _make_run(specs=prior)
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(_extracted())
+            agent.run(run, {
+                "text":          "PMC11-AA1V1HFVXJA",
+                "images":        [],
+                "force_proceed": False,
+            })
+
+        call_body    = mock_post.call_args[1]["json"]
+        user_content = call_body["messages"][0]["content"]
+        assert "Agent asked:" not in user_content
+
+    def test_two_turn_loop_resolves_without_second_clarification(self):
+        """Integration: turn1 blocks → turn2 with answer + prior_question → proceeds."""
+        agent = IntakeAgent(anthropic_api_key="test-key")
+
+        # Turn 1: "PMC11-AA1V1HFVXJA" — mfg unknown, part recognized
+        turn1_response = _extracted({
+            "manufacturer":            None,
+            "model":                   "PMC11-AA1V1HFVXJA",
+            "detected_type":           "pressure sensor",
+            "manufacturer_confidence": 0,
+            "part_id_confidence":      72,
+        })
+        run    = _make_run()
+        haiku1 = MagicMock()
+        haiku1.raise_for_status = MagicMock()
+        haiku1.json.return_value = {"content": [{"text": "Who is the manufacturer of this equipment?"}]}
+
+        with patch("requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_anthropic_response(turn1_response),
+                haiku1,
+            ]
+            result1 = agent.run(run, {"text": "PMC11-AA1V1HFVXJA", "images": [], "force_proceed": False})
+
+        assert result1["sufficient"] is False
+        assert result1["follow_up_question"] is not None
+        clarification_q = result1["follow_up_question"]
+
+        # Turn 2: user answers the clarification — prior specs carry mfg_conf=0, part_conf=72
+        prior_after_turn1 = result1["asset_specs"]
+        run2 = _make_run(specs=prior_after_turn1)
+        turn2_response = _extracted({
+            "manufacturer":            "Endress+Hauser",
+            "model":                   "PMC11-AA1V1HFVXJA",
+            "detected_type":           "pressure sensor",
+            "psi":                     "150",  # required field for pressure sensor category
+            "manufacturer_confidence": 92,
+            "part_id_confidence":      35,
+        })
+
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(turn2_response)
+            result2 = agent.run(run2, {
+                "text":           "Endress Hauser",
+                "images":         [],
+                "force_proceed":  False,
+                "prior_question": clarification_q,
+            })
+
+        # Fix A: part_conf = max(72, 35) = 72; mfg_conf = max(0, 92) = 92
+        # assess_proceed_state(merged, 92, 72) → proceed_full_confidence
+        assert result2["sufficient"] is True
+        assert result2["follow_up_question"] is None
+        assert result2["manufacturer_confidence"] == 92
+        assert result2["part_id_confidence"] == 72
