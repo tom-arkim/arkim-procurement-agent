@@ -210,3 +210,74 @@ class TestRejection:
         orch = start_new_run(db_url=db_url)  # INTAKE phase
         with pytest.raises(ValueError, match="pending approval"):
             orch.submit_approval("approved", approver_role="director")
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — Auto-advance through stub execution phases
+# ---------------------------------------------------------------------------
+
+class TestAutoAdvanceThroughStubs:
+    """Verify that APPROVED → EXECUTING → FULFILLING → COMPLETED works correctly.
+
+    The UI approve handler calls execute_current_phase() three times after
+    submit_approval() reaches APPROVED. These tests confirm the orchestrator
+    supports that without errors and that audit log entries are written.
+    """
+
+    def test_approved_to_completed_via_three_execute_calls(self, db_url):
+        orch = _run_to_comparison(db_url)
+        orch.select_candidate(_cheap_candidate())
+        orch.submit_approval("approved", approver_role="maintenance_director")
+
+        state = orch.get_state()
+        assert state["current_phase"] == Phase.APPROVED.value
+
+        orch.execute_current_phase()  # APPROVED → EXECUTING
+        orch.execute_current_phase()  # EXECUTING → FULFILLING
+        orch.execute_current_phase()  # FULFILLING → COMPLETED
+
+        final = orch.get_state()
+        assert final["current_phase"] == Phase.COMPLETED.value
+
+    def test_auto_advance_preserves_selected_candidate(self, db_url):
+        orch = _run_to_comparison(db_url)
+        candidate = _cheap_candidate()
+        orch.select_candidate(candidate)
+        orch.submit_approval("approved", approver_role="maintenance_director")
+
+        orch.execute_current_phase()
+        orch.execute_current_phase()
+        orch.execute_current_phase()
+
+        final = orch.get_state()
+        assert final["selected_candidate_json"]["vendor_name"] == candidate["vendor_name"]
+
+    def test_auto_advance_preserves_approval_history(self, db_url):
+        orch = _run_to_comparison(db_url)
+        orch.select_candidate(_cheap_candidate())
+        orch.submit_approval("approved", notes="LGTM", approver_role="director")
+
+        orch.execute_current_phase()
+        orch.execute_current_phase()
+        orch.execute_current_phase()
+
+        final = orch.get_state()
+        history = final["approval_history_json"]
+        assert len(history) == 1
+        assert history[0]["action"] == "approved"
+
+    def test_auto_advance_audit_log_entries(self, db_url):
+        from utils.audit_log import recent_entries
+        orch = _run_to_comparison(db_url)
+        orch.select_candidate(_cheap_candidate())
+        orch.submit_approval("approved", approver_role="maintenance_director")
+
+        orch.execute_current_phase()
+        orch.execute_current_phase()
+        orch.execute_current_phase()
+
+        entries = recent_entries(limit=50)
+        run_entries = [e for e in entries if e.get("sourcing_run_id") == orch.run_id]
+        summaries = [e["input_summary"] for e in run_entries]
+        assert any("executing" in s.lower() or "APPROVED" in s for s in summaries)
+        assert any("completed" in s.lower() or "FULFILLING" in s for s in summaries)

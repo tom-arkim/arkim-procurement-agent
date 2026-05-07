@@ -12,6 +12,10 @@ NON_US_TLDS = (
     ".cn", ".uk", ".de", ".fr", ".it", ".es", ".nl",
     ".pl", ".ru", ".jp", ".kr", ".tw", ".hk", ".sg",
     ".au", ".nz", ".br", ".mx", ".in", ".tr", ".za",
+    # Nordic and Central European: major distributors (DigiKey, Mouser, Farnell)
+    # maintain localized storefronts on these TLDs with non-USD pricing.
+    ".se", ".no", ".fi", ".dk", ".be", ".at", ".ch",
+    ".ie", ".pt", ".gr",
 )
 
 NON_US_DOMAIN_HINTS = (
@@ -122,10 +126,13 @@ def _build_tier2_query(specs) -> str:
     if not niche_term:
         niche_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
 
-    # Fetch authorized_service_brands for Equipment queries so we can anchor on OEM channel
+    # Fetch authorized_service_brands for both Equipment and Part queries.
+    # Parts (seals, sensors, bearings) have manufacturer-specific authorized
+    # distributor networks just as Equipment does — the Equipment-only guard
+    # was preventing E+H sensors, John Crane seals, etc. from using this anchoring.
     _auth_brands: list[str] = []
     known_mfg = specs.manufacturer not in ("Unknown", "N/A", "null", None)
-    if known_mfg and _equip_kw and specs.category == "Equipment":
+    if known_mfg and _equip_kw:
         try:
             _br = get_brand_relationships(specs.manufacturer, _equip_kw)
             _auth_brands = _br.get("authorized_service_brands") or []
@@ -136,14 +143,25 @@ def _build_tier2_query(specs) -> str:
     known_pn  = pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown", None)
 
     if specs.category == "Part":
-        q_parts = [
-            '("authorized distributor" OR "stocking distributor" OR stockist OR "in stock" OR "cross-reference" OR interchange)',
-            f'"{niche_term}"',
-        ]
+        # Distributor anchor: when authorized distributor names are known,
+        # include them in the OR group so Tavily surfaces those specific firms.
+        if _auth_brands:
+            _brand_terms = " OR ".join(f'"{ab}"' for ab in _auth_brands[:4] if ab)
+            _dist_anchor = (
+                f'("authorized distributor" OR "stocking distributor" OR '
+                f'stockist OR "in stock" OR "cross-reference" OR '
+                f'interchange OR {_brand_terms})'
+            )
+        else:
+            _dist_anchor = '("authorized distributor" OR "stocking distributor" OR stockist OR "in stock" OR "cross-reference" OR interchange)'
+
+        q_parts = [_dist_anchor, f'"{niche_term}"']
         if known_pn:
             q_parts.append(f'"{pn}"')
         if known_mfg:
             q_parts.append(f'"{specs.manufacturer}"')
+        if _auth_brands:
+            print(f"[Sourcing] Tier 2 Part query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
         if "seal" in ctx:
             q_parts.append('("seal cross reference" OR "aftermarket" OR "equivalent" OR "interchange")')
         return " AND ".join(q_parts) + " USA"

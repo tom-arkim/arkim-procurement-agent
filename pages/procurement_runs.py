@@ -659,7 +659,13 @@ def _render_pending_approval(run_id: str, run: dict) -> None:
                 new_state = orch.get_state()
                 new_phase = new_state["current_phase"]
                 if new_phase == Phase.APPROVED.value:
-                    st.success("Approved — proceeding to execution (stubbed).")
+                    # Phase 3 stub: auto-advance through execution phases so
+                    # validation runs can reach COMPLETED. Phase 4 will replace
+                    # this with real procurement execution.
+                    orch.execute_current_phase()  # APPROVED → EXECUTING
+                    orch.execute_current_phase()  # EXECUTING → FULFILLING
+                    orch.execute_current_phase()  # FULFILLING → COMPLETED
+                    st.success("Approved and completed (execution stubbed in Phase 3).")
                 else:
                     st.success("First approval granted — second approval required.")
                 st.rerun()

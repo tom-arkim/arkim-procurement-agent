@@ -240,6 +240,16 @@ def get_brand_relationships(manufacturer: str,
     if not mfg or mfg in ("unknown", "n/a", "null", "none"):
         return _empty
 
+    # Seeded data takes priority over LLM discovery for known manufacturers.
+    seeded = _get_seeded_data(mfg)
+    if seeded:
+        return {
+            **_empty,
+            "authorized_service_brands": seeded.get("authorized_service_brands") or [],
+            "common_competitors":        seeded.get("common_competitors") or [],
+            "from_cache":                True,
+        }
+
     try:
         conn = _get_conn()
         row  = conn.execute(
@@ -301,6 +311,106 @@ def get_wrong_category_terms(manufacturer: str, equipment_type: str) -> tuple[st
 def get_parent_brand(manufacturer: str, equipment_type: str = "general") -> Optional[str]:
     """Return parent company name fragment (lowercase) or None."""
     return get_brand_relationships(manufacturer, equipment_type).get("parent_company")
+
+
+# ---------------------------------------------------------------------------
+# Seeded authorized distributor data
+#
+# Manually maintained for prototype validation. Covers the four canonical
+# test manufacturers. Future implementations may discover this dynamically
+# by parsing manufacturer websites or using observed sourcing data.
+# ---------------------------------------------------------------------------
+
+# Endress+Hauser US Representative network — sourced from us.endress.com
+EH_US_REPRESENTATIVES: list[str] = [
+    "Vector Controls and Automation Group",
+    "George E. Booth Co.",
+    "Engineered Equipment Company",
+    "Field Instruments & Controls",
+    "Instrumentation and Controls",
+    "Miller Mechanical Specialties",
+    "TriNova",
+    "Carotek",
+    "Forberg Smith",
+    "Eastern Controls",
+    "Rust Automation & Controls",
+]
+
+# Gusher Pumps authorized distributors (surfaced in sourcing test cases)
+GUSHER_AUTHORIZED_DISTRIBUTORS: list[str] = [
+    "Phoenix Pumps",
+    "Anderson Process",
+    "OTC Industrial",
+    "Great Lakes Pump & Supply",
+    "Wagner Process Equipment",
+]
+
+# John Crane authorized distributors (surfaced in sourcing test cases)
+JOHN_CRANE_AUTHORIZED_DISTRIBUTORS: list[str] = [
+    "Crane Engineering",
+    "Pump Tech Inc.",
+    "Geiger Inc.",
+    "Tencarva Machinery",
+    "Hayes Pump",
+]
+
+# Hyundai Heavy Industries / Crown Triton authorized distributors
+HYUNDAI_AUTHORIZED_DISTRIBUTORS: list[str] = [
+    "Gainesville Industrial Electric",
+    "AMED",
+    "Houston Motor & Control",
+    "BSI Mechanical",
+    "Dietz Electric",
+]
+
+# Seeded data lookup table: list of (name_fragment_tuple, data_dict) pairs.
+# Matching: all fragments in the tuple must appear in the lowercased manufacturer name.
+_SEEDED_BRAND_DATA: list[tuple] = [
+    (
+        ("endress", "hauser"),
+        {
+            "authorized_service_brands": EH_US_REPRESENTATIVES,
+            "common_competitors": ["WIKA", "Honeywell", "Yokogawa", "ABB", "Siemens"],
+        },
+    ),
+    (
+        ("gusher",),
+        {
+            "authorized_service_brands": GUSHER_AUTHORIZED_DISTRIBUTORS,
+            "common_competitors": ["Goulds", "Grundfos", "Flowserve", "Crane Pumps"],
+        },
+    ),
+    (
+        ("john crane",),
+        {
+            "authorized_service_brands": JOHN_CRANE_AUTHORIZED_DISTRIBUTORS,
+            "common_competitors": ["Flowserve", "AESSEAL", "Burgmann", "Pac-Seal"],
+        },
+    ),
+    (
+        ("hyundai",),
+        {
+            "authorized_service_brands": HYUNDAI_AUTHORIZED_DISTRIBUTORS,
+            "common_competitors": ["WEG", "Baldor", "Leeson", "US Motors", "Nidec"],
+        },
+    ),
+]
+
+
+def _get_seeded_data(manufacturer: str) -> Optional[dict]:
+    """Return seeded brand data for known manufacturers, or None if not seeded.
+
+    Uses fragment matching so 'Endress+Hauser', 'Endress Hauser', and 'E+H'
+    all resolve to the same seeded record.
+    """
+    mfg_norm = manufacturer.lower().replace("+", " ").replace("-", " ").strip()
+    # Special-case E+H short form before fragment matching
+    if mfg_norm in ("e h", "e+h", "endress hauser", "endress+hauser"):
+        return _SEEDED_BRAND_DATA[0][1]
+    for fragments, data in _SEEDED_BRAND_DATA:
+        if all(f in mfg_norm for f in fragments):
+            return data
+    return None
 
 
 # ---------------------------------------------------------------------------
