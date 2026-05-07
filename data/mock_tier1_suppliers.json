@@ -13,7 +13,17 @@
           "description": "30HP TEFC induction motor 460V 3-phase 1800RPM 326T frame",
           "price": 2100.00,
           "lead_days": 2,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "hp": "30",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "rpm": "1800",
+            "frame": "326T",
+            "enclosure": "TEFC",
+            "hz": "60",
+            "service_factor": "1.15"
+          }
         },
         {
           "part_number": "EM7056T",
@@ -21,7 +31,17 @@
           "description": "40HP TEFC induction motor 460V 3-phase 1800RPM 326T frame",
           "price": 2800.00,
           "lead_days": 2,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "hp": "40",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "rpm": "1800",
+            "frame": "326T",
+            "enclosure": "TEFC",
+            "hz": "60",
+            "service_factor": "1.15"
+          }
         },
         {
           "part_number": "EM7110T",
@@ -29,7 +49,17 @@
           "description": "75HP TEFC induction motor 460V 3-phase 1800RPM 365T frame",
           "price": 5400.00,
           "lead_days": 3,
-          "in_stock": false
+          "in_stock": false,
+          "spec_data": {
+            "hp": "75",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "rpm": "1800",
+            "frame": "365T",
+            "enclosure": "TEFC",
+            "hz": "60",
+            "service_factor": "1.15"
+          }
         }
       ]
     },
@@ -46,7 +76,18 @@
           "description": "Vertical multistage centrifugal pump CR 32-5 A-F-G-E-HQQE",
           "price": 1850.00,
           "lead_days": 3,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "gpm": "32",
+            "head_ft": "148",
+            "hp": "3",
+            "voltage": "208-230/460V",
+            "phase": "3-phase",
+            "rpm": "3450",
+            "connection_size": "1.5 inch",
+            "material_spec": "Stainless Steel",
+            "enclosure": "ODP"
+          }
         },
         {
           "part_number": "CR64-3-2",
@@ -54,7 +95,18 @@
           "description": "Vertical multistage centrifugal pump 64 GPM",
           "price": 3200.00,
           "lead_days": 5,
-          "in_stock": false
+          "in_stock": false,
+          "spec_data": {
+            "gpm": "64",
+            "head_ft": "98",
+            "hp": "5",
+            "voltage": "208-230/460V",
+            "phase": "3-phase",
+            "rpm": "3450",
+            "connection_size": "2 inch",
+            "material_spec": "Stainless Steel",
+            "enclosure": "ODP"
+          }
         },
         {
           "part_number": "1531-3-A-VB",
@@ -62,7 +114,17 @@
           "description": "Flygt submersible pump 3-inch",
           "price": 2400.00,
           "lead_days": 7,
-          "in_stock": false
+          "in_stock": false,
+          "spec_data": {
+            "gpm": "120",
+            "head_ft": "40",
+            "hp": "3",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "connection_size": "3 inch",
+            "material_spec": "Cast Iron",
+            "enclosure": "Submersible"
+          }
         }
       ]
     },
@@ -79,7 +141,16 @@
           "description": "Mechanical seal for 3657 centrifugal pump",
           "price": 285.00,
           "lead_days": 2,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "shaft_size": "1-1/8 inch",
+            "bore_diameter": "1-1/8 inch",
+            "material_spec": "Carbon/Ceramic",
+            "elastomer": "Buna-N",
+            "spring_material": "Stainless Steel",
+            "seal_type": "single-spring",
+            "detected_type": "mechanical seal"
+          }
         },
         {
           "part_number": "MR-1-1375",
@@ -87,7 +158,17 @@
           "description": "Type 1 mechanical seal 1-3/8 inch carbon/ceramic",
           "price": 340.00,
           "lead_days": 1,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "shaft_size": "1-3/8 inch",
+            "bore_diameter": "1-3/8 inch",
+            "material_spec": "Carbon",
+            "seat_material": "Ceramic",
+            "elastomer": "Buna-N",
+            "spring_material": "Stainless Steel",
+            "seal_type": "single-coil-spring",
+            "detected_type": "mechanical seal"
+          }
         },
         {
           "part_number": "MR-8-1000",
@@ -95,7 +176,17 @@
           "description": "Type 8 mechanical seal 1 inch shaft",
           "price": 210.00,
           "lead_days": 1,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "shaft_size": "1 inch",
+            "bore_diameter": "1 inch",
+            "material_spec": "Carbon",
+            "seat_material": "Silicon Carbide",
+            "elastomer": "Viton",
+            "spring_material": "Stainless Steel",
+            "seal_type": "multi-spring",
+            "detected_type": "mechanical seal"
+          }
         },
         {
           "part_number": "6205-2RS-C3",
@@ -103,7 +194,16 @@
           "description": "Deep groove ball bearing 25x52x15mm",
           "price": 18.50,
           "lead_days": 1,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "bore_diameter": "25 mm",
+            "outer_diameter": "52 mm",
+            "width": "15 mm",
+            "bearing_type": "deep groove ball",
+            "seals": "2RS (rubber sealed both sides)",
+            "clearance": "C3",
+            "material_spec": "Chrome Steel"
+          }
         },
         {
           "part_number": "6206-ZZ-C3",
@@ -111,7 +211,16 @@
           "description": "Deep groove ball bearing 30x62x16mm shielded",
           "price": 22.75,
           "lead_days": 1,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "bore_diameter": "30 mm",
+            "outer_diameter": "62 mm",
+            "width": "16 mm",
+            "bearing_type": "deep groove ball",
+            "seals": "ZZ (metal shielded both sides)",
+            "clearance": "C3",
+            "material_spec": "Chrome Steel"
+          }
         },
         {
           "part_number": "22216-E",
@@ -119,7 +228,16 @@
           "description": "Spherical roller bearing 80x140x33mm",
           "price": 145.00,
           "lead_days": 2,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "bore_diameter": "80 mm",
+            "outer_diameter": "140 mm",
+            "width": "33 mm",
+            "bearing_type": "spherical roller",
+            "seals": "open",
+            "clearance": "normal",
+            "material_spec": "Chrome Steel"
+          }
         }
       ]
     },
@@ -136,7 +254,17 @@
           "description": "PowerFlex 40 VFD 3HP 460V 3-phase",
           "price": 875.00,
           "lead_days": 3,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "hp": "3",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "frame": "PowerFlex 40",
+            "output_current_a": "6.1",
+            "hz": "60",
+            "enclosure": "IP20",
+            "detected_type": "VFD"
+          }
         },
         {
           "part_number": "22B-D010N104",
@@ -144,7 +272,17 @@
           "description": "PowerFlex 40 VFD 5HP 460V 3-phase",
           "price": 1050.00,
           "lead_days": 3,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "hp": "5",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "frame": "PowerFlex 40",
+            "output_current_a": "10.5",
+            "hz": "60",
+            "enclosure": "IP20",
+            "detected_type": "VFD"
+          }
         },
         {
           "part_number": "22B-D017N104",
@@ -152,7 +290,17 @@
           "description": "PowerFlex 40 VFD 10HP 460V 3-phase",
           "price": 1490.00,
           "lead_days": 3,
-          "in_stock": false
+          "in_stock": false,
+          "spec_data": {
+            "hp": "10",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "frame": "PowerFlex 40",
+            "output_current_a": "17.5",
+            "hz": "60",
+            "enclosure": "IP20",
+            "detected_type": "VFD"
+          }
         },
         {
           "part_number": "FR-E840-0040-4-60",
@@ -160,7 +308,17 @@
           "description": "FREQROL-E800 VFD 2HP 460V",
           "price": 620.00,
           "lead_days": 5,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "hp": "2",
+            "voltage": "460V",
+            "phase": "3-phase",
+            "frame": "FREQROL-E800",
+            "output_current_a": "4.0",
+            "hz": "60",
+            "enclosure": "IP20",
+            "detected_type": "VFD"
+          }
         }
       ]
     },
@@ -177,7 +335,17 @@
           "description": "Industrial motor 1HP 1800RPM 56 frame 115/230V",
           "price": 285.00,
           "lead_days": 2,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "hp": "1",
+            "voltage": "115/230V",
+            "phase": "single-phase",
+            "rpm": "1800",
+            "frame": "56",
+            "enclosure": "TEFC",
+            "hz": "60",
+            "service_factor": "1.0"
+          }
         },
         {
           "part_number": "6K779",
@@ -185,7 +353,17 @@
           "description": "Industrial motor 5HP 1800RPM 184T frame 208-230/460V",
           "price": 590.00,
           "lead_days": 2,
-          "in_stock": true
+          "in_stock": true,
+          "spec_data": {
+            "hp": "5",
+            "voltage": "208-230/460V",
+            "phase": "3-phase",
+            "rpm": "1800",
+            "frame": "184T",
+            "enclosure": "TEFC",
+            "hz": "60",
+            "service_factor": "1.15"
+          }
         }
       ]
     }

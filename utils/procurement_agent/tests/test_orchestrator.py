@@ -71,25 +71,30 @@ def test_transition_to_cancelled_from_any_phase(db_url):
 
 def test_execute_current_phase_advances_through_all_phases(db_url):
     orch = start_new_run(db_url=db_url)
-    expected_sequence = [
-        Phase.INTAKE.value,
-        Phase.INVENTORY.value,
-        Phase.SOURCING.value,
-        Phase.COMPARISON.value,
-        Phase.PENDING_FIRST_APPROVAL.value,
-        Phase.APPROVED.value,
-        Phase.EXECUTING.value,
-        Phase.FULFILLING.value,
-        Phase.COMPLETED.value,
-    ]
 
-    for expected_phase in expected_sequence:
-        state = orch.get_state()
-        assert state["current_phase"] == expected_phase, (
-            f"Expected {expected_phase}, got {state['current_phase']}"
-        )
-        if expected_phase != Phase.COMPLETED.value:
-            orch.execute_current_phase()
+    # Intake → Inventory → Sourcing → Comparison (comparison runs agents, stays in COMPARISON)
+    orch.execute_current_phase()  # INTAKE → INVENTORY
+    orch.execute_current_phase()  # INVENTORY → SOURCING
+    orch.execute_current_phase()  # SOURCING → COMPARISON
+    orch.execute_current_phase()  # COMPARISON: runs agents, stays in COMPARISON
+
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.COMPARISON.value
+
+    # Phase 3: user selects a candidate → PENDING_FIRST_APPROVAL
+    orch.select_candidate({"vendor_name": "Test Vendor", "grand_total_usd": 500.0})
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.PENDING_FIRST_APPROVAL.value
+
+    # Single-approver path ($500 < $5000 with default rules)
+    orch.submit_approval("approved", approver_role="maintenance_director")
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.APPROVED.value
+
+    # Remaining phases use execute_current_phase (stubs)
+    orch.execute_current_phase()  # APPROVED → EXECUTING
+    orch.execute_current_phase()  # EXECUTING → FULFILLING
+    orch.execute_current_phase()  # FULFILLING → COMPLETED
 
     final = orch.get_state()
     assert final["current_phase"] == Phase.COMPLETED.value

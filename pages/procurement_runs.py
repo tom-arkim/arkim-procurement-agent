@@ -386,6 +386,314 @@ def _render_sourcing_results(run: dict) -> None:
             _render_vendor_card(opt)
 
 
+def _match_color(match: str) -> str:
+    return {
+        "exact":      "🟢",
+        "compatible": "🟡",
+        "different":  "🔴",
+        "unknown":    "⚪",
+    }.get(match, "⚪")
+
+
+def _render_comparison_artifact(artifact: dict) -> None:
+    """Render a comparison artifact for a single candidate."""
+    if not artifact:
+        st.caption("Comparison not available.")
+        return
+
+    fidelity = artifact.get("fidelity", "low")
+    summary  = artifact.get("compatibility_summary", "verification_required")
+    rows     = artifact.get("comparison") or []
+    notes    = artifact.get("engineer_notes")
+
+    summary_colors = {
+        "fit_confirmed":      ("success", "Fit Confirmed"),
+        "fit_likely":         ("warning", "Fit Likely — minor variations"),
+        "verification_required": ("info", "Verification Required"),
+        "incompatible":       ("error", "Incompatible"),
+    }
+    color_fn, summary_label = summary_colors.get(summary, ("info", summary.replace("_", " ").title()))
+
+    fidelity_label = {"high": "High (catalog)", "medium": "Medium (listing)", "low": "Low (no data)"}.get(fidelity, fidelity)
+    st.caption(f"Comparison fidelity: **{fidelity_label}**")
+
+    getattr(st, color_fn)(f"**{summary_label}**")
+
+    if fidelity == "low":
+        if notes:
+            st.warning(notes)
+        if artifact.get("candidate_url"):
+            st.markdown(f"[View vendor page]({artifact['candidate_url']})")
+        return
+
+    if fidelity == "medium" and notes:
+        st.warning(notes)
+
+    if rows:
+        import pandas as pd
+        df_rows = []
+        for row in rows:
+            df_rows.append({
+                "":          _match_color(row["match"]),
+                "Field":     row["field_label"],
+                "Required":  row["asset_value"] or "—",
+                "Candidate": row["candidate_value"] or "—",
+                "Notes":     row.get("notes") or "",
+            })
+        st.dataframe(pd.DataFrame(df_rows), use_container_width=True, hide_index=True)
+
+
+def _render_candidate_card_with_comparison(run_id: str, opt: dict, tier_key: str, idx: int) -> bool:
+    """Render a candidate card with its comparison artifact and a Select button.
+
+    Returns True if the user clicked "Select This Candidate".
+    """
+    vendor      = opt.get("vendor_name") or "Unknown"
+    price       = opt.get("base_price") or 0
+    price_tbd   = opt.get("price_tbd", False)
+    lead        = opt.get("lead_time_days") or "—"
+    url         = opt.get("source_url")
+    auth        = opt.get("vendor_authorization_status") or ""
+    in_stock    = opt.get("in_stock")
+    artifact    = opt.get("comparison_artifact")
+    match_type  = opt.get("match_type") or "—"
+
+    price_str = "Quote Required" if price_tbd or not price else f"${price:,.2f}"
+    auth_tag  = " ✓ Authorized" if auth == "Authorized" else ""
+    stock_tag = ""
+    if in_stock is True:
+        stock_tag = " · In Stock"
+    elif in_stock is False:
+        stock_tag = " · Lead Time"
+
+    with st.container():
+        c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+        with c1:
+            if url:
+                st.markdown(f"**[{vendor}]({url})**{auth_tag}")
+            else:
+                st.markdown(f"**{vendor}**{auth_tag}")
+            st.caption(f"{match_type}{stock_tag}")
+        with c2:
+            st.metric("Price", price_str)
+        with c3:
+            st.metric("Lead Time", f"{lead}d" if isinstance(lead, int) else str(lead))
+        with c4:
+            selected = st.button(
+                "Select",
+                key=f"select_{run_id}_{tier_key}_{idx}",
+                type="primary",
+            )
+
+        if artifact:
+            with st.expander("Spec Comparison", expanded=False):
+                _render_comparison_artifact(artifact)
+
+        st.markdown("---")
+
+    return selected
+
+
+def _render_approval_history(history: list) -> None:
+    if not history:
+        st.caption("No approvals recorded yet.")
+        return
+    for entry in history:
+        seq  = entry.get("sequence", "?")
+        role = entry.get("approver_role") or "Unknown role"
+        act  = entry.get("action", "—")
+        ts   = (entry.get("acted_at") or "")[:19].replace("T", " ")
+        note = entry.get("notes") or ""
+        icon = "✅" if act == "approved" else "❌"
+        st.markdown(f"{icon} **Approval {seq}** — {role} → `{act}` at `{ts}`")
+        if note:
+            st.caption(f"Notes: {note}")
+
+
+def _render_comparison_phase(run_id: str, run: dict) -> None:
+    """COMPARISON phase: show candidates with artifacts; user selects one."""
+    st.markdown("### Review Candidates & Select")
+    st.caption("Spec comparison artifacts are shown for each candidate. Select a candidate to initiate approval.")
+
+    sr = run.get("sourcing_results_json") or {}
+    if not sr:
+        st.info("No sourcing results available. Run sourcing first.")
+        return
+
+    # If comparison hasn't been run yet (no artifacts), offer to run it
+    has_artifacts = any(
+        r.get("comparison_artifact") is not None
+        for tier_key in ("tier_1", "tier_2", "tier_3")
+        for r in (sr.get(tier_key) or {}).get("results", [])
+    )
+    if not has_artifacts:
+        if st.button("Run Spec Comparison", type="primary"):
+            with st.spinner("Generating comparison artifacts..."):
+                try:
+                    orch = Orchestrator(run_id)
+                    orch.execute_current_phase()
+                    st.success("Comparison complete.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Comparison failed: {exc}")
+        return
+
+    selected_candidate = None
+    selected_tier = None
+
+    for tier_key, tier_label in [("tier_1", "Tier 1 — Arkim Network"),
+                                  ("tier_2", "Tier 2 — Marketplace"),
+                                  ("tier_3", "Tier 3 — Broader Market")]:
+        tier_data = sr.get(tier_key) or {}
+        results   = tier_data.get("results") or []
+        if not results:
+            continue
+
+        tier_num = int(tier_key[-1])
+        st.markdown(f"#### {tier_label}")
+        for idx, opt in enumerate(results):
+            clicked = _render_candidate_card_with_comparison(run_id, opt, tier_key, idx)
+            if clicked:
+                selected_candidate = opt
+                selected_tier      = tier_num
+
+    if selected_candidate is not None:
+        try:
+            orch = Orchestrator(run_id)
+            orch.select_candidate({
+                **selected_candidate,
+                "grand_total_usd": float(selected_candidate.get("base_price") or 0),
+            })
+            st.success(f"Selected **{selected_candidate.get('vendor_name')}** — routing to approval.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Could not select candidate: {exc}")
+
+
+def _render_pending_approval(run_id: str, run: dict) -> None:
+    """Render the approval workflow for PENDING_FIRST_APPROVAL and PENDING_SECOND_APPROVAL."""
+    phase    = run["current_phase"]
+    selected = run.get("selected_candidate_json") or {}
+    path     = selected.get("_approval_path") or {}
+    history  = run.get("approval_history_json") or []
+
+    req_count    = int(path.get("approvers_required", 1))
+    approver_roles = path.get("approver_roles") or ["any_authorized_user"]
+    total_usd    = float(path.get("grand_total_usd") or selected.get("base_price") or 0)
+
+    # --- Selected candidate summary ---
+    vendor = selected.get("vendor_name") or "Unknown"
+    price  = selected.get("base_price") or 0
+    lead   = selected.get("lead_time_days") or "—"
+    url    = selected.get("source_url")
+
+    st.markdown("### Selected Candidate")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Vendor", vendor)
+    c2.metric("Price", f"${price:,.2f}" if price else "TBD")
+    c3.metric("Lead Time", f"{lead}d" if isinstance(lead, int) else str(lead))
+    if url:
+        st.markdown(f"[View vendor page]({url})")
+
+    artifact = selected.get("comparison_artifact") or (
+        # Try to pull from the sourcing results if attached there
+        None
+    )
+    if artifact:
+        with st.expander("Spec Comparison", expanded=True):
+            _render_comparison_artifact(artifact)
+
+    st.divider()
+
+    # --- Approval path info ---
+    current_seq = len(history) + 1
+    roles_display = ", ".join(approver_roles)
+
+    st.markdown("### Approval Required")
+    if phase == Phase.PENDING_FIRST_APPROVAL.value:
+        st.info(
+            f"**Approval {current_seq} of {req_count} required.**  \n"
+            f"Eligible roles: {roles_display}  \n"
+            f"Total value: ${total_usd:,.2f}"
+        )
+    else:
+        st.info(
+            f"**Second approval required.**  \n"
+            f"Eligible roles: {roles_display}  \n"
+            f"First approval already granted — see history below."
+        )
+
+    # --- Approval history ---
+    if history:
+        st.markdown("**Approval History**")
+        _render_approval_history(history)
+        st.divider()
+
+    # --- Approve / Reject controls ---
+    st.markdown("**Approver Action**")
+    st.caption("In production, only authenticated users with the required role may act here.")
+
+    role_input = st.text_input(
+        "Your role (prototype — any value accepted)",
+        value=approver_roles[0] if approver_roles else "maintenance_director",
+        key=f"approver_role_{run_id}_{phase}",
+    )
+    notes_input = st.text_area(
+        "Notes (optional)",
+        key=f"approval_notes_{run_id}_{phase}",
+        height=80,
+    )
+
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button("✅ Approve", type="primary", use_container_width=True,
+                     key=f"approve_btn_{run_id}_{phase}"):
+            try:
+                orch = Orchestrator(run_id)
+                orch.submit_approval("approved", notes=notes_input, approver_role=role_input)
+                new_state = orch.get_state()
+                new_phase = new_state["current_phase"]
+                if new_phase == Phase.APPROVED.value:
+                    st.success("Approved — proceeding to execution (stubbed).")
+                else:
+                    st.success("First approval granted — second approval required.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Approval failed: {exc}")
+    with btn_col2:
+        if st.button("❌ Reject", type="secondary", use_container_width=True,
+                     key=f"reject_btn_{run_id}_{phase}"):
+            try:
+                orch = Orchestrator(run_id)
+                orch.submit_approval("rejected", notes=notes_input, approver_role=role_input)
+                st.error("Procurement run rejected — cancelled.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Rejection failed: {exc}")
+
+
+def _render_approved(run: dict) -> None:
+    """Render the APPROVED state — show full approval history and stub execution notice."""
+    selected = run.get("selected_candidate_json") or {}
+    history  = run.get("approval_history_json") or []
+
+    vendor = selected.get("vendor_name") or "Unknown"
+    price  = selected.get("base_price") or 0
+
+    st.success(f"**Approved — {vendor} · ${price:,.2f}**  \nProceeding to execution (stubbed in Phase 3).")
+    st.divider()
+
+    st.markdown("**Approval History**")
+    _render_approval_history(history)
+
+    if selected:
+        with st.expander("Approved Candidate Details"):
+            artifact = selected.get("comparison_artifact")
+            _render_vendor_card(selected)
+            if artifact:
+                _render_comparison_artifact(artifact)
+
+
 def _render_phase_detail(run_id: str, run: dict) -> None:
     """Generic phase detail: advance button + payload viewer."""
     phase = run["current_phase"]
@@ -510,11 +818,27 @@ else:
         if phase == Phase.INTAKE.value:
             _render_intake(run_id, run)
 
+        elif phase == Phase.COMPARISON.value:
+            if run.get("asset_specs_json"):
+                with st.expander("Asset Specifications", expanded=False):
+                    _render_specs_table(run["asset_specs_json"])
+                st.divider()
+            _render_comparison_phase(run_id, run)
+
+        elif phase in (Phase.PENDING_FIRST_APPROVAL.value, Phase.PENDING_SECOND_APPROVAL.value):
+            if run.get("asset_specs_json"):
+                with st.expander("Asset Specifications", expanded=False):
+                    _render_specs_table(run["asset_specs_json"])
+                st.divider()
+            _render_pending_approval(run_id, run)
+
+        elif phase == Phase.APPROVED.value:
+            _render_approved(run)
+            if run.get("asset_specs_json"):
+                with st.expander("Asset Specifications", expanded=False):
+                    _render_specs_table(run["asset_specs_json"])
+
         elif phase in (
-            Phase.COMPARISON.value,
-            Phase.PENDING_FIRST_APPROVAL.value,
-            Phase.PENDING_SECOND_APPROVAL.value,
-            Phase.APPROVED.value,
             Phase.EXECUTING.value,
             Phase.FULFILLING.value,
             Phase.COMPLETED.value,
@@ -522,14 +846,11 @@ else:
             if run.get("sourcing_results_json"):
                 _render_sourcing_results(run)
                 st.divider()
-
             if run.get("asset_specs_json"):
                 with st.expander("Asset Specifications", expanded=False):
                     _render_specs_table(run["asset_specs_json"])
                 st.divider()
-
-            if phase not in _TERMINAL:
-                _render_phase_detail(run_id, run)
+            _render_phase_detail(run_id, run)
 
         else:
             # INVENTORY, SOURCING, CANCELLED, ERROR

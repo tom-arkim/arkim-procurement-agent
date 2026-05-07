@@ -106,13 +106,30 @@ class ApprovalHistoryORM(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String(36), ForeignKey("procurement_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    sequence = Column(Integer, nullable=False, default=1)  # 1 = first approver, 2 = second
     approver_id = Column(String(36), nullable=True)
     approver_role = Column(String(80), nullable=True)
-    action = Column(String(20), nullable=False)   # "approved" | "rejected" | "requested_changes"
+    action = Column(String(20), nullable=False)   # "approved" | "rejected"
     notes = Column(Text, nullable=True)
     acted_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
     run = relationship("ProcurementRunORM", back_populates="approval_history")
+
+
+class ApprovalRuleORM(Base):
+    __tablename__ = "approval_rules"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    facility_id = Column(String(36), nullable=False, index=True)
+    threshold_usd = Column(Float, nullable=False)
+    approvers_required = Column(Integer, nullable=False, default=1)
+    approver_roles = Column(Text, nullable=False, default="[]")  # JSON array as text
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        Index("ix_approval_rules_facility_threshold", "facility_id", "threshold_usd"),
+    )
 
 
 # Create tables on first import.
@@ -263,6 +280,7 @@ def append_approval(
     approver_role: Optional[str],
     action: str,
     notes: Optional[str] = None,
+    sequence: int = 1,
     db_url: Optional[str] = None,
 ) -> bool:
     """Add an ApprovalHistory row and keep the JSON mirror in sync. Returns True on success."""
@@ -273,6 +291,7 @@ def append_approval(
             return False
         entry = ApprovalHistoryORM(
             run_id=run_id,
+            sequence=sequence,
             approver_id=approver_id,
             approver_role=approver_role,
             action=action,
@@ -284,6 +303,7 @@ def append_approval(
         # Keep JSON mirror up to date for single-query UI reads.
         history = _pj(row.approval_history_json) or []
         history.append({
+            "sequence": sequence,
             "approver_id": approver_id,
             "approver_role": approver_role,
             "action": action,
@@ -294,6 +314,109 @@ def append_approval(
         row.updated_at = datetime.now(timezone.utc)
         session.commit()
         return True
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# Approval rules CRUD
+# ---------------------------------------------------------------------------
+
+def _rule_to_dict(row: ApprovalRuleORM) -> dict:
+    return {
+        "id":                 row.id,
+        "facility_id":        row.facility_id,
+        "threshold_usd":      row.threshold_usd,
+        "approvers_required": row.approvers_required,
+        "approver_roles":     _pj(row.approver_roles) or [],
+        "created_at":         row.created_at.isoformat() if row.created_at else None,
+        "updated_at":         row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def list_approval_rules(
+    facility_id: str,
+    db_url: Optional[str] = None,
+) -> list[dict]:
+    """Return all approval rules for a facility, ordered by threshold ascending."""
+    session = _get_session(db_url)
+    try:
+        rows = (
+            session.query(ApprovalRuleORM)
+            .filter(ApprovalRuleORM.facility_id == facility_id)
+            .order_by(ApprovalRuleORM.threshold_usd)
+            .all()
+        )
+        return [_rule_to_dict(r) for r in rows]
+    finally:
+        session.close()
+
+
+def upsert_approval_rule(
+    facility_id: str,
+    threshold_usd: float,
+    approvers_required: int,
+    approver_roles: list,
+    rule_id: Optional[str] = None,
+    db_url: Optional[str] = None,
+) -> dict:
+    """Insert or update an approval rule. Returns the rule dict."""
+    session = _get_session(db_url)
+    try:
+        if rule_id:
+            row = session.get(ApprovalRuleORM, rule_id)
+        else:
+            row = None
+
+        now = datetime.now(timezone.utc)
+        if row is None:
+            row = ApprovalRuleORM(
+                id=rule_id or str(uuid.uuid4()),
+                facility_id=facility_id,
+                threshold_usd=threshold_usd,
+                approvers_required=approvers_required,
+                approver_roles=_j(approver_roles),
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+        else:
+            row.threshold_usd      = threshold_usd
+            row.approvers_required = approvers_required
+            row.approver_roles     = _j(approver_roles)
+            row.updated_at         = now
+
+        session.commit()
+        return _rule_to_dict(row)
+    finally:
+        session.close()
+
+
+def delete_approval_rule(rule_id: str, db_url: Optional[str] = None) -> bool:
+    """Delete an approval rule by ID. Returns True if found and deleted."""
+    session = _get_session(db_url)
+    try:
+        row = session.get(ApprovalRuleORM, rule_id)
+        if row is None:
+            return False
+        session.delete(row)
+        session.commit()
+        return True
+    finally:
+        session.close()
+
+
+def delete_facility_rules(facility_id: str, db_url: Optional[str] = None) -> int:
+    """Delete all rules for a facility. Returns the count deleted."""
+    session = _get_session(db_url)
+    try:
+        deleted = (
+            session.query(ApprovalRuleORM)
+            .filter(ApprovalRuleORM.facility_id == facility_id)
+            .delete()
+        )
+        session.commit()
+        return deleted
     finally:
         session.close()
 

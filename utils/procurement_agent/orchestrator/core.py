@@ -20,8 +20,9 @@ from uuid import UUID
 from utils.models import ProcurementRun
 from utils.procurement_agent.state.phases import Phase, validate_transition
 from utils.procurement_agent.state.persistence import (
-    create_run, get_run, update_run, list_runs,
+    create_run, get_run, update_run, list_runs, append_approval,
 )
+from utils.procurement_agent.state.approval_rules import determine_approval_path
 from utils.audit_log import write_audit_log
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,140 @@ class Orchestrator:
             raise ValueError(f"ProcurementRun not found: {self.run_id}")
         return data
 
+    def select_candidate(self, candidate: dict) -> None:
+        """Record the user's selected candidate and route to the appropriate approval path.
+
+        Evaluates the facility's approval rules against the candidate's grand_total_usd
+        and transitions to PENDING_FIRST_APPROVAL, storing the required approver count
+        and roles in the selected_candidate_json.
+
+        Args:
+            candidate: dict from sourcing_results_json (any tier). Must include at
+                       minimum 'vendor_name'. 'grand_total_usd' or 'base_price' is
+                       used to look up the applicable approval rule.
+        """
+        data = get_run(self.run_id, db_url=self._db_url)
+        if data is None:
+            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+
+        current = Phase(data["current_phase"])
+        if current != Phase.COMPARISON:
+            raise ValueError(
+                f"select_candidate() requires COMPARISON phase, got {current.value}"
+            )
+
+        total_usd = float(
+            candidate.get("grand_total_usd")
+            or candidate.get("base_price")
+            or 0.0
+        )
+        facility_id = data.get("facility_id") or "00000000-0000-0000-0000-000000000000"
+
+        approvers_required, approver_roles = determine_approval_path(
+            facility_id, total_usd, db_url=self._db_url,
+        )
+
+        enriched = dict(candidate)
+        enriched["_approval_path"] = {
+            "approvers_required": approvers_required,
+            "approver_roles":     approver_roles,
+            "grand_total_usd":    total_usd,
+        }
+
+        update_run(
+            self.run_id,
+            {
+                "selected_candidate_json": enriched,
+                "current_phase": Phase.PENDING_FIRST_APPROVAL.value,
+            },
+            db_url=self._db_url,
+        )
+        self._write_audit(
+            run_data=data,
+            input_summary=(
+                f"Candidate selected: {candidate.get('vendor_name', 'Unknown')} "
+                f"${total_usd:.2f} — {approvers_required} approver(s) required"
+            ),
+        )
+        logger.info(
+            "[%s] Candidate selected → PENDING_FIRST_APPROVAL (%d approver(s))",
+            self.run_id, approvers_required,
+        )
+
+    def submit_approval(
+        self,
+        action: str,
+        notes: str = "",
+        approver_role: str = "any_authorized_user",
+        approver_id: Optional[str] = None,
+    ) -> None:
+        """Record an approval or rejection action and advance the phase.
+
+        Args:
+            action:       "approved" or "rejected"
+            notes:        Optional approver notes
+            approver_role: Display role label (no RBAC enforcement in prototype)
+            approver_id:  Optional user ID (nullable for prototype)
+        """
+        if action not in ("approved", "rejected"):
+            raise ValueError(f"action must be 'approved' or 'rejected', got {action!r}")
+
+        data = get_run(self.run_id, db_url=self._db_url)
+        if data is None:
+            raise ValueError(f"ProcurementRun not found: {self.run_id}")
+
+        current = Phase(data["current_phase"])
+        if current not in (Phase.PENDING_FIRST_APPROVAL, Phase.PENDING_SECOND_APPROVAL):
+            raise ValueError(
+                f"submit_approval() requires a pending approval phase, got {current.value}"
+            )
+
+        history = data.get("approval_history_json") or []
+        sequence = len(history) + 1
+
+        # Persist the approval history row + JSON mirror
+        append_approval(
+            run_id=self.run_id,
+            approver_id=approver_id,
+            approver_role=approver_role,
+            action=action,
+            notes=notes or None,
+            sequence=sequence,
+            db_url=self._db_url,
+        )
+
+        if action == "rejected":
+            next_phase = Phase.CANCELLED
+        elif current == Phase.PENDING_SECOND_APPROVAL:
+            next_phase = Phase.APPROVED
+        else:
+            # First approval — check if dual approval is required
+            selected    = data.get("selected_candidate_json") or {}
+            path        = selected.get("_approval_path") or {}
+            req_count   = int(path.get("approvers_required", 1))
+            next_phase  = Phase.PENDING_SECOND_APPROVAL if req_count >= 2 else Phase.APPROVED
+
+        if not validate_transition(current, next_phase):
+            raise ValueError(
+                f"Invalid approval transition: {current.value} → {next_phase.value}"
+            )
+
+        update_run(
+            self.run_id,
+            {"current_phase": next_phase.value},
+            db_url=self._db_url,
+        )
+        self._write_audit(
+            run_data=data,
+            input_summary=(
+                f"Approval action [{sequence}]: {action} by {approver_role} "
+                f"→ {next_phase.value}"
+            ),
+        )
+        logger.info(
+            "[%s] Approval [%d] %s → %s", self.run_id, sequence, action, next_phase.value
+        )
+
     # ------------------------------------------------------------------
     # Phase 1 stubs — each advances to the next phase after a no-op
     # ------------------------------------------------------------------
@@ -180,15 +315,58 @@ class Orchestrator:
         )
 
     def _stub_comparison(self, data: dict) -> None:
-        """Stub: Phase 3 replaces with SpecComparisonAgent.run() — per-candidate comparison."""
-        self._advance(data, Phase.PENDING_FIRST_APPROVAL, output_key=None, output_value=None)
+        """Phase 3: run SpecComparisonAgent for all candidates, then stay in COMPARISON.
+
+        Does NOT auto-advance. The UI drives the transition to PENDING_FIRST_APPROVAL
+        when the user selects a candidate via select_candidate().
+        """
+        import os
+        from utils.procurement_agent.agents.spec_comparison_agent import SpecComparisonAgent
+
+        run   = self._dict_to_model(data)
+        agent = SpecComparisonAgent(
+            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        )
+        sr = data.get("sourcing_results_json") or {}
+        if not sr:
+            logger.info("[%s] Comparison: no sourcing results — skipping.", self.run_id)
+            return  # stay in COMPARISON
+
+        enriched_sr = dict(sr)
+        for tier_key, tier_num in [("tier_1", 1), ("tier_2", 2), ("tier_3", 3)]:
+            tier_data = sr.get(tier_key) or {}
+            results   = list(tier_data.get("results") or [])
+            for idx, candidate in enumerate(results):
+                candidate["_candidate_id"] = f"{tier_key}_{idx}"
+                try:
+                    artifact = agent.run(run, candidate, tier=tier_num)
+                    candidate["comparison_artifact"] = artifact
+                except Exception as exc:
+                    logger.warning("[%s] Comparison failed for %s[%d]: %s",
+                                   self.run_id, tier_key, idx, exc)
+                    candidate["comparison_artifact"] = None
+            enriched_sr[tier_key] = dict(tier_data, results=results)
+
+        update_run(
+            self.run_id,
+            {"sourcing_results_json": enriched_sr},
+            db_url=self._db_url,
+        )
+        self._write_audit(
+            run_data=data,
+            input_summary="Comparison phase: spec comparison artifacts generated for all candidates",
+        )
+        logger.info("[%s] Comparison artifacts attached — awaiting candidate selection.", self.run_id)
 
     def _stub_pending_first_approval(self, data: dict) -> None:
-        """Stub: Phase 3 replaces with ApprovalRulesEngine — auto-approves in stub mode."""
+        """Stub: auto-approves for test suite compatibility.
+
+        In production the UI calls submit_approval() directly.
+        """
         self._advance(data, Phase.APPROVED, output_key=None, output_value=None)
 
     def _stub_pending_second_approval(self, data: dict) -> None:
-        """Stub: Phase 3 replaces with second-approver workflow."""
+        """Stub: auto-approves second approval for test suite compatibility."""
         self._advance(data, Phase.APPROVED, output_key=None, output_value=None)
 
     def _stub_approved(self, data: dict) -> None:
