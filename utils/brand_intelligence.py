@@ -304,6 +304,84 @@ def get_parent_brand(manufacturer: str, equipment_type: str = "general") -> Opti
 
 
 # ---------------------------------------------------------------------------
+# Manufacturer alias resolution
+# ---------------------------------------------------------------------------
+
+# Static alias table for manufacturers that appeared in sourcing stress tests.
+# Keys are lowercase normalized. Values include the canonical name plus all
+# known brand lines, shortened forms, and parent company names that vendor
+# pages may use instead of the full corporate entity name.
+# Extend as new manufacturers surface in real queries.
+MANUFACTURER_ALIASES: dict[str, list[str]] = {
+    "hyundai heavy industries": [
+        "Hyundai Heavy Industries",
+        "Hyundai",
+        "Crown Triton",
+        "HD Hyundai Electric",
+        "Hyundai Electric",
+    ],
+    "endress+hauser": [
+        "Endress+Hauser",
+        "Endress Hauser",
+        "Endress-Hauser",
+        "E+H",
+    ],
+    "endress hauser": [
+        "Endress+Hauser",
+        "Endress Hauser",
+        "Endress-Hauser",
+        "E+H",
+    ],
+    "allen-bradley": [
+        "Allen-Bradley",
+        "Allen Bradley",
+        "Rockwell Automation",
+        "Rockwell",
+    ],
+    "allen bradley": [
+        "Allen-Bradley",
+        "Allen Bradley",
+        "Rockwell Automation",
+        "Rockwell",
+    ],
+    "gusher pumps": [
+        "Gusher Pumps",
+        "Gusher",
+        "Ruthman Companies",
+    ],
+    "gusher": [
+        "Gusher Pumps",
+        "Gusher",
+        "Ruthman Companies",
+    ],
+    "john crane": [
+        "John Crane",
+        "Smiths Group",
+    ],
+}
+
+
+def get_manufacturer_aliases(manufacturer: str) -> list[str]:
+    """Return all known aliases for a manufacturer.
+
+    Includes the manufacturer's own name, parent company, subsidiaries, brand
+    lines, and common shortened forms used on vendor pages.
+
+    Returns the static MANUFACTURER_ALIASES list when a match is found, or a
+    single-element list containing the original name as a fallback so callers
+    always get at least one term to check against.
+    """
+    key = (manufacturer or "").lower().strip()
+    if key in MANUFACTURER_ALIASES:
+        return MANUFACTURER_ALIASES[key]
+    # Partial-key fallback: check if any alias key is contained in the manufacturer name
+    for alias_key, aliases in MANUFACTURER_ALIASES.items():
+        if alias_key in key:
+            return aliases
+    return [manufacturer] if manufacturer else []
+
+
+# ---------------------------------------------------------------------------
 # Bulk cache warm-up (for CLI refresh script)
 # ---------------------------------------------------------------------------
 

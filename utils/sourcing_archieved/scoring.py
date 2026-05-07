@@ -19,6 +19,7 @@ from utils.sourcing_archieved.constants import (
 from utils.brand_intelligence import (
     get_wrong_category_terms,
     get_parent_brand,
+    get_manufacturer_aliases,
 )
 
 
@@ -27,8 +28,26 @@ from utils.brand_intelligence import (
 # ---------------------------------------------------------------------------
 
 def _is_collection_url(url: str) -> bool:
-    u = url.lower()
-    return any(p in u for p in _COLLECTION_URL_PATTERNS)
+    """Detect collection / category / search pages vs direct product pages.
+
+    Checks only the URL path and query components — not the full URL string —
+    to avoid false positives when collection patterns appear in domain names
+    (e.g., "pumpcatalog.com" contains "catalog" but is not a collection URL).
+    """
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url.lower())
+        path   = parsed.path
+        query  = f"?{parsed.query}" if parsed.query else ""
+        path_patterns  = [p for p in _COLLECTION_URL_PATTERNS if p.startswith("/")]
+        query_patterns = [p for p in _COLLECTION_URL_PATTERNS if p.startswith("?") or p.startswith("&")]
+        if any(p in path for p in path_patterns):
+            return True
+        if query and any(p in query for p in query_patterns):
+            return True
+        return False
+    except Exception:
+        return False
 
 
 def _is_low_value_landing_page(url: str, snippet: str, searched_pn: str) -> bool:
@@ -200,21 +219,24 @@ def _compute_suitability_score(specs, snippet: str, url: str,
       Authorized dist : 0-20 pts  (bonus for authorized distributor / service center)
       Direct URL      : 0-10 pts  (product page vs list/search page)
     """
-    s       = (snippet or "").lower()
-    u_lower = url.lower()
+    s = (snippet or "").lower()
 
     _spn_early = (specs.part_number or "").upper().strip()
     if _is_low_value_landing_page(url, snippet, _spn_early):
         return 0.0
 
-    # Guardrail 0: niche mismatch -- hard 0.0 when 2+ wrong-category terms appear.
+    # Guardrail 0: niche mismatch — hard 0.0 when 3+ wrong-category terms appear in
+    # the snippet.  Counts only snippet hits (not URL hits) to avoid false-positives
+    # on catalog vendors with multi-category navigation breadcrumbs in their URLs
+    # (e.g., /products/motors-pumps-seals/).  Threshold of 3 distinguishes genuinely
+    # off-topic content from incidental category mentions on broad-line distributors.
     dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
     _equip_kw = _detect_equip_type(specs)
     if _equip_kw:
         _bad_terms = get_wrong_category_terms(specs.manufacturer, _equip_kw)
         if _bad_terms:
-            hit_count = sum(1 for t in _bad_terms if t in s or t in u_lower)
-            if hit_count >= 2:
+            snippet_hits = sum(1 for t in _bad_terms if t in s)
+            if snippet_hits >= 3:
                 return 0.0
 
     # Guardrail 0b: motor-without-electric verification
@@ -241,9 +263,16 @@ def _compute_suitability_score(specs, snippet: str, url: str,
             matched  = sum(1 for w in words if w in s)
             type_pts = round(15 * matched / len(words))
 
-    # Manufacturer match
-    mfg     = (specs.manufacturer or "").lower()
-    mfg_pts = 10 if (mfg and mfg not in ("unknown", "n/a", "null") and mfg in s) else 0
+    # Manufacturer match — check all known aliases so vendor pages referencing a
+    # brand line (e.g., "Crown Triton") match specs that use the parent corporate
+    # name (e.g., "Hyundai Heavy Industries").
+    mfg = (specs.manufacturer or "").lower()
+    mfg_pts = 0
+    if mfg and mfg not in ("unknown", "n/a", "null"):
+        for _alias in get_manufacturer_aliases(specs.manufacturer):
+            if _alias.lower() in s:
+                mfg_pts = 10
+                break
 
     # Parent brand bonus: brand intelligence resolves child brand -> parent company.
     _parent = get_parent_brand(mfg.strip(), _detect_equip_type(specs))
