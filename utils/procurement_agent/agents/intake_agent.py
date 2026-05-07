@@ -3,13 +3,9 @@ Intake Agent — multimodal data extraction, sufficiency assessment, clarificati
 
 Brief reference: Section 3.1, Section 8.1.
 
-Phase 2 implementation:
-  - Multimodal extraction: text (Claude Sonnet) or text + image (Claude Sonnet vision)
-  - Confidence scoring: manufacturer_confidence and part_id_confidence (0-100)
-  - Sufficiency gate: both confidences >= 70 AND category-required fields populated
-  - Dynamic single-question clarification via Claude Haiku when not sufficient
-  - Manufacturer correction cascade preserves classification_correction for audit log
-  - "force_proceed" escapes the sufficiency gate regardless of confidence
+Rectification Sprint additions:
+  - Fix 1: classify_by_units() — units-based classification override post-VLM extraction
+  - Fix 3: assess_proceed_state() — asymmetric stop condition (mfg<70, pid≥80 proceeds with caveat)
 """
 
 import base64
@@ -32,9 +28,104 @@ CATEGORY_REQUIRED_FIELDS: dict[str, list[str]] = {
     "valve":                    ["detected_type", "connection_size"],
 }
 
-SUFFICIENCY_THRESHOLD = 70  # both manufacturer_confidence and part_id_confidence must reach this
+SUFFICIENCY_THRESHOLD = 70  # both confidences must reach this in the symmetric case
 
 _NULL_VALUES = {None, "", "null", "N/A", "Unknown", "UNKNOWN-PN", "none", "unknown"}
+
+# ---------------------------------------------------------------------------
+# Fix 1 — Units-based classification override
+# ---------------------------------------------------------------------------
+
+# Each rule: (required_fields_set, new_detected_type, new_category, priority)
+# Higher priority wins when multiple rules match.
+UNIT_CLASSIFICATION_RULES: list[tuple] = [
+    # Strong motor signals: NEMA frame or RPM are rarely found on non-motor nameplates.
+    (frozenset({"hp", "frame"}),    "induction motor",  "Equipment", 10),
+    (frozenset({"hp", "rpm"}),      "induction motor",  "Equipment",  9),
+    # hp+voltage alone is too ambiguous (pumps, compressors also carry both) — omitted.
+    (frozenset({"gpm", "psi"}),     "centrifugal pump", "Equipment",  8),
+    (frozenset({"bore_diameter"}),  "bearing",          "Part",       6),
+    (frozenset({"shaft_size"}),     "mechanical seal",  "Part",       6),
+]
+
+
+def classify_by_units(specs: dict) -> tuple:
+    """Return (detected_type, category, override_applied) based on present unit fields.
+
+    Fires only when the current detected_type conflicts with what the units imply.
+    Returns (None, None, False) when no override is warranted.
+    """
+    best_priority = -1
+    best_type: Optional[str] = None
+    best_cat:  Optional[str] = None
+
+    for required_fields, new_type, new_cat, priority in UNIT_CLASSIFICATION_RULES:
+        if priority <= best_priority:
+            continue
+        if all(specs.get(f) not in _NULL_VALUES for f in required_fields):
+            best_priority = priority
+            best_type = new_type
+            best_cat  = new_cat
+
+    if best_type is None:
+        return None, None, False
+
+    current_type = (specs.get("detected_type") or "").lower()
+    # Skip if the key equipment word (last word of best_type) is already in the current type.
+    best_base = best_type.split()[-1]
+    if best_base in current_type:
+        return None, None, False
+
+    return best_type, best_cat, True
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — Asymmetric stop condition
+# ---------------------------------------------------------------------------
+
+_PROCEED_CAVEAT = (
+    "Manufacturer identity could not be confirmed with high confidence. "
+    "The part type appears specific — sourcing will proceed with a broader search, "
+    "but verify results against original equipment documentation."
+)
+
+
+def _first_missing_required_field(specs: dict) -> Optional[str]:
+    detected = (specs.get("detected_type") or "").lower()
+    for key, fields in CATEGORY_REQUIRED_FIELDS.items():
+        if key in detected:
+            for field_name in fields:
+                if specs.get(field_name) in _NULL_VALUES:
+                    return field_name
+    return None
+
+
+def assess_proceed_state(
+    specs: dict, mfg_conf: float, part_conf: float
+) -> tuple:
+    """Return (state, missing_field, caveat_message).
+
+    States:
+        proceed_full_confidence          — both confident, required fields present
+        proceed_with_manufacturer_caveat — mfg<70, pid≥80; proceed with banner
+        needs_clarification              — both confident but a required field is missing
+        blocked_need_part_id             — mfg≥70, pid<70
+        blocked_need_either              — mfg<70 and pid<80
+    """
+    if mfg_conf >= SUFFICIENCY_THRESHOLD and part_conf >= SUFFICIENCY_THRESHOLD:
+        missing = _first_missing_required_field(specs)
+        if missing:
+            return "needs_clarification", missing, None
+        return "proceed_full_confidence", None, None
+
+    if mfg_conf < SUFFICIENCY_THRESHOLD and part_conf >= 80:
+        return "proceed_with_manufacturer_caveat", None, _PROCEED_CAVEAT
+
+    if mfg_conf >= SUFFICIENCY_THRESHOLD and part_conf < SUFFICIENCY_THRESHOLD:
+        return "blocked_need_part_id", "part_type", None
+
+    return "blocked_need_either", "manufacturer", None
+
 
 # ---------------------------------------------------------------------------
 # LLM prompts
@@ -152,12 +243,13 @@ class IntakeAgent:
                 - "part_id_confidence": float 0-100
                 - "sufficient": bool
                 - "follow_up_question": str | None
+                - "manufacturer_caveat": str | None
                 - "confidence_summary": dict
         """
-        text         = user_input.get("text", "") or ""
-        images       = user_input.get("images") or []
+        text          = user_input.get("text", "") or ""
+        images        = user_input.get("images") or []
         force_proceed = bool(user_input.get("force_proceed", False))
-        prior_specs  = run.asset_specs_json or {}
+        prior_specs   = run.asset_specs_json or {}
 
         # Extract from this turn's input
         if images:
@@ -171,6 +263,15 @@ class IntakeAgent:
             if v not in _NULL_VALUES:
                 merged[k] = v
 
+        # Fix 1: units-based classification override (runs after VLM merge)
+        new_type, new_cat, override_applied = classify_by_units(merged)
+        if override_applied:
+            old_type = merged.get("detected_type")
+            merged["detected_type"]          = new_type
+            merged["category"]               = new_cat
+            merged["classification_override"] = True
+            print(f"[IntakeAgent] Units classification override: {old_type!r} → {new_type!r}")
+
         mfg_conf  = float(extracted.get("manufacturer_confidence") or 0)
         part_conf = float(extracted.get("part_id_confidence") or 0)
 
@@ -181,15 +282,20 @@ class IntakeAgent:
                 "part_id_confidence":      part_conf,
                 "sufficient":              True,
                 "follow_up_question":      None,
+                "manufacturer_caveat":     None,
                 "confidence_summary": {
                     "manufacturer_confidence": mfg_conf,
                     "part_id_confidence":      part_conf,
                     "forced":                  True,
                     "reasoning":               extracted.get("confidence_reasoning"),
+                    "proceed_state":           "forced",
+                    "caveat":                  None,
                 },
             }
 
-        sufficient, missing_field = self._assess_sufficiency(merged, mfg_conf, part_conf)
+        # Fix 3: asymmetric stop condition
+        state, missing_field, caveat = assess_proceed_state(merged, mfg_conf, part_conf)
+        sufficient = state in ("proceed_full_confidence", "proceed_with_manufacturer_caveat")
 
         follow_up = None
         if not sufficient:
@@ -201,11 +307,14 @@ class IntakeAgent:
             "part_id_confidence":      part_conf,
             "sufficient":              sufficient,
             "follow_up_question":      follow_up,
+            "manufacturer_caveat":     caveat,
             "confidence_summary": {
                 "manufacturer_confidence": mfg_conf,
                 "part_id_confidence":      part_conf,
                 "missing_field":           missing_field,
                 "reasoning":               extracted.get("confidence_reasoning"),
+                "proceed_state":           state,
+                "caveat":                  caveat,
             },
         }
 
@@ -313,30 +422,6 @@ class IntakeAgent:
         except Exception:
             return {"manufacturer_confidence": 0, "part_id_confidence": 0,
                     "confidence_reasoning": "JSON parse failed"}
-
-    # ------------------------------------------------------------------
-    # Sufficiency assessment
-    # ------------------------------------------------------------------
-
-    def _assess_sufficiency(self, specs: dict, mfg_conf: float, part_conf: float) -> Tuple[bool, Optional[str]]:
-        """Return (sufficient, first_missing_field_name)."""
-        if mfg_conf < SUFFICIENCY_THRESHOLD:
-            return False, "manufacturer"
-        if part_conf < SUFFICIENCY_THRESHOLD:
-            return False, "part_type"
-
-        detected = (specs.get("detected_type") or "").lower()
-        required_fields: list[str] = []
-        for key, fields in CATEGORY_REQUIRED_FIELDS.items():
-            if key in detected:
-                required_fields = fields
-                break
-
-        for field_name in required_fields:
-            if specs.get(field_name) in _NULL_VALUES:
-                return False, field_name
-
-        return True, None
 
     # ------------------------------------------------------------------
     # Clarification generation

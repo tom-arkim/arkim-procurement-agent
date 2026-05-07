@@ -171,11 +171,24 @@ class TestMultimodalExtraction:
 # ---------------------------------------------------------------------------
 
 class TestSufficiency:
-    def test_fails_when_manufacturer_confidence_low(self):
+    def test_proceeds_with_caveat_when_only_manufacturer_confidence_low(self):
+        """Fix 3: mfg<70 but pid≥80 → proceed with caveat, not blocked."""
         agent = IntakeAgent(anthropic_api_key="test-key")
         with patch("requests.post") as mock_post:
             mock_post.return_value = _mock_anthropic_response(
                 _extracted({"manufacturer_confidence": 40, "manufacturer": None})
+            )
+            result = agent.run(_make_run(), {"text": "unknown device", "images": [], "force_proceed": False})
+
+        assert result["sufficient"] is True
+        assert result["manufacturer_caveat"] is not None
+
+    def test_fails_when_both_confidences_low(self):
+        """Both mfg<70 and pid<80 → blocked."""
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(
+                _extracted({"manufacturer_confidence": 40, "part_id_confidence": 45, "manufacturer": None})
             )
             result = agent.run(_make_run(), {"text": "unknown device", "images": [], "force_proceed": False})
 
@@ -322,12 +335,14 @@ class TestNoApiKey:
 
 class TestClarification:
     def test_generates_question_when_not_sufficient(self):
+        """Both confidences low → blocked_need_either → clarification question generated."""
         agent = IntakeAgent(anthropic_api_key="test-key")
         haiku_response = MagicMock()
         haiku_response.raise_for_status = MagicMock()
         haiku_response.json.return_value = {"content": [{"text": "What is the HP rating?"}]}
 
-        low_conf = _extracted({"manufacturer_confidence": 30})
+        # mfg=30, pid=55 → blocked_need_either (both < threshold and pid < 80)
+        low_conf = _extracted({"manufacturer_confidence": 30, "part_id_confidence": 55})
         with patch("requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_anthropic_response(low_conf),  # extraction call
@@ -339,7 +354,8 @@ class TestClarification:
 
     def test_fallback_question_on_clarification_error(self):
         agent = IntakeAgent(anthropic_api_key="test-key")
-        low_conf = _extracted({"manufacturer_confidence": 30})
+        # mfg=30, pid=55 → blocked, triggers clarification which then errors
+        low_conf = _extracted({"manufacturer_confidence": 30, "part_id_confidence": 55})
         with patch("requests.post") as mock_post:
             mock_post.side_effect = [
                 _mock_anthropic_response(low_conf),
@@ -373,3 +389,169 @@ class TestOutputContract:
             result = agent.run(_make_run(), {"text": "pump", "images": [], "force_proceed": False})
 
         assert "reasoning" in result["confidence_summary"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — Units-based classification override
+# ---------------------------------------------------------------------------
+
+class TestUnitsClassification:
+    def test_motor_units_hp_frame_override_pump(self):
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": "centrifugal pump",
+            "category":      "Equipment",
+            "manufacturer":  "Crown",
+            "hp":            "5",
+            "frame":         "184T",
+            "rpm":           None,
+            "voltage":       "460V",
+        }
+        new_type, new_cat, override = classify_by_units(specs)
+        assert override is True
+        assert "motor" in new_type.lower()
+        assert new_cat == "Equipment"
+
+    def test_motor_units_hp_rpm_override_non_motor(self):
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": "industrial device",
+            "hp":            "10",
+            "rpm":           "1800",
+        }
+        new_type, new_cat, override = classify_by_units(specs)
+        assert override is True
+        assert "motor" in new_type.lower()
+
+    def test_pump_units_gpm_psi_fire(self):
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": None,
+            "gpm":           "32",
+            "psi":           "150",
+            "manufacturer":  "Grundfos",
+        }
+        new_type, new_cat, override = classify_by_units(specs)
+        assert override is True
+        assert "pump" in new_type.lower()
+        assert new_cat == "Equipment"
+
+    def test_no_units_no_override(self):
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {"detected_type": "centrifugal pump", "manufacturer": "Grundfos"}
+        _, _, override = classify_by_units(specs)
+        assert override is False
+
+    def test_motor_already_classified_no_override(self):
+        from utils.procurement_agent.agents.intake_agent import classify_by_units
+        specs = {
+            "detected_type": "induction motor",
+            "hp":            "5",
+            "frame":         "184T",
+        }
+        _, _, override = classify_by_units(specs)
+        assert override is False
+
+    def test_classify_by_units_wired_into_run(self):
+        """When VLM misclassifies as pump but motor units present, run() overrides."""
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        pump_with_motor_units = _extracted({
+            "detected_type": "centrifugal pump",
+            "category":      "Equipment",
+            "hp":            "5",
+            "frame":         "184T",
+            "rpm":           "1800",
+            "manufacturer_confidence": 85,
+            "part_id_confidence":      80,
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(pump_with_motor_units)
+            result = agent.run(_make_run(), {"text": "Crown Triton 5HP motor", "images": [], "force_proceed": False})
+
+        assert "motor" in result["asset_specs"].get("detected_type", "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — Asymmetric stop condition
+# ---------------------------------------------------------------------------
+
+class TestAsymmetricStopCondition:
+    def test_proceed_full_confidence_both_high(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "centrifugal pump", "manufacturer": "Grundfos"}
+        state, missing, caveat = assess_proceed_state(specs, 92, 88)
+        assert state == "proceed_full_confidence"
+        assert caveat is None
+        assert missing is None
+
+    def test_proceed_with_manufacturer_caveat_pmc11_case(self):
+        """Endress+Hauser PMC11: mfg ~45, pid ~85 — should proceed with caveat."""
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "pressure sensor", "manufacturer": "Endress+Hauser", "model": "PMC11"}
+        state, missing, caveat = assess_proceed_state(specs, 45, 85)
+        assert state == "proceed_with_manufacturer_caveat"
+        assert caveat is not None
+        assert "manufacturer" in caveat.lower()
+
+    def test_proceed_with_manufacturer_caveat_pid_at_80(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "bearing"}
+        state, missing, caveat = assess_proceed_state(specs, 60, 80)
+        assert state == "proceed_with_manufacturer_caveat"
+
+    def test_blocked_need_part_id(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "unknown device"}
+        state, missing, caveat = assess_proceed_state(specs, 90, 55)
+        assert state == "blocked_need_part_id"
+        assert missing == "part_type"
+
+    def test_blocked_need_either_both_low(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {}
+        state, missing, caveat = assess_proceed_state(specs, 30, 40)
+        assert state == "blocked_need_either"
+        assert missing == "manufacturer"
+
+    def test_blocked_when_mfg_low_pid_between_70_and_79(self):
+        """pid=75 is >= threshold but < 80 — should still block."""
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "pump"}
+        state, missing, caveat = assess_proceed_state(specs, 50, 75)
+        assert state == "blocked_need_either"
+
+    def test_needs_clarification_missing_motor_hp(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {
+            "detected_type": "induction motor",
+            "hp":            None,
+            "voltage":       "460V",
+            "frame":         None,
+            "rpm":           None,
+        }
+        state, missing, caveat = assess_proceed_state(specs, 90, 88)
+        assert state == "needs_clarification"
+        assert missing is not None
+
+    def test_sufficient_true_when_caveat_state(self):
+        """proceed_with_manufacturer_caveat → sufficient=True in the full run() output."""
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        low_mfg_high_pid = _extracted({
+            "manufacturer_confidence": 45,
+            "part_id_confidence":      85,
+            "detected_type":           "pressure sensor",
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(low_mfg_high_pid)
+            result = agent.run(_make_run(), {"text": "PMC11 sensor", "images": [], "force_proceed": False})
+
+        assert result["sufficient"] is True
+        assert result["manufacturer_caveat"] is not None
+
+    def test_manufacturer_caveat_none_when_full_confidence(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(_extracted())
+            result = agent.run(_make_run(), {"text": "Grundfos CR32-5", "images": [], "force_proceed": False})
+
+        assert result["manufacturer_caveat"] is None

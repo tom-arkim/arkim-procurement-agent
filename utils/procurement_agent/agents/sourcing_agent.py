@@ -1,26 +1,23 @@
 """
-Sourcing Agent — runs all three tiers in parallel and returns ranked candidates.
+Sourcing Agent — runs all three tiers and returns ranked candidates.
 
 Brief reference: Section 3.3, Section 6, Section 8.3.
 
-Phase 2 implementation:
-  - Tier 1: Arkim onboarded supplier catalog (data/mock_tier1_suppliers.json)
-  - Tier 2: Tavily restricted to known marketplace domains (_call_enterprise_api)
-  - Tier 3: broader discovery — _discover_national_specialists + _discover_aftermarket_specialists
-  - concurrent.futures parallel execution with 30s timeout per tier
-  - Urgency-based TCA ranking: Emergency shifts speed weight to 50%
-  - in_warranty: Tier 3 skipped; warranty_banner added to output
+Rectification Sprint additions:
+  - Fix 2: normalize_part_number() — strips delimiters before Tier 1 PN comparison
+  - Fix 4: stem_part_number() — manufacturer-aware PN stemming for Tier 2 fallback search
+  - Fix 5: Tier 3 capability pivot — when Tier 2 returns 0, searches for authorized distributors
 """
 
 import dataclasses
 import json
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Optional
 
 from utils.models import ProcurementRun, AssetSpecs, SourcingOption
 
-# Path to the mock Tier 1 catalog — injected via patch in tests.
 _TIER1_CATALOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
     "data", "mock_tier1_suppliers.json",
@@ -42,6 +39,41 @@ _WARRANTY_BANNER = (
 _ASSETSPECS_FIELDS = {f.name for f in dataclasses.fields(AssetSpecs)}
 _REQUIRED_FIELDS   = {"manufacturer", "model", "part_number", "voltage"}
 
+_UNKNOWN_MANUFACTURERS = {"Unknown", "unknown", "N/A", "n/a", "", None}
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — Part number normalization
+# ---------------------------------------------------------------------------
+
+def normalize_part_number(pn: str) -> str:
+    """Strip all non-alphanumeric characters and uppercase for delimiter-agnostic comparison."""
+    if not pn:
+        return ""
+    return re.sub(r"[^A-Z0-9]", "", pn.upper())
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — Manufacturer-aware PN stemming
+# ---------------------------------------------------------------------------
+
+def stem_part_number(pn: str, manufacturer: str) -> Optional[str]:
+    """Return the family stem for a PN per manufacturer-specific rule, or None.
+
+    None means exact PN match is required (no stemming applies).
+    """
+    from utils.brand_intelligence import get_pn_stemming_rule
+    rule = get_pn_stemming_rule(manufacturer)
+    if not rule:
+        return None
+    normalized = normalize_part_number(pn)
+    m = re.match(rule["pattern"], normalized)
+    return m.group(rule["group"]) if m else None
+
+
+# ---------------------------------------------------------------------------
+# SourcingAgent
+# ---------------------------------------------------------------------------
 
 class SourcingAgent:
     """Runs three-tier vendor discovery and returns ranked per-tier result sets."""
@@ -61,17 +93,16 @@ class SourcingAgent:
     def run(self, run: ProcurementRun) -> dict:
         """Execute all three sourcing tiers for the run's AssetSpecs.
 
-        Args:
-            run: ProcurementRun with asset_specs_json, urgency_factor, warranty_status.
+        Tier 1 and Tier 2 run in parallel. Tier 3 runs after Tier 2 so it can
+        apply the capability pivot when Tier 2 returns zero results (Fix 5).
 
         Returns:
             dict with keys:
-                - "tier_1": {results, count, status}
-                - "tier_2": {results, count, status}
-                - "tier_3": {results, count, status}
+                - "tier_1", "tier_2", "tier_3": {results, count, status}
                 - "warranty_banner": str | None
                 - "urgency_applied": str
                 - "filters_applied": list[str]
+                - "tier3_capability_pivot": bool
         """
         specs_dict = run.asset_specs_json or {}
         specs      = self._dict_to_specs(specs_dict)
@@ -87,26 +118,35 @@ class SourcingAgent:
 
         self._patch_sourcing_keys()
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        # Tier 1 and Tier 2 in parallel
+        with ThreadPoolExecutor(max_workers=2) as executor:
             f1 = executor.submit(self._run_tier1, specs, weights)
             f2 = executor.submit(self._run_tier2, specs, weights)
-            f3 = executor.submit(self._run_tier3, specs, weights, warranty)
-
             tier1 = self._collect(f1, "tier_1")
             tier2 = self._collect(f2, "tier_2")
+
+        # Tier 3 after Tier 2 — needs tier2 count for capability pivot (Fix 5)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            f3 = executor.submit(self._run_tier3, specs, weights, warranty, tier2["count"])
             tier3 = self._collect(f3, "tier_3")
 
         filters: list[str] = []
         if warranty == "in_warranty":
             filters.append("in_warranty: aftermarket excluded from tier_3")
 
+        tier3_pivot = any(
+            r.get("search_type") == "capability_pivot"
+            for r in tier3.get("results", [])
+        )
+
         return {
-            "tier_1":          tier1,
-            "tier_2":          tier2,
-            "tier_3":          tier3,
-            "warranty_banner": _WARRANTY_BANNER if warranty == "in_warranty" else None,
-            "urgency_applied": urgency_label,
-            "filters_applied": filters,
+            "tier_1":                 tier1,
+            "tier_2":                 tier2,
+            "tier_3":                 tier3,
+            "warranty_banner":        _WARRANTY_BANNER if warranty == "in_warranty" else None,
+            "urgency_applied":        urgency_label,
+            "filters_applied":        filters,
+            "tier3_capability_pivot": tier3_pivot,
         }
 
     # ------------------------------------------------------------------
@@ -114,7 +154,7 @@ class SourcingAgent:
     # ------------------------------------------------------------------
 
     def _run_tier1(self, specs: AssetSpecs, weights: dict) -> list[dict]:
-        """Match against the Arkim onboarded supplier catalog."""
+        """Match against the Arkim onboarded supplier catalog (Fix 2: normalized PN)."""
         try:
             with open(_TIER1_CATALOG_PATH, "r") as fh:
                 catalog = json.load(fh)
@@ -122,22 +162,22 @@ class SourcingAgent:
             print(f"[SourcingAgent] Tier 1 catalog load failed: {exc}")
             return []
 
-        pn_lower  = (specs.part_number or "").lower().strip()
+        pn_norm   = normalize_part_number(specs.part_number or "")
         mfg_lower = (specs.manufacturer or "").lower().strip()
         results: list[dict] = []
 
         for supplier in catalog.get("suppliers", []):
             for item in supplier.get("inventory", []):
-                item_pn  = (item.get("part_number") or "").lower().strip()
-                item_mfg = (item.get("manufacturer") or "").lower().strip()
+                item_pn_norm = normalize_part_number(item.get("part_number") or "")
+                item_mfg     = (item.get("manufacturer") or "").lower().strip()
 
-                pn_match  = bool(pn_lower and item_pn and pn_lower == item_pn)
+                pn_match  = bool(pn_norm and item_pn_norm and pn_norm == item_pn_norm)
                 mfg_match = bool(mfg_lower and item_mfg and mfg_lower in item_mfg)
 
                 if not (pn_match or mfg_match):
                     continue
 
-                match_type = "Exact OEM" if pn_match else "Functional Alternative"
+                match_type  = "Exact OEM" if pn_match else "Functional Alternative"
                 suitability = 92.0 if pn_match else 58.0
                 confidence  = 90.0 if pn_match else 62.0
 
@@ -162,21 +202,48 @@ class SourcingAgent:
         return self._rank(results, weights)
 
     def _run_tier2(self, specs: AssetSpecs, weights: dict) -> list[dict]:
-        """Tavily search restricted to known marketplace domains (Grainger, McMaster, etc.)."""
+        """Tavily search restricted to known marketplace domains.
+
+        Fix 4: if the first search returns no results, retry with the stemmed PN.
+        """
         try:
             from utils.sourcing_archieved.enterprise_search import _call_enterprise_api
             options = _call_enterprise_api(specs, search_mode="exact")
             dicts   = [self._option_to_dict(o) for o in options]
+
+            # Fix 4 — stem-based fallback when exact search finds nothing
+            if not dicts:
+                stem = stem_part_number(specs.part_number or "", specs.manufacturer or "")
+                orig_norm = normalize_part_number(specs.part_number or "")
+                if stem and stem != orig_norm:
+                    stemmed_specs = dataclasses.replace(specs, part_number=stem)
+                    options2 = _call_enterprise_api(stemmed_specs, search_mode="broad")
+                    dicts = [self._option_to_dict(o) for o in options2]
+                    print(f"[SourcingAgent] Tier 2 stem fallback: {specs.part_number!r} → {stem!r}, {len(dicts)} result(s)")
+
             return self._rank(dicts, weights)
         except Exception as exc:
             print(f"[SourcingAgent] Tier 2 failed: {exc}")
             return []
 
-    def _run_tier3(self, specs: AssetSpecs, weights: dict, warranty: str) -> list[dict]:
-        """Broader market: national specialists + aftermarket equivalents."""
+    def _run_tier3(
+        self, specs: AssetSpecs, weights: dict, warranty: str, tier2_count: int = -1
+    ) -> list[dict]:
+        """Broader market discovery with Fix 5 capability pivot.
+
+        When tier2_count == 0 and manufacturer is known, pivots to an authorized
+        distributor search instead of the standard part-specific queries.
+        """
         if warranty == "in_warranty":
             print("[SourcingAgent] Tier 3 skipped — asset in warranty")
             return []
+
+        # Fix 5 — capability pivot when Tier 2 returned zero results
+        if tier2_count == 0 and specs.manufacturer not in _UNKNOWN_MANUFACTURERS:
+            print(f"[SourcingAgent] Tier 3 capability pivot — Tier 2 empty for {specs.manufacturer!r}")
+            results = self._capability_search(specs)
+            return self._rank(results, weights)
+
         try:
             from utils.sourcing_archieved.enterprise_search import (
                 _discover_national_specialists,
@@ -188,6 +255,52 @@ class SourcingAgent:
             return self._rank(combined, weights)
         except Exception as exc:
             print(f"[SourcingAgent] Tier 3 failed: {exc}")
+            return []
+
+    # ------------------------------------------------------------------
+    # Fix 5 — Capability search (Tier 3 pivot)
+    # ------------------------------------------------------------------
+
+    def _capability_search(self, specs: AssetSpecs) -> list[dict]:
+        """Search for authorized distributors when Tier 2 found nothing."""
+        mfg = (specs.manufacturer or "").strip()
+        if not mfg or mfg in _UNKNOWN_MANUFACTURERS:
+            return []
+
+        detected = (specs.detected_type or specs.category or "industrial equipment").strip()
+        query    = f"Authorized {mfg} {detected} distributor"
+
+        try:
+            import utils.sourcing_archieved as _arch
+            tavily = getattr(_arch, "_tavily", None)
+            if not tavily:
+                print("[SourcingAgent] Tier 3 capability pivot: no Tavily client available")
+                return []
+
+            response = tavily.search(query=query, max_results=5)
+            options  = []
+            for r in response.get("results", []):
+                options.append({
+                    "vendor_name":               r.get("title", "Unknown Distributor"),
+                    "base_price":                0.0,
+                    "lead_time_days":            7,
+                    "reliability_score":         70.0,
+                    "merchant_type":             "Capability Discovery",
+                    "match_type":                "Capability Pivot",
+                    "source_url":                r.get("url"),
+                    "price_tbd":                 True,
+                    "suitability_score":         65.0,
+                    "confidence_score":          60.0,
+                    "vendor_authorization_status": "Unverified",
+                    "onboarding_status":         "Not Onboarded",
+                    "in_stock":                  None,
+                    "notes":                     f"Capability pivot: {query}",
+                    "found_part_number":         None,
+                    "search_type":               "capability_pivot",
+                })
+            return options
+        except Exception as exc:
+            print(f"[SourcingAgent] Capability search failed: {exc}")
             return []
 
     # ------------------------------------------------------------------
@@ -248,12 +361,7 @@ class SourcingAgent:
         )
 
     def _patch_sourcing_keys(self) -> None:
-        """Inject API keys into both the shim and sourcing_archieved namespaces.
-
-        llm_parsing._anthropic_complete() reads from utils.sourcing (the shim).
-        enterprise_search and tavily_client read _tavily from utils.sourcing_archieved.
-        Both must be patched so call-time lazy reads find the correct values.
-        """
+        """Inject API keys into both the shim and sourcing_archieved namespaces."""
         try:
             import utils.sourcing as _shim
             import utils.sourcing_archieved as _arch

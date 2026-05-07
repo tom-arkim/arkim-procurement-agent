@@ -348,6 +348,32 @@ def all_cached_entries() -> list[dict]:
         return []
 
 
+# ---------------------------------------------------------------------------
+# Fix 4 — Manufacturer-aware PN stemming rules
+# ---------------------------------------------------------------------------
+
+# Maps a manufacturer name fragment (lowercase) to a regex + capture group.
+# Gusher Pumps and John Crane are deliberately omitted — exact PN is required.
+STEMMING_RULES: dict[str, dict] = {
+    # Endress+Hauser: PMC11-AA1U1HBWBJJ (normalized: PMC11AA1U1HBWBJJ) → PMC11
+    # The base model is alpha prefix + 2-4 digit suffix; ordering codes follow.
+    "endress":        {"pattern": r"^([A-Z]{2,5}\d{2,4})", "group": 1},
+    "e+h":            {"pattern": r"^([A-Z]{2,5}\d{2,4})", "group": 1},
+    # Allen-Bradley: 22B-D6P0N104 → 22B (drive series prefix)
+    "allen-bradley":  {"pattern": r"^(\d{2}[A-Z])", "group": 1},
+    "allen bradley":  {"pattern": r"^(\d{2}[A-Z])", "group": 1},
+}
+
+
+def get_pn_stemming_rule(manufacturer: str) -> Optional[dict]:
+    """Return the stemming rule for this manufacturer, or None if exact PN match is required."""
+    mfg = (manufacturer or "").lower().strip()
+    for key, rule in STEMMING_RULES.items():
+        if key in mfg:
+            return rule
+    return None
+
+
 def invalidate(manufacturer: str, equipment_type: str) -> bool:
     """Force re-discovery by setting last_accessed_at far in the past."""
     try:

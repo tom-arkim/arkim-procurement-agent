@@ -417,3 +417,238 @@ class TestDictToSpecs:
             "unknown_field_xyz": "should be ignored",
         })
         assert specs.manufacturer == "Test"
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — Alphanumeric PN normalization
+# ---------------------------------------------------------------------------
+
+class TestPartNumberNormalization:
+    def test_normalize_strips_hyphens(self):
+        from utils.procurement_agent.agents.sourcing_agent import normalize_part_number
+        assert normalize_part_number("MR-1-1375") == "MR11375"
+
+    def test_normalize_strips_slashes_and_dots(self):
+        from utils.procurement_agent.agents.sourcing_agent import normalize_part_number
+        assert normalize_part_number("22B/D6.P0") == "22BD6P0"
+
+    def test_normalize_is_uppercase(self):
+        from utils.procurement_agent.agents.sourcing_agent import normalize_part_number
+        assert normalize_part_number("mr-1-1375") == "MR11375"
+
+    def test_normalize_empty_string(self):
+        from utils.procurement_agent.agents.sourcing_agent import normalize_part_number
+        assert normalize_part_number("") == ""
+        assert normalize_part_number(None) == ""
+
+    def test_different_pns_do_not_collide(self):
+        from utils.procurement_agent.agents.sourcing_agent import normalize_part_number
+        assert normalize_part_number("MR-1-1375") != normalize_part_number("MR-8-1000")
+
+    def test_normalized_pn_matches_in_tier1(self, tmp_path):
+        """MR-1-1375 in user request matches MR11375 in catalog."""
+        catalog = {
+            "suppliers": [{
+                "name": "National Seal",
+                "reliability_score": 95.0,
+                "location": "Chicago, IL",
+                "website": "https://nationalseal.com",
+                "inventory": [{
+                    "part_number": "MR11375",
+                    "manufacturer": "John Crane",
+                    "price": 285.0,
+                    "lead_days": 2,
+                    "in_stock": True,
+                }]
+            }]
+        }
+        catalog_file = tmp_path / "catalog.json"
+        catalog_file.write_text(json.dumps(catalog))
+
+        agent = SourcingAgent()
+        run   = _make_run(specs={
+            "manufacturer": "John Crane",
+            "model":        "MR",
+            "part_number":  "MR-1-1375",
+            "voltage":      "N/A",
+        })
+
+        with patch("utils.procurement_agent.agents.sourcing_agent._TIER1_CATALOG_PATH", str(catalog_file)):
+            with patch.object(agent, "_run_tier2", return_value=[]):
+                with patch.object(agent, "_run_tier3", return_value=[]):
+                    result = agent.run(run)
+
+        assert result["tier_1"]["count"] >= 1
+        assert result["tier_1"]["results"][0]["match_type"] == "Exact OEM"
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — Manufacturer-aware PN stemming
+# ---------------------------------------------------------------------------
+
+class TestPNStemming:
+    def test_endress_hauser_pmc11_stems_correctly(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        result = stem_part_number("PMC11-AA1U1HBWBJJ", "Endress+Hauser")
+        assert result == "PMC11"
+
+    def test_endress_short_form_stems(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        result = stem_part_number("FTL20-AA2A", "Endress & Hauser")
+        assert result is not None
+        assert result.startswith("FTL")
+
+    def test_allen_bradley_stems_to_series(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        result = stem_part_number("22B-D6P0N104", "Allen-Bradley")
+        assert result == "22B"
+
+    def test_allen_bradley_alternate_spelling(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        result = stem_part_number("22C-D010N104", "Allen Bradley")
+        assert result == "22C"
+
+    def test_gusher_pumps_returns_none(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        assert stem_part_number("3TE-5", "Gusher Pumps") is None
+
+    def test_john_crane_returns_none(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        assert stem_part_number("MR-1-1375", "John Crane") is None
+
+    def test_unknown_manufacturer_returns_none(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        assert stem_part_number("ABC-123", "Generic Industrial Inc") is None
+
+    def test_empty_pn_returns_none(self):
+        from utils.procurement_agent.agents.sourcing_agent import stem_part_number
+        assert stem_part_number("", "Endress+Hauser") is None
+
+
+# ---------------------------------------------------------------------------
+# Fix 5 — Tier 3 capability pivot
+# ---------------------------------------------------------------------------
+
+class TestTier3CapabilityPivot:
+    def test_capability_pivot_fires_when_tier2_empty(self):
+        agent  = SourcingAgent()
+        specs  = agent._dict_to_specs({
+            "manufacturer": "Endress+Hauser",
+            "model":        "PMC11",
+            "part_number":  "PMC11",
+            "voltage":      "N/A",
+            "detected_type": "pressure sensor",
+        })
+        weights = _URGENCY_WEIGHTS["predictive"]
+
+        mock_tavily = MagicMock()
+        mock_tavily.search.return_value = {"results": [
+            {"title": "EH Distributor", "url": "https://eh-dist.com"},
+        ]}
+
+        with patch("utils.sourcing_archieved._tavily", mock_tavily):
+            result = agent._run_tier3(specs, weights, "unknown", tier2_count=0)
+
+        mock_tavily.search.assert_called_once()
+        query_used = mock_tavily.search.call_args[1]["query"]
+        assert "Endress" in query_used or "endress" in query_used.lower()
+
+        assert isinstance(result, list)
+        if result:
+            assert result[0].get("search_type") == "capability_pivot"
+
+    def test_capability_pivot_tags_results(self):
+        agent  = SourcingAgent()
+        specs  = agent._dict_to_specs({
+            "manufacturer":  "Grundfos",
+            "model":         "CR32-5",
+            "part_number":   "96516888",
+            "voltage":       "460V",
+            "detected_type": "centrifugal pump",
+        })
+        weights = _URGENCY_WEIGHTS["predictive"]
+
+        mock_tavily = MagicMock()
+        mock_tavily.search.return_value = {"results": [
+            {"title": "Grundfos Authorized", "url": "https://grundfos-auth.com"},
+            {"title": "Pump Supply Co",       "url": "https://pumpsupply.com"},
+        ]}
+
+        with patch("utils.sourcing_archieved._tavily", mock_tavily):
+            result = agent._run_tier3(specs, weights, "unknown", tier2_count=0)
+
+        assert all(r.get("search_type") == "capability_pivot" for r in result)
+
+    def test_no_pivot_when_tier2_has_results(self):
+        agent  = SourcingAgent()
+        specs  = agent._dict_to_specs({
+            "manufacturer": "Grundfos",
+            "model":        "CR32-5",
+            "part_number":  "96516888",
+            "voltage":      "460V",
+        })
+        weights = _URGENCY_WEIGHTS["predictive"]
+
+        with patch("utils.sourcing_archieved.enterprise_search._discover_national_specialists",
+                   return_value=[]):
+            with patch("utils.sourcing_archieved.enterprise_search._discover_aftermarket_specialists",
+                       return_value=[]):
+                result = agent._run_tier3(specs, weights, "unknown", tier2_count=3)
+
+        assert isinstance(result, list)
+
+    def test_no_pivot_for_unknown_manufacturer(self):
+        agent  = SourcingAgent()
+        specs  = agent._dict_to_specs({
+            "manufacturer": "Unknown",
+            "model":        "UNK",
+            "part_number":  "UNK-001",
+            "voltage":      "N/A",
+        })
+        weights = _URGENCY_WEIGHTS["predictive"]
+
+        mock_tavily = MagicMock()
+        with patch("utils.sourcing_archieved._tavily", mock_tavily):
+            with patch("utils.sourcing_archieved.enterprise_search._discover_national_specialists",
+                       return_value=[]):
+                with patch("utils.sourcing_archieved.enterprise_search._discover_aftermarket_specialists",
+                           return_value=[]):
+                    agent._run_tier3(specs, weights, "unknown", tier2_count=0)
+
+        mock_tavily.search.assert_not_called()
+
+    def test_tier3_default_tier2_count_no_pivot(self):
+        """Default tier2_count=-1 must not trigger pivot (backward compat)."""
+        agent  = SourcingAgent()
+        specs  = agent._dict_to_specs({
+            "manufacturer": "Grundfos",
+            "model":        "CR32-5",
+            "part_number":  "96516888",
+            "voltage":      "460V",
+        })
+        weights = _URGENCY_WEIGHTS["predictive"]
+
+        mock_tavily = MagicMock()
+        with patch("utils.sourcing_archieved._tavily", mock_tavily):
+            with patch("utils.sourcing_archieved.enterprise_search._discover_national_specialists",
+                       return_value=[]):
+                with patch("utils.sourcing_archieved.enterprise_search._discover_aftermarket_specialists",
+                           return_value=[]):
+                    agent._run_tier3(specs, weights, "unknown")  # no tier2_count arg
+
+        mock_tavily.search.assert_not_called()
+
+    def test_run_output_includes_tier3_capability_pivot_flag(self, tmp_path):
+        catalog_file = tmp_path / "mock_tier1_suppliers.json"
+        catalog_file.write_text(json.dumps({"suppliers": []}))
+
+        agent = SourcingAgent()
+        run   = _make_run()
+
+        with patch("utils.procurement_agent.agents.sourcing_agent._TIER1_CATALOG_PATH", str(catalog_file)):
+            with patch.object(agent, "_run_tier2", return_value=[]):
+                with patch.object(agent, "_run_tier3", return_value=[]):
+                    result = agent.run(run)
+
+        assert "tier3_capability_pivot" in result
+        assert isinstance(result["tier3_capability_pivot"], bool)
