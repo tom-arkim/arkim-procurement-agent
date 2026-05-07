@@ -156,6 +156,7 @@ def _render_intake(run_id: str, run: dict) -> None:
     specs_key      = f"intake_specs_{run_id}"
     followup_key   = f"intake_followup_{run_id}"
     sufficient_key = f"intake_sufficient_{run_id}"
+    pending_key    = f"intake_pending_{run_id}"
 
     if chat_key not in st.session_state:
         st.session_state[chat_key] = []
@@ -165,6 +166,8 @@ def _render_intake(run_id: str, run: dict) -> None:
         st.session_state[followup_key] = None
     if sufficient_key not in st.session_state:
         st.session_state[sufficient_key] = False
+    if pending_key not in st.session_state:
+        st.session_state[pending_key] = None
 
     st.markdown("#### Intake — Part Specification")
     st.caption(
@@ -200,7 +203,7 @@ def _render_intake(run_id: str, run: dict) -> None:
         mc2.metric("Part ID Confidence", f"{pconf:.0f}%")
         return
 
-    # --- Chat history ---
+    # --- Chat history (rendered before any spinner so user message is visible first) ---
     for msg in st.session_state[chat_key]:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
@@ -210,39 +213,22 @@ def _render_intake(run_id: str, run: dict) -> None:
     if followup:
         st.info(f"**Question:** {followup}")
 
-    # --- Image upload ---
-    uploaded_files = st.file_uploader(
-        "Upload nameplate photo(s) (JPG / PNG)",
-        type=["jpg", "jpeg", "png", "webp"],
-        accept_multiple_files=True,
-        key=f"img_upload_{run_id}",
-    )
-
-    # --- Chat input ---
-    user_text = st.chat_input("Describe the part or equipment...")
-
-    if user_text or uploaded_files:
-        text_to_show = user_text or "(uploaded image)"
-        st.session_state[chat_key].append({"role": "user", "content": text_to_show})
-
-        # Render user message immediately in this pass so it's visible during the agent call
-        with st.chat_message("user"):
-            st.write(text_to_show)
-
-        images = [f.read() for f in (uploaded_files or [])]
-
+    # --- Phase 2: pending agent run ---
+    # User message is already in chat history above. Run the agent now and show spinner below it.
+    pending = st.session_state.get(pending_key)
+    if pending:
+        st.session_state[pending_key] = None
         from utils.procurement_agent.agents.intake_agent import IntakeAgent
-        agent    = IntakeAgent(anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"))
+        agent     = IntakeAgent(anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"))
         run_model = _dict_to_procurement_run(run)
         run_model.asset_specs_json = st.session_state[specs_key]
 
-        prior_question = st.session_state.get(followup_key)
         with st.spinner("Extracting specifications..."):
             result = agent.run(run_model, {
-                "text":           user_text or "",
-                "images":         images,
+                "text":           pending["text"],
+                "images":         pending["images"],
                 "force_proceed":  False,
-                "prior_question": prior_question,
+                "prior_question": pending["prior_question"],
             })
 
         if st.session_state.get(followup_key):
@@ -258,6 +244,28 @@ def _render_intake(run_id: str, run: dict) -> None:
             assistant_msg = result.get("follow_up_question") or "Could you provide more details?"
 
         st.session_state[chat_key].append({"role": "assistant", "content": assistant_msg})
+        st.rerun()
+
+    # --- Image upload ---
+    uploaded_files = st.file_uploader(
+        "Upload nameplate photo(s) (JPG / PNG)",
+        type=["jpg", "jpeg", "png", "webp"],
+        accept_multiple_files=True,
+        key=f"img_upload_{run_id}",
+    )
+
+    # --- Phase 1: record new message and rerun immediately ---
+    # This guarantees the user's message renders in the history loop above before the agent runs.
+    user_text = st.chat_input("Describe the part or equipment...")
+
+    if user_text or uploaded_files:
+        text_to_show = user_text or "(uploaded image)"
+        st.session_state[chat_key].append({"role": "user", "content": text_to_show})
+        st.session_state[pending_key] = {
+            "text":           user_text or "",
+            "images":         [f.read() for f in (uploaded_files or [])],
+            "prior_question": st.session_state.get(followup_key),
+        }
         st.rerun()
 
     # --- Partial specs + force proceed ---
@@ -499,6 +507,87 @@ def _render_candidate_card_with_comparison(run_id: str, opt: dict, tier_key: str
     return selected
 
 
+def _render_tier3_card_checkbox(run_id: str, opt: dict, idx: int) -> None:
+    """Render a Tier 3 candidate card with a checkbox (for multi-vendor outreach)."""
+    vendor     = opt.get("vendor_name") or "Unknown"
+    price      = opt.get("base_price") or 0
+    price_tbd  = opt.get("price_tbd", False)
+    lead       = opt.get("lead_time_days") or "—"
+    url        = opt.get("source_url")
+    auth       = opt.get("vendor_authorization_status") or ""
+    artifact   = opt.get("comparison_artifact")
+    match_type = opt.get("match_type") or "—"
+
+    price_str = "Quote Required" if price_tbd or not price else f"${price:,.2f}"
+    auth_tag  = " ✓ Authorized" if auth == "Authorized" else ""
+
+    with st.container():
+        c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+        with c1:
+            if url:
+                st.markdown(f"**[{vendor}]({url})**{auth_tag}")
+            else:
+                st.markdown(f"**{vendor}**{auth_tag}")
+            st.caption(match_type)
+        with c2:
+            st.metric("Price", price_str)
+        with c3:
+            st.metric("Lead Time", f"{lead}d" if isinstance(lead, int) else str(lead))
+        with c4:
+            chk_key = f"t3_chk_{run_id}_{idx}"
+            if chk_key not in st.session_state:
+                st.session_state[chk_key] = True
+            st.checkbox("Include", key=chk_key, label_visibility="visible")
+
+        if artifact:
+            with st.expander("Spec Comparison", expanded=False):
+                _render_comparison_artifact(artifact)
+
+        st.markdown("---")
+
+
+def _render_outreach_campaign(run_id: str, campaign: dict) -> None:
+    """Render the outreach campaign confirmation state with draft emails."""
+    outreach_key = f"outreach_state_{run_id}"
+    vendors = campaign.get("vendors") or []
+    drafts  = campaign.get("drafts") or {}
+
+    st.success(
+        f"Outreach queued for **{len(vendors)}** vendor(s): "
+        + ", ".join(f"**{v}**" for v in vendors)
+    )
+    st.caption("Audit log updated. Review drafts below, then confirm to route to approval.")
+
+    for vendor_name in vendors:
+        draft = drafts.get(vendor_name, "")
+        with st.expander(f"Draft — {vendor_name}", expanded=False):
+            st.code(draft, language="text")
+            st.caption("Review only — outreach email is not sent automatically in this prototype.")
+
+    st.divider()
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Confirm & Route to Approval", type="primary",
+                     key=f"confirm_outreach_{run_id}"):
+            try:
+                orch = Orchestrator(run_id)
+                orch.select_candidate({
+                    "vendor_name":      f"Multi-Vendor Outreach ({len(vendors)} vendors)",
+                    "base_price":       0.0,
+                    "grand_total_usd":  0.0,
+                    "price_tbd":        True,
+                    "outreach_vendors": vendors,
+                })
+                st.session_state[outreach_key] = None
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not initiate approval: {exc}")
+    with col2:
+        if st.button("Cancel — Revise Selection", key=f"cancel_outreach_{run_id}"):
+            st.session_state[outreach_key] = None
+            st.rerun()
+
+
 def _render_approval_history(history: list) -> None:
     if not history:
         st.caption("No approvals recorded yet.")
@@ -516,9 +605,16 @@ def _render_approval_history(history: list) -> None:
 
 
 def _render_comparison_phase(run_id: str, run: dict) -> None:
-    """COMPARISON phase: show candidates with artifacts; user selects one."""
+    """COMPARISON phase: show candidates with artifacts; user selects one.
+
+    Tier 1 / Tier 2: single-vendor Select buttons.
+    Tier 3 (Quote Required): multi-vendor checkboxes + Send Outreach button.
+    """
     st.markdown("### Review Candidates & Select")
-    st.caption("Spec comparison artifacts are shown for each candidate. Select a candidate to initiate approval.")
+    st.caption(
+        "Spec comparison artifacts are shown for each candidate. "
+        "Select a Tier 1/2 candidate to initiate approval, or select multiple Tier 3 vendors for parallel outreach."
+    )
 
     sr = run.get("sourcing_results_json") or {}
     if not sr:
@@ -543,24 +639,54 @@ def _render_comparison_phase(run_id: str, run: dict) -> None:
                     st.error(f"Comparison failed: {exc}")
         return
 
-    selected_candidate = None
-    selected_tier = None
+    outreach_key = f"outreach_state_{run_id}"
+    if outreach_key not in st.session_state:
+        st.session_state[outreach_key] = None
 
+    selected_candidate = None
+
+    # Tier 1 and Tier 2 — single-vendor Select buttons
     for tier_key, tier_label in [("tier_1", "Tier 1 — Arkim Network"),
-                                  ("tier_2", "Tier 2 — Marketplace"),
-                                  ("tier_3", "Tier 3 — Broader Market")]:
+                                  ("tier_2", "Tier 2 — Marketplace")]:
         tier_data = sr.get(tier_key) or {}
         results   = tier_data.get("results") or []
         if not results:
             continue
-
-        tier_num = int(tier_key[-1])
         st.markdown(f"#### {tier_label}")
         for idx, opt in enumerate(results):
             clicked = _render_candidate_card_with_comparison(run_id, opt, tier_key, idx)
             if clicked:
                 selected_candidate = opt
-                selected_tier      = tier_num
+
+    # Tier 3 — multi-vendor checkboxes + outreach campaign
+    t3_data    = sr.get("tier_3") or {}
+    t3_results = t3_data.get("results") or []
+    if t3_results:
+        st.markdown("#### Tier 3 — Broader Market")
+        st.caption("Select one or more vendors for parallel quote outreach.")
+
+        outreach_state = st.session_state.get(outreach_key)
+        if outreach_state:
+            _render_outreach_campaign(run_id, outreach_state)
+        else:
+            for idx, opt in enumerate(t3_results):
+                _render_tier3_card_checkbox(run_id, opt, idx)
+
+            checked_vendors = [
+                opt for idx, opt in enumerate(t3_results)
+                if st.session_state.get(f"t3_chk_{run_id}_{idx}", True)
+            ]
+            if checked_vendors:
+                if st.button(
+                    f"Send Outreach to {len(checked_vendors)} Selected Vendor(s)",
+                    type="primary",
+                    key=f"t3_outreach_btn_{run_id}",
+                ):
+                    from utils.procurement_agent.outreach import initiate_outreach_campaign
+                    specs    = run.get("asset_specs_json") or {}
+                    campaign = initiate_outreach_campaign(run_id, checked_vendors, specs)
+                    st.session_state[outreach_key] = campaign
+                    st.rerun()
 
     if selected_candidate is not None:
         try:

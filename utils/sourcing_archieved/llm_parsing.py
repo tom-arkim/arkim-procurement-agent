@@ -61,9 +61,9 @@ def _anthropic_complete(system: str, user: str) -> str:
     """Call the Anthropic Messages API directly over HTTP.
 
     Reads ANTHROPIC_API_KEY and _EXTRACTION_MODEL from the package at call time
-    so that _patch_sourcing_keys() in chat_app.py takes effect before first use.
+    so that _patch_sourcing_keys() takes effect before first use.
     """
-    import utils.sourcing as _pkg
+    import utils.sourcing_archieved as _pkg
     api_key = _pkg.ANTHROPIC_API_KEY
     model   = _pkg._EXTRACTION_MODEL
 
@@ -99,7 +99,7 @@ def _llm_parse_results(specs, results: list[dict]) -> list[dict]:
     if not results:
         return []
 
-    import utils.sourcing as _pkg
+    import utils.sourcing_archieved as _pkg
     if not _pkg.ANTHROPIC_API_KEY:
         print("[Sourcing] No Anthropic API key — cannot parse results.")
         return []

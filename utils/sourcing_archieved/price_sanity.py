@@ -37,7 +37,7 @@ def _apply_price_sanity(items: list[dict], specs=None) -> list[dict]:
     Single-price case: validate against a market-reference Tavily search.
     Flagged items -> price stripped, price_sanity_flagged=True, suitability zeroed later.
     """
-    import utils.sourcing as _pkg
+    import utils.sourcing_archieved as _pkg
 
     prices = [float(it["price"]) for it in items
               if it.get("price") is not None and float(it.get("price", 0)) > 0]
