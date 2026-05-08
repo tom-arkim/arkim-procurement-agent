@@ -1,0 +1,254 @@
+/* Arkim Sourcing Engine — Global CSS
+   CSS custom properties are the single source of truth for the design system.
+   tailwind.config.ts references these vars so Tailwind utilities and raw CSS
+   stay in sync automatically. */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* -------------------------------------------------------------------------
+   Design tokens
+   ------------------------------------------------------------------------- */
+:root {
+  /* Surface scale (cool slate, low chroma) */
+  --bg-0: #07090d;
+  --bg-1: #0b0e14;
+  --bg-2: #0f1219;
+  --bg-3: #141823;
+  --bg-4: #1a1f2c;
+
+  /* Hairlines */
+  --hr-1: #161a23;
+  --hr-2: #1f2533;
+  --hr-3: #2b3346;
+  --hr-4: #3a4458;
+
+  /* Text */
+  --fg-1: #e8edf5;
+  --fg-2: #aab3c4;
+  --fg-3: #6f7a8e;
+  --fg-4: #4a5366;
+
+  /* Action — Blue */
+  --blue-fg: #7bb3ff;
+  --blue-50: #60a5fa;
+  --blue-60: #4f93ee;
+  --blue-70: #3a7fdb;
+  --blue-tint: rgba(96, 165, 250, 0.10);
+  --blue-line: rgba(96, 165, 250, 0.32);
+
+  /* State — Green */
+  --green-fg: #56d3a3;
+  --green-50: #34d399;
+  --green-tint: rgba(52, 211, 153, 0.10);
+  --green-line: rgba(52, 211, 153, 0.30);
+
+  /* State — Amber */
+  --amber-fg: #f5c14d;
+  --amber-50: #f5b231;
+  --amber-tint: rgba(245, 178, 49, 0.10);
+  --amber-line: rgba(245, 178, 49, 0.32);
+
+  /* State — Red */
+  --red-fg: #f08a8a;
+  --red-50: #ef6262;
+  --red-tint: rgba(239, 98, 98, 0.10);
+  --red-line: rgba(239, 98, 98, 0.32);
+
+  /* Font stacks (resolved by next/font in layout.tsx) */
+  --font-inter: "Inter", system-ui, sans-serif;
+  --font-jetbrains: "JetBrains Mono", ui-monospace, monospace;
+}
+
+/* -------------------------------------------------------------------------
+   Base
+   ------------------------------------------------------------------------- */
+@layer base {
+  * {
+    box-sizing: border-box;
+    border-color: var(--hr-2);
+  }
+
+  html,
+  body {
+    background-color: var(--bg-1);
+    color: var(--fg-1);
+    font-family: var(--font-inter), system-ui, sans-serif;
+    font-size: 13.5px;
+    line-height: 1.45;
+    letter-spacing: -0.005em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Quiet scrollbars throughout */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--hr-3) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--hr-3);
+    border-radius: 3px;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   Component layer — shared Arkim patterns expressed as Tailwind @layer so
+   they remain purgeable. These mirror the .ark .* classes from styles.css
+   and can be applied via className in TSX.
+   ------------------------------------------------------------------------- */
+@layer components {
+
+  /* Mono tag: part numbers, IDs, prices, dimensions */
+  .mono {
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-feature-settings: "ss01" on, "ss02" on, "zero" on;
+    letter-spacing: 0;
+  }
+
+  /* Tabular numerals */
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Capslock label (BRAND · SERIES, tier names, etc.) */
+  .cap {
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-size: 10.5px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.10em;
+    color: var(--fg-3);
+  }
+
+  /* Run ID chip */
+  .run-id {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-size: 11.5px;
+    color: var(--fg-2);
+    background: var(--bg-3);
+    border: 1px solid var(--hr-2);
+    border-radius: 4px;
+    padding: 3px 8px;
+    height: 24px;
+    letter-spacing: 0;
+  }
+
+  /* Dot-leader for label / value pairs */
+  .leader {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .leader .lbl {
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-3);
+    white-space: nowrap;
+  }
+  .leader .dots {
+    flex: 1;
+    border-bottom: 1px dashed var(--hr-2);
+    transform: translateY(-3px);
+  }
+  .leader .val {
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-size: 12.5px;
+    color: var(--fg-1);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* Section caption (UPPERCASE LABEL ———) */
+  .section-cap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--fg-3);
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+  }
+  .section-cap .rule {
+    flex: 1;
+    height: 1px;
+    background: var(--hr-2);
+  }
+
+  /* Diagonal "verified" stamp */
+  .stamp {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-size: 10.5px;
+    color: var(--green-fg);
+    border: 1px solid var(--green-line);
+    padding: 2px 6px;
+    border-radius: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  /* Outreach button — subtle diagonal cross-hatch */
+  .outreach-btn {
+    background:
+      repeating-linear-gradient(
+        135deg,
+        rgba(123, 179, 255, 0) 0 4px,
+        rgba(123, 179, 255, 0.06) 4px 5px
+      ),
+      var(--bg-3);
+  }
+  .outreach-btn:hover {
+    background:
+      repeating-linear-gradient(
+        135deg,
+        rgba(123, 179, 255, 0) 0 4px,
+        rgba(123, 179, 255, 0.06) 4px 5px
+      ),
+      var(--blue-tint);
+  }
+
+  /* Stripe-pattern placeholder for image blocks */
+  .ph {
+    background:
+      repeating-linear-gradient(135deg, var(--hr-1) 0 6px, transparent 6px 12px),
+      var(--bg-2);
+    border: 1px solid var(--hr-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--fg-4);
+    font-family: var(--font-jetbrains), ui-monospace, monospace;
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   Utility: pulse animation (used on live-state dots)
+   ------------------------------------------------------------------------- */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+.animate-pulse-dot {
+  animation: pulse 1.4s ease-in-out infinite;
+}

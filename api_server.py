@@ -1,0 +1,731 @@
+"""
+Arkim Sourcing Engine — FastAPI server.
+
+Exposes the existing SQLAlchemy-backed sourcing pipeline as REST endpoints
+consumed by the React frontend. Runs alongside the Streamlit app without
+conflict (separate port, same SQLite DB via WAL mode).
+
+Start with:
+    uvicorn api_server:app --reload --port 8001
+"""
+
+import json
+import os
+import traceback
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from utils.procurement_agent.agents.intake_agent import IntakeAgent
+from utils.models import SourcingRun
+
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+
+# Import the existing persistence layer
+from utils.procurement_agent.state.persistence import (
+    SourcingRunORM,
+    _SessionFactory,
+    Base,
+    _engine,
+)
+from utils.procurement_agent.state.phases import Phase
+
+# ---------------------------------------------------------------------------
+# App setup
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="Arkim Sourcing Engine API",
+    version="1.0.0",
+    description="REST API for the Arkim production frontend.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",    # Next.js dev server
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",    # same-origin health checks
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Ensure tables exist (idempotent)
+Base.metadata.create_all(bind=_engine)
+
+# ---------------------------------------------------------------------------
+# In-memory chat message store (Phase 3 prototype — cleared on server restart)
+# ---------------------------------------------------------------------------
+
+_messages: Dict[str, List[Dict[str, Any]]] = {}
+
+
+
+
+# ---------------------------------------------------------------------------
+# Pydantic I/O models
+# ---------------------------------------------------------------------------
+
+class RunListItem(BaseModel):
+    id: str
+    phase: str
+    urgency: str          # "Stocking" | "Predictive" | "Emergency"
+    warranty: str         # "Active" | "Expired" | "Unknown"
+    facility_id: str
+    asset_summary: Optional[str] = None   # e.g. "Goulds 3196MTX · 5HP pump"
+    amount: Optional[float] = None
+    created_at: str
+    updated_at: str
+
+
+class RunDetail(BaseModel):
+    id: str
+    phase: str
+    urgency: str
+    warranty: str
+    facility_id: str
+    asset_specs: Optional[Dict[str, Any]] = None
+    inventory_result: Optional[Dict[str, Any]] = None
+    sourcing_results: Optional[Dict[str, Any]] = None
+    selected_candidate: Optional[Dict[str, Any]] = None
+    approval_history: List[Dict[str, Any]] = []
+    messages: List[Dict[str, Any]] = []
+    created_at: str
+    updated_at: str
+
+
+class CreateRunRequest(BaseModel):
+    facility_id: str = "00000000-0000-0000-0000-000000000000"
+    urgency_factor: float = Field(0.3, ge=0.0, le=1.0)
+    warranty_status: str = "unknown"
+
+
+class CreateRunResponse(BaseModel):
+    id: str
+    phase: str
+    created_at: str
+
+
+class SendMessageRequest(BaseModel):
+    content: str
+    role: str = "user"
+
+
+class SendMessageResponse(BaseModel):
+    run_id: str
+    message: Dict[str, Any]
+    updated_phase: str
+
+
+class SelectCandidateRequest(BaseModel):
+    candidate_id: str
+    tier: int
+
+
+class ApproveRequest(BaseModel):
+    approver_name: str
+    approver_role: str
+    notes: Optional[str] = None
+
+
+class RejectRequest(BaseModel):
+    approver_name: str
+    approver_role: str
+    notes: str
+
+
+class OutreachRequest(BaseModel):
+    vendor_names: List[str]
+
+
+class SaveOutreachRequest(BaseModel):
+    vendor_names: List[str]
+
+
+class FacilityOut(BaseModel):
+    id: str
+    name: str
+    state: str
+
+
+class ApprovalRuleOut(BaseModel):
+    id: str
+    facility_id: str
+    threshold: float
+    cap: Optional[float]
+    approvers_required: int
+    approver_roles: List[str]
+    applies_to: str          # "buy" | "outreach"
+
+
+class ApprovalRuleIn(BaseModel):
+    facility_id: str
+    threshold: float
+    cap: Optional[float] = None
+    approvers_required: int = 1
+    approver_roles: List[str] = []
+    applies_to: str = "buy"
+
+
+# ---------------------------------------------------------------------------
+# Helper: urgency_factor → display label
+# ---------------------------------------------------------------------------
+
+def _urgency_label(factor: float) -> str:
+    if factor >= 0.9:
+        return "Emergency"
+    if factor >= 0.5:
+        return "Predictive"
+    return "Stocking"
+
+
+def _warranty_label(status: str) -> str:
+    mapping = {"active": "Active", "expired": "Expired", "unknown": "Unknown"}
+    return mapping.get(status.lower(), "Unknown")
+
+
+def _orm_to_list_item(run: SourcingRunORM) -> RunListItem:
+    specs = json.loads(run.asset_specs_json) if run.asset_specs_json else {}
+    asset_summary = None
+    if specs:
+        mfr = specs.get("manufacturer", "")
+        model = specs.get("model", "")
+        if mfr or model:
+            asset_summary = f"{mfr} {model}".strip()
+
+    return RunListItem(
+        id=run.id,
+        phase=run.current_phase,
+        urgency=_urgency_label(run.urgency_factor),
+        warranty=_warranty_label(run.warranty_status),
+        facility_id=run.facility_id,
+        asset_summary=asset_summary,
+        amount=None,
+        created_at=run.initiated_at.isoformat() if run.initiated_at else "",
+        updated_at=run.updated_at.isoformat() if run.updated_at else "",
+    )
+
+
+def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
+    def _parse(col): return json.loads(col) if col else None
+
+    return RunDetail(
+        id=run.id,
+        phase=run.current_phase,
+        urgency=_urgency_label(run.urgency_factor),
+        warranty=_warranty_label(run.warranty_status),
+        facility_id=run.facility_id,
+        asset_specs=_parse(run.asset_specs_json),
+        inventory_result=_parse(run.inventory_result_json),
+        sourcing_results=_parse(run.sourcing_results_json),
+        selected_candidate=_parse(run.selected_candidate_json),
+        approval_history=json.loads(run.approval_history_json)
+            if isinstance(run.approval_history_json, str)
+            else (run.approval_history_json or []),
+        created_at=run.initiated_at.isoformat() if run.initiated_at else "",
+        updated_at=run.updated_at.isoformat() if run.updated_at else "",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sourcing run endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/runs", response_model=CreateRunResponse, status_code=201)
+def create_run(body: CreateRunRequest):
+    """Create a new sourcing run and return it in intake phase."""
+    now = datetime.now(timezone.utc)
+    run = SourcingRunORM(
+        id=str(uuid.uuid4()),
+        facility_id=body.facility_id,
+        current_phase=Phase.INTAKE.value,
+        urgency_factor=body.urgency_factor,
+        warranty_status=body.warranty_status,
+        initiated_at=now,
+        updated_at=now,
+    )
+    with _SessionFactory() as session:
+        session.add(run)
+        session.commit()
+        session.refresh(run)
+        return CreateRunResponse(
+            id=run.id,
+            phase=run.current_phase,
+            created_at=run.initiated_at.isoformat(),
+        )
+
+
+@app.get("/api/runs", response_model=List[RunListItem])
+def list_runs(
+    facility_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+):
+    """List sourcing runs with optional filtering."""
+    with _SessionFactory() as session:
+        q = session.query(SourcingRunORM)
+        if facility_id:
+            q = q.filter(SourcingRunORM.facility_id == facility_id)
+        if phase:
+            q = q.filter(SourcingRunORM.current_phase == phase)
+        runs = q.order_by(SourcingRunORM.initiated_at.desc()).offset(offset).limit(limit).all()
+        return [_orm_to_list_item(r) for r in runs]
+
+
+@app.get("/api/runs/{run_id}", response_model=RunDetail)
+def get_run(run_id: str):
+    """Fetch full run state by ID."""
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        detail = _orm_to_detail(run)
+        detail.messages = _messages.get(run_id, [])
+        return detail
+
+
+@app.post("/api/runs/{run_id}/messages", response_model=SendMessageResponse)
+def send_message(run_id: str, body: SendMessageRequest):
+    """
+    Send a chat message to the live IntakeAgent.
+    Extracts specs, updates asset_specs_json on the run, and returns the
+    agent's clarification question (or a transition message when sufficient).
+    """
+    with _SessionFactory() as session:
+        orm = session.get(SourcingRunORM, run_id)
+        if not orm:
+            raise HTTPException(status_code=404, detail="Run not found")
+        current_phase = orm.current_phase
+        prior_specs: Dict[str, Any] = (
+            json.loads(orm.asset_specs_json) if orm.asset_specs_json else {}
+        )
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Persist user message
+    thread = _messages.setdefault(run_id, [])
+    thread.append({"id": str(uuid.uuid4()), "role": "user",
+                   "content": body.content, "created_at": now})
+
+    # Find the last agent clarification question for context
+    prior_question: Optional[str] = None
+    for msg in reversed(thread[:-1]):
+        if msg["role"] == "agent":
+            prior_question = msg["content"]
+            break
+
+    # Run IntakeAgent
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    print(f"[send_message] run={run_id} api_key_present={bool(api_key)} text={body.content[:60]!r}")
+    agent = IntakeAgent(anthropic_api_key=api_key)
+    run_obj = SourcingRun(
+        id=run_id,
+        current_phase=current_phase,
+        asset_specs_json=prior_specs,
+    )
+    try:
+        result = agent.run(run_obj, {
+            "text": body.content,
+            "prior_question": prior_question,
+        })
+    except Exception:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="IntakeAgent failed — check uvicorn console")
+    print(f"[send_message] sufficient={result['sufficient']} mfg_conf={result['manufacturer_confidence']} part_conf={result['part_id_confidence']}")
+
+    # Determine reply — do NOT auto-advance on sufficient=True.
+    # The confirm-intake endpoint owns the intake → sourcing transition.
+    proceed_state = result.get("confidence_summary", {}).get("proceed_state", "")
+    if result["sufficient"]:
+        if proceed_state == "proceed_with_manufacturer_caveat":
+            reply_text = (
+                "Specs extracted but the manufacturer could not be confirmed. "
+                "Verify the manufacturer in the panel before confirming."
+            )
+        else:
+            reply_text = "Specs look complete — review in the panel and confirm to start sourcing."
+        new_phase = current_phase
+    else:
+        reply_text = result.get("follow_up_question") or (
+            "Can you provide more details? I need the manufacturer, model, and part number."
+        )
+        new_phase = current_phase
+
+    # Persist updated specs (and phase) back to the DB
+    with _SessionFactory() as session:
+        orm = session.get(SourcingRunORM, run_id)
+        if orm:
+            orm.asset_specs_json = json.dumps(result["asset_specs"])
+            if new_phase != current_phase:
+                orm.current_phase = new_phase
+            orm.updated_at = datetime.now(timezone.utc)
+            session.commit()
+
+    agent_reply: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "role": "agent",
+        "content": reply_text,
+        "created_at": now,
+    }
+    thread.append(agent_reply)
+
+    return SendMessageResponse(
+        run_id=run_id,
+        message=agent_reply,
+        updated_phase=new_phase,
+    )
+
+
+@app.post("/api/runs/{run_id}/upload")
+async def upload_nameplate(run_id: str, file: UploadFile = File(...)):
+    """
+    Upload a nameplate image for vision extraction.
+
+    Phase 1: validates the run exists and returns a stub extraction result.
+    Phase 2+: pipes to utils/vision.py.
+    """
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+    contents = await file.read()
+
+    upload_msg: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "role": "system",
+        "content": f"Nameplate uploaded: {file.filename}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "attachment": {
+            "type": "image",
+            "filename": file.filename,
+            "size_bytes": len(contents),
+        },
+    }
+    agent_msg: Dict[str, Any] = {
+        "id": str(uuid.uuid4()),
+        "role": "agent",
+        "content": (
+            f"I've received the nameplate image ({file.filename}, "
+            f"{len(contents):,} bytes). Vision extraction will run in Phase 4 — "
+            "for now, please type the key specs (manufacturer, model, part number) "
+            "so I can start searching."
+        ),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    thread = _messages.setdefault(run_id, [])
+    thread.append(upload_msg)
+    thread.append(agent_msg)
+
+    return {
+        "run_id": run_id,
+        "filename": file.filename,
+        "size_bytes": len(contents),
+        "extraction": {
+            "status": "stub",
+            "message": "Vision extraction will run in Phase 4.",
+            "fields_extracted": 0,
+        },
+    }
+
+
+@app.post("/api/runs/{run_id}/select-candidate")
+def select_candidate(run_id: str, body: SelectCandidateRequest):
+    """Lock in a candidate and advance the run to pending_first_approval."""
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        run.selected_candidate_json = json.dumps({
+            "candidate_id": body.candidate_id,
+            "tier": body.tier,
+            "selected_at": datetime.now(timezone.utc).isoformat(),
+        })
+        run.current_phase = Phase.PENDING_FIRST_APPROVAL.value
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+    return {"run_id": run_id, "phase": Phase.PENDING_FIRST_APPROVAL.value}
+
+
+@app.post("/api/runs/{run_id}/approve")
+def approve_run(run_id: str, body: ApproveRequest):
+    """
+    Record an approval action.
+
+    Advances: pending_first_approval → approved (single-approver path).
+    Phase 3 will implement the dual-approver routing.
+    """
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        history = (
+            json.loads(run.approval_history_json)
+            if isinstance(run.approval_history_json, str) and run.approval_history_json
+            else (run.approval_history_json or [])
+        )
+        history.append({
+            "sequence": len(history) + 1,
+            "approver_name": body.approver_name,
+            "approver_role": body.approver_role,
+            "action": "approved",
+            "notes": body.notes,
+            "acted_at": datetime.now(timezone.utc).isoformat(),
+        })
+        run.approval_history_json = json.dumps(history)
+        run.current_phase = Phase.APPROVED.value
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+    return {"run_id": run_id, "phase": Phase.APPROVED.value}
+
+
+@app.post("/api/runs/{run_id}/reject")
+def reject_run(run_id: str, body: RejectRequest):
+    """
+    Record a rejection, unselect the candidate, and return to comparison.
+    Notes are required (enforced by the Pydantic model).
+    """
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        history = (
+            json.loads(run.approval_history_json)
+            if isinstance(run.approval_history_json, str) and run.approval_history_json
+            else (run.approval_history_json or [])
+        )
+        history.append({
+            "sequence": len(history) + 1,
+            "approver_name": body.approver_name,
+            "approver_role": body.approver_role,
+            "action": "rejected",
+            "notes": body.notes,
+            "acted_at": datetime.now(timezone.utc).isoformat(),
+        })
+        run.approval_history_json = json.dumps(history)
+        run.selected_candidate_json = None
+        run.current_phase = Phase.COMPARISON.value
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+    return {"run_id": run_id, "phase": Phase.COMPARISON.value}
+
+
+@app.post("/api/runs/{run_id}/confirm-intake")
+def confirm_intake(run_id: str):
+    """
+    Confirm intake specs and atomically advance to sourcing.
+
+    Writes the inventory stub and transitions phase in a single DB commit so
+    there is no window where the run is phase=sourcing without inventory_result.
+    Idempotent: returns 409 if the run is already past intake.
+    """
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.current_phase != Phase.INTAKE.value:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Run is not in intake phase",
+                    "current_phase": run.current_phase,
+                },
+            )
+        if not run.asset_specs_json:
+            raise HTTPException(
+                status_code=422,
+                detail="No asset specs captured yet — complete intake chat first",
+            )
+        run.inventory_result_json = json.dumps({
+            "status": "no_data",
+            "message": "Inventory agent not yet connected (Phase 5).",
+        })
+        run.current_phase = Phase.SOURCING.value
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+    return {"run_id": run_id, "phase": Phase.SOURCING.value}
+
+
+@app.post("/api/runs/{run_id}/outreach")
+def initiate_outreach(run_id: str, body: OutreachRequest):
+    """
+    Initiate Tier 3 outreach after approval.
+
+    Phase 1: records the selected vendors and returns stub status.
+    Phase 2+: triggers actual email dispatch.
+    """
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+    return {
+        "run_id": run_id,
+        "vendors_contacted": body.vendor_names,
+        "status": "stub — outreach dispatch will run in Phase 2",
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/runs/{run_id}/save-outreach")
+def save_outreach_selection(run_id: str, body: SaveOutreachRequest):
+    """Persist vendor selection without sending — user can resume later."""
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+    return {
+        "run_id": run_id,
+        "saved_vendors": body.vendor_names,
+        "phase": Phase.COMPARISON.value,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Facility endpoints
+# ---------------------------------------------------------------------------
+
+# Static mock facilities — Phase 2 will pull these from a DB table.
+_MOCK_FACILITIES: List[FacilityOut] = [
+    FacilityOut(id="fac-stockton", name="Bay Foods · Stockton", state="CA"),
+    FacilityOut(id="fac-modesto",  name="Bay Foods · Modesto",  state="CA"),
+    FacilityOut(id="fac-fresno",   name="Bay Foods · Fresno",   state="CA"),
+    FacilityOut(id="fac-salinas",  name="Bay Foods · Salinas",  state="CA"),
+]
+
+
+@app.get("/api/facilities", response_model=List[FacilityOut])
+def list_facilities():
+    """List all facilities. Stubbed in Phase 1."""
+    return _MOCK_FACILITIES
+
+
+# ---------------------------------------------------------------------------
+# Approval rule endpoints (delegating to the existing approval_rules module)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/approval-rules/{facility_id}", response_model=List[ApprovalRuleOut])
+def get_approval_rules(facility_id: str):
+    """
+    Get approval rules for a facility.
+
+    Phase 1: returns canonical Bay Foods Stockton rules as mock data.
+    Phase 2+: reads from the approval_rules DB table.
+    """
+    return [
+        ApprovalRuleOut(
+            id="rule-1",
+            facility_id=facility_id,
+            threshold=0,
+            cap=5000,
+            approvers_required=1,
+            approver_roles=["Maintenance Director"],
+            applies_to="buy",
+        ),
+        ApprovalRuleOut(
+            id="rule-2",
+            facility_id=facility_id,
+            threshold=5001,
+            cap=24999,
+            approvers_required=2,
+            approver_roles=["Maintenance Director", "Operations Manager"],
+            applies_to="buy",
+        ),
+        ApprovalRuleOut(
+            id="rule-3",
+            facility_id=facility_id,
+            threshold=25000,
+            cap=None,
+            approvers_required=3,
+            approver_roles=["Maintenance Director", "Operations Manager", "Plant Manager"],
+            applies_to="buy",
+        ),
+        ApprovalRuleOut(
+            id="rule-4",
+            facility_id=facility_id,
+            threshold=0,
+            cap=None,
+            approvers_required=1,
+            approver_roles=["Maintenance Director"],
+            applies_to="outreach",
+        ),
+    ]
+
+
+@app.post("/api/approval-rules", response_model=ApprovalRuleOut, status_code=201)
+def upsert_approval_rule(body: ApprovalRuleIn):
+    """
+    Create or update an approval rule.
+
+    Phase 1: echoes the request back as a confirmed rule.
+    Phase 2+: persists to the approval_rules DB table.
+    """
+    return ApprovalRuleOut(
+        id=str(uuid.uuid4()),
+        facility_id=body.facility_id,
+        threshold=body.threshold,
+        cap=body.cap,
+        approvers_required=body.approvers_required,
+        approver_roles=body.approver_roles,
+        applies_to=body.applies_to,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "version": "1.0.0-phase1"}
+
+
+@app.get("/api/debug/llm")
+def debug_llm():
+    """Smoke-test: confirms the API key loads and the LLM responds from this process."""
+    import requests as _req
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        return {"ok": False, "error": "ANTHROPIC_API_KEY not set — .env not loaded"}
+    try:
+        resp = _req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key":         key,
+                "anthropic-version": "2023-06-01",
+                "content-type":      "application/json",
+            },
+            json={
+                "model":    "claude-sonnet-4-6",
+                "max_tokens": 20,
+                "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        text = resp.json()["content"][0]["text"]
+        return {"ok": True, "model": "claude-sonnet-4-6", "reply": text, "key_prefix": key[:14] + "..."}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "key_prefix": key[:14] + "..."}

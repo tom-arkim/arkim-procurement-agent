@@ -23,5 +23,14 @@ streamlit_err.log
 # Audit / database files (contain PII and business data — do not commit)
 data/*.sqlite
 data/*.db
+data/*.sqlite-shm
+data/*.sqlite-wal
 # Keep directory marker
 !data/.gitkeep
+
+# Frontend — build artefacts, dependencies, and local env overrides (never commit)
+frontend/node_modules/
+frontend/.next/
+frontend/.turbo/
+frontend/.env.local
+frontend/tsconfig.tsbuildinfo
