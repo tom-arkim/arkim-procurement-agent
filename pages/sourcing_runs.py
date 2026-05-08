@@ -209,6 +209,9 @@ def _render_intake(run_id: str, run: dict) -> None:
     # --- Chat history (rendered before any spinner so user message is visible first) ---
     for msg in st.session_state[chat_key]:
         with st.chat_message(msg["role"]):
+            if msg.get("images"):
+                for img_bytes in msg["images"]:
+                    st.image(img_bytes)
             st.write(msg["content"])
 
     # --- Clarification prompt ---
@@ -266,11 +269,18 @@ def _render_intake(run_id: str, run: dict) -> None:
     user_text = st.chat_input("Describe the part or equipment...")
 
     if user_text or uploaded_files:
-        text_to_show = user_text or "(uploaded image)"
-        st.session_state[chat_key].append({"role": "user", "content": text_to_show})
+        # Read uploaded file bytes once — UploadedFile.read() exhausts
+        # the buffer on first call, so we cannot read it again later
+        img_bytes_list = [f.read() for f in (uploaded_files or [])]
+        text_to_show   = user_text or "(uploaded image)"
+        st.session_state[chat_key].append({
+            "role":    "user",
+            "content": text_to_show,
+            "images":  img_bytes_list,
+        })
         st.session_state[pending_key] = {
             "text":           user_text or "",
-            "images":         [f.read() for f in (uploaded_files or [])],
+            "images":         img_bytes_list,
             "prior_question": st.session_state.get(followup_key),
         }
         st.rerun()
