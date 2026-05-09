@@ -22,7 +22,7 @@ load_dotenv()
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
 from utils.models import SourcingRun
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -91,6 +91,7 @@ class RunDetail(BaseModel):
     urgency: str
     warranty: str
     facility_id: str
+    facility_state: str = "unknown"      # for geographic indicator on vendor cards
     asset_specs: Optional[Dict[str, Any]] = None
     inventory_result: Optional[Dict[str, Any]] = None
     sourcing_results: Optional[Dict[str, Any]] = None
@@ -175,6 +176,143 @@ class ApprovalRuleIn(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Facility state lookup (mock — Phase 5 will pull from DB table)
+# ---------------------------------------------------------------------------
+
+_FACILITY_STATES: Dict[str, str] = {
+    "fac-stockton": "CA",
+    "fac-modesto":  "CA",
+    "fac-fresno":   "CA",
+    "fac-salinas":  "CA",
+}
+
+
+# ---------------------------------------------------------------------------
+# Sourcing results transformation: backend SourcingOption → frontend Candidate
+# ---------------------------------------------------------------------------
+
+def _lead_time_label(days: int) -> str:
+    if days <= 1:  return "Next day"
+    if days <= 5:  return f"{days} days"
+    if days <= 14: return "1–2 weeks"
+    if days <= 30: return "2–4 weeks"
+    return "4+ weeks"
+
+
+def _vendor_type(merchant_type: str) -> str:
+    return {
+        "Enterprise":           "NetworkPartner",
+        "Direct Buy via Arkim": "NetworkPartner",
+        "National Specialist":  "NationalDistributor",
+        "Quote Request":        "RegionalSpecialist",
+        "Local":                "RegionalSpecialist",
+    }.get(merchant_type, "NationalDistributor")
+
+
+def _pn_match_level(opt: dict, tier: int) -> str:
+    if tier == 1:
+        return "exact" if opt.get("found_part_number") else "none"
+    return {
+        "exact_match":   "exact",
+        "partial_match": "normalized",
+        "no_match":      "none",
+        "not_visible":   "none",
+    }.get(opt.get("pn_match_status") or "", "none")
+
+
+def _transform_option(opt: dict, tier: int, idx: int) -> dict:
+    price_hidden = opt.get("price_tbd", False) or opt.get("requires_rfq", False)
+    return {
+        "id":                    f"{opt.get('vendor_name','')}-t{tier}-{idx}",
+        "vendorName":            opt.get("vendor_name") or "Unknown",
+        "vendorType":            _vendor_type(opt.get("merchant_type") or ""),
+        "tier":                  tier,
+        "price":                 None if price_hidden else opt.get("base_price"),
+        "leadTime":              _lead_time_label(int(opt.get("lead_time_days") or 0)),
+        "url":                   opt.get("source_url") or "",
+        "suitability":           float(opt.get("suitability_score") or 0),
+        "confidence":            float(opt.get("confidence_score") or 0),
+        "pnMatchLevel":          _pn_match_level(opt, tier),
+        "loc":                   opt.get("ship_from_country") or "",
+        "isExactMatch":          opt.get("match_type") == "Exact OEM",
+        "isAftermarket":         opt.get("match_type") == "Aftermarket Compatible",
+        "isOemDirect":           bool(opt.get("is_oem_direct")),
+        "isAuthorizedDistributor": opt.get("vendor_authorization_status") == "Authorized",
+        "priceVerified":         not opt.get("limited_price_data", False),
+        "shipFrom":              opt.get("ship_from_country"),
+        "contact":               opt.get("contact_email"),
+        "relationship":          opt.get("suitability_tier") or None,
+    }
+
+
+def _transform_sourcing_results(raw: dict) -> dict:
+    """Convert SourcingAgent output dict to the shape expected by the React frontend."""
+    def _tier(key: str, n: int) -> list:
+        return [
+            _transform_option(o, n, i)
+            for i, o in enumerate(raw.get(key, {}).get("results", []))
+        ]
+    return {
+        "tier1":               _tier("tier_1", 1),
+        "tier2":               _tier("tier_2", 2),
+        "tier3":               _tier("tier_3", 3),
+        "warrantyBanner":      raw.get("warranty_banner"),
+        "tier3CapabilityPivot": raw.get("tier3_capability_pivot", False),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Background sourcing task
+# ---------------------------------------------------------------------------
+
+def _run_sourcing_background(
+    run_id: str,
+    specs_dict: dict,
+    urgency_factor: float,
+    warranty_status: str,
+) -> None:
+    """Run SourcingAgent in a background thread and persist results."""
+    import logging
+    log = logging.getLogger(__name__)
+    try:
+        from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+        from utils.models import SourcingRun as _SourcingRunModel
+        agent = SourcingAgent(
+            tavily_api_key=os.environ.get("TAVILY_API_KEY"),
+            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        )
+        run_model = _SourcingRunModel(
+            id=run_id,
+            current_phase="sourcing",
+            asset_specs_json=specs_dict,
+            urgency_factor=urgency_factor,
+            warranty_status=warranty_status,
+        )
+        result = agent.run(run_model)
+        with _SessionFactory() as session:
+            orm = session.get(SourcingRunORM, run_id)
+            if orm and orm.current_phase == Phase.SOURCING.value:
+                orm.sourcing_results_json = json.dumps(result)
+                orm.current_phase = Phase.COMPARISON.value
+                orm.updated_at = datetime.now(timezone.utc)
+                session.commit()
+        log.info("[%s] Sourcing complete → comparison", run_id)
+    except Exception as exc:
+        log.error("[%s] Sourcing failed: %s", run_id, exc)
+        with _SessionFactory() as session:
+            orm = session.get(SourcingRunORM, run_id)
+            if orm:
+                orm.sourcing_results_json = json.dumps({
+                    "error": str(exc),
+                    "tier_1": {"results": [], "count": 0, "status": "error"},
+                    "tier_2": {"results": [], "count": 0, "status": "error"},
+                    "tier_3": {"results": [], "count": 0, "status": "error"},
+                })
+                orm.updated_at = datetime.now(timezone.utc)
+                session.commit()
+
+
+# ---------------------------------------------------------------------------
 # Helper: urgency_factor → display label
 # ---------------------------------------------------------------------------
 
@@ -216,15 +354,24 @@ def _orm_to_list_item(run: SourcingRunORM) -> RunListItem:
 def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
     def _parse(col): return json.loads(col) if col else None
 
+    raw_sourcing = _parse(run.sourcing_results_json)
+    # Transform if we have real sourcing data (not an error stub)
+    sourcing: Optional[Dict[str, Any]] = None
+    if raw_sourcing and "error" not in raw_sourcing:
+        sourcing = _transform_sourcing_results(raw_sourcing)
+    elif raw_sourcing:
+        sourcing = raw_sourcing  # pass through error dict so frontend can surface it
+
     return RunDetail(
         id=run.id,
         phase=run.current_phase,
         urgency=_urgency_label(run.urgency_factor),
         warranty=_warranty_label(run.warranty_status),
         facility_id=run.facility_id,
+        facility_state=_FACILITY_STATES.get(run.facility_id, "unknown"),
         asset_specs=_parse(run.asset_specs_json),
         inventory_result=_parse(run.inventory_result_json),
-        sourcing_results=_parse(run.sourcing_results_json),
+        sourcing_results=sourcing,
         selected_candidate=_parse(run.selected_candidate_json),
         approval_history=json.loads(run.approval_history_json)
             if isinstance(run.approval_history_json, str)
@@ -525,7 +672,7 @@ def reject_run(run_id: str, body: RejectRequest):
 
 
 @app.post("/api/runs/{run_id}/confirm-intake")
-def confirm_intake(run_id: str):
+def confirm_intake(run_id: str, background_tasks: BackgroundTasks):
     """
     Confirm intake specs and atomically advance to sourcing.
 
@@ -550,6 +697,9 @@ def confirm_intake(run_id: str):
                 status_code=422,
                 detail="No asset specs captured yet — complete intake chat first",
             )
+        specs_dict = json.loads(run.asset_specs_json)
+        urgency_factor = run.urgency_factor
+        warranty_status = run.warranty_status
         run.inventory_result_json = json.dumps({
             "status": "no_data",
             "message": "Inventory agent not yet connected (Phase 5).",
@@ -558,6 +708,9 @@ def confirm_intake(run_id: str):
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    background_tasks.add_task(
+        _run_sourcing_background, run_id, specs_dict, urgency_factor, warranty_status
+    )
     return {"run_id": run_id, "phase": Phase.SOURCING.value}
 
 

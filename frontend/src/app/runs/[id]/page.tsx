@@ -5,6 +5,7 @@ import { useRunLive } from "@/lib/queries";
 import { RunSummaryBar } from "@/components/arkim/run-summary-bar";
 import { ChatPanel } from "@/components/arkim/intake/chat-panel";
 import { SpecPanel } from "@/components/arkim/intake/spec-panel";
+import { SourcingView } from "@/components/arkim/sourcing/sourcing-view";
 import { PhaseBar } from "@/components/ui/phase";
 import { Pill } from "@/components/ui/pill";
 import { Dot } from "@/components/ui/pill";
@@ -37,6 +38,8 @@ export default function RunDetailPage({
       {/* Phase body */}
       {isIntakePhase(phase) ? (
         <IntakeView run={run} runId={id} />
+      ) : isSourcingPhase(phase) ? (
+        <SourcingView run={run} className="flex-1" />
       ) : (
         <TransitionalView run={run} phase={phase} />
       )}
@@ -110,9 +113,6 @@ function TransitionalView({ run, phase }: { run: SourcingRunDetail; phase: Phase
           {isFailed && "This run was cancelled or encountered an error."}
         </p>
 
-        <p className="font-mono text-[10px] text-fg-4 mt-1">
-          Phase 4 (sourcing dashboard) will render the full results view here.
-        </p>
       </div>
 
       {/* Approval history */}
@@ -182,4 +182,14 @@ function ErrorShell({ id }: { id: string }) {
 
 function isIntakePhase(phase: Phase) {
   return ["intake", "inventory"].includes(phase);
+}
+
+function isSourcingPhase(phase: Phase) {
+  return [
+    "sourcing",
+    "comparison",
+    "pending_first_approval",
+    "pending_second_approval",
+    "approved",
+  ].includes(phase);
 }

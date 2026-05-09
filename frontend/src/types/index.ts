@@ -106,6 +106,7 @@ export interface ComparisonArtifact {
 }
 
 export interface Candidate {
+  id: string;
   vendorName: string;
   vendorType: VendorType;
   tier: 1 | 2 | 3;
@@ -186,6 +187,8 @@ export interface SourcingResults {
   tier1: Candidate[];
   tier2: Candidate[];
   tier3: Candidate[];
+  warrantyBanner?: string;
+  tier3CapabilityPivot?: boolean;
 }
 
 export interface SourcingRunDetail {
@@ -194,6 +197,7 @@ export interface SourcingRunDetail {
   urgency: Urgency;
   warranty: Warranty;
   facility_id: string;
+  facility_state: string;
   asset_specs?: AssetSpecs;
   inventory_result?: Record<string, unknown>;
   sourcing_results?: SourcingResults;
