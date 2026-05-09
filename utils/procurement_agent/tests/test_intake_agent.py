@@ -641,7 +641,7 @@ class TestAsymmetricStopCondition:
         })
         with patch("requests.post") as mock_post:
             mock_post.return_value = _mock_anthropic_response(low_mfg_high_pid)
-            result = agent.run(_make_run(), {"text": "PMC11 sensor", "images": [], "force_proceed": False})
+            result = agent.run(_make_run(), {"text": "XY99-Z sensor", "images": [], "force_proceed": False})
 
         assert result["sufficient"] is True
         assert result["manufacturer_caveat"] is not None

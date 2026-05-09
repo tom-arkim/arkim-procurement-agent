@@ -562,6 +562,65 @@ def get_pn_stemming_rule(manufacturer: str) -> Optional[dict]:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Part-number prefix → manufacturer reverse lookup
+#
+# Populated for the four canonical test manufacturers. Prefixes are derived
+# from STEMMING_RULES patterns and known product family codes. Extend as new
+# manufacturers surface in production.
+#
+# Lookup is prefix-based: "PMC11-AA1V1HFVXJA" matches prefix "PMC" → E+H.
+# All prefixes must be uppercase and alphanumeric only (no delimiters).
+# ---------------------------------------------------------------------------
+
+PN_PREFIX_TO_MANUFACTURER: dict[str, str] = {
+    # Endress+Hauser field instruments — alpha prefix + 2-4 digit family code
+    "PMC":  "Endress+Hauser",   # pressure transmitters (gauge)
+    "PMP":  "Endress+Hauser",   # pressure measurement probes (absolute)
+    "PMD":  "Endress+Hauser",   # differential pressure
+    "FMR":  "Endress+Hauser",   # level radar (FMCW)
+    "FTL":  "Endress+Hauser",   # level switches (vibration)
+    "FML":  "Endress+Hauser",   # flow (magnetic)
+    "FMT":  "Endress+Hauser",   # flow (thermal)
+    "FMU":  "Endress+Hauser",   # level ultrasonic
+    "FMG":  "Endress+Hauser",   # flow (Coriolis)
+    "TAD":  "Endress+Hauser",   # temperature sensors
+    "TMA":  "Endress+Hauser",   # temperature assemblies
+    "TTR":  "Endress+Hauser",   # temperature transmitters (rail)
+    "TMT":  "Endress+Hauser",   # temperature transmitters (head-mounted)
+    "LTM":  "Endress+Hauser",   # level (guided wave radar)
+    # Allen-Bradley (Rockwell) — drive series prefix: 2 digits + letter
+    "22B":  "Allen-Bradley",    # PowerFlex 40
+    "22C":  "Allen-Bradley",    # PowerFlex 400
+    "22D":  "Allen-Bradley",    # PowerFlex 40P
+    "20F":  "Allen-Bradley",    # PowerFlex 700
+    "20G":  "Allen-Bradley",    # PowerFlex 750
+    "25B":  "Allen-Bradley",    # PowerFlex 525
+    "25C":  "Allen-Bradley",    # PowerFlex 527
+}
+
+# Minimum PN token length to attempt prefix lookup (avoids matching "HP" or "V")
+_PN_LOOKUP_MIN_LEN = 3
+
+
+def lookup_manufacturer_from_pn(part_number: str) -> Optional[str]:
+    """Return the canonical manufacturer name for a known PN prefix, or None.
+
+    Normalizes the PN (uppercase, strip delimiters) then checks each prefix in
+    PN_PREFIX_TO_MANUFACTURER from longest to shortest to avoid short-prefix
+    false positives (e.g. "PM" matching "PMC").
+    """
+    if not part_number:
+        return None
+    normalized = re.sub(r"[^A-Z0-9]", "", part_number.upper())
+    if len(normalized) < _PN_LOOKUP_MIN_LEN:
+        return None
+    for prefix in sorted(PN_PREFIX_TO_MANUFACTURER, key=len, reverse=True):
+        if normalized.startswith(prefix):
+            return PN_PREFIX_TO_MANUFACTURER[prefix]
+    return None
+
+
 def invalidate(manufacturer: str, equipment_type: str) -> bool:
     """Force re-discovery by setting last_accessed_at far in the past."""
     try:

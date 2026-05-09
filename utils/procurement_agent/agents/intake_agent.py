@@ -363,9 +363,33 @@ class IntakeAgent:
         """
         return {k: v for k, v in prior_specs.items() if v not in _NULL_VALUES}
 
+    def _pn_prefix_hint(self, text: str, prior_specs: dict) -> Optional[tuple]:
+        """Scan user text and prior specs for a known PN prefix.
+
+        Returns (manufacturer, confidence) if a match is found, None otherwise.
+        Checks prior_specs.part_number first (most reliable), then raw text tokens.
+        """
+        from utils.brand_intelligence import lookup_manufacturer_from_pn
+
+        existing_pn = prior_specs.get("part_number")
+        if existing_pn and existing_pn not in _NULL_VALUES:
+            mfg = lookup_manufacturer_from_pn(existing_pn)
+            if mfg:
+                return (mfg, 92)
+
+        tokens = re.findall(r'\b[A-Z0-9][A-Z0-9\-\.]{3,}\b', text.upper())
+        for token in tokens:
+            mfg = lookup_manufacturer_from_pn(token)
+            if mfg:
+                return (mfg, 92)
+
+        return None
+
     def _extract_text(self, text: str, prior_specs: dict, prior_question: str | None = None) -> dict:
         if not self._api_key:
             return self._fallback_extract(prior_specs)
+
+        pn_hint = self._pn_prefix_hint(text, prior_specs)
 
         context = ""
         if prior_specs:
@@ -378,6 +402,16 @@ class IntakeAgent:
                 )
             else:
                 context = f"Previously extracted specs:\n{json.dumps(summary)}\n\nUser input: "
+
+        if pn_hint:
+            mfg_name, mfg_conf = pn_hint
+            print(f"[IntakeAgent] PN prefix match → manufacturer={mfg_name!r} conf={mfg_conf}")
+            hint_prefix = (
+                f"SYSTEM NOTE: The part number prefix matches our records. "
+                f"This part is manufactured by {mfg_name}. "
+                f"Set manufacturer={mfg_name!r} and manufacturer_confidence={mfg_conf}.\n\n"
+            )
+            context = hint_prefix + context
 
         try:
             resp = requests.post(
@@ -396,7 +430,18 @@ class IntakeAgent:
                 timeout=30,
             )
             resp.raise_for_status()
-            return self._parse_llm_json(resp.json()["content"][0]["text"])
+            extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
+            # If we have a high-confidence prefix match and the LLM returned a different
+            # or absent manufacturer, override — prefix lookup is more reliable than
+            # LLM inference for known product families.
+            if pn_hint:
+                mfg_name, mfg_conf = pn_hint
+                llm_mfg = extracted.get("manufacturer") or ""
+                llm_conf = float(extracted.get("manufacturer_confidence") or 0)
+                if llm_mfg in _NULL_VALUES or llm_conf < mfg_conf:
+                    extracted["manufacturer"] = mfg_name
+                    extracted["manufacturer_confidence"] = mfg_conf
+            return extracted
         except Exception as exc:
             print(f"[IntakeAgent] Text extraction failed: {exc}")
             return self._fallback_extract(prior_specs)
