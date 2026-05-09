@@ -12,7 +12,11 @@
 
 import { create } from "zustand";
 import { immer } from "zustand/middleware/immer";
+import { enableMapSet } from "immer";
 import type { Phase } from "@/types";
+
+// Required for Immer to track Set.add / Set.delete mutations inside drafts.
+enableMapSet();
 
 // ---------------------------------------------------------------------------
 // Toast
