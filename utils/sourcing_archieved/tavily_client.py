@@ -21,6 +21,9 @@ NON_US_TLDS = (
 NON_US_DOMAIN_HINTS = (
     "antlets", "made-in-china", "indiamart", "tradeindia",
     "europages", "manufacturer.com.cn",
+    # UK/European industrial distributors that operate on .com TLDs with non-USD pricing
+    "farnell", "rs-online", "rsonline", "element14", "rs-components",
+    "rscomponents", "distrelec", "buerklin", "mouser.co",
 )
 
 from utils.sourcing_archieved.constants import (

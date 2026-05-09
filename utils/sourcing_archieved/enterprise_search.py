@@ -381,6 +381,29 @@ def _discover_national_specialists(specs: AssetSpecs,
     if not results or not _pkg.ANTHROPIC_API_KEY:
         return []
 
+    # Filter non-US URLs before passing to LLM — same geographic check used in Tier 1.
+    from utils.sourcing_archieved.tavily_client import NON_US_TLDS, NON_US_DOMAIN_HINTS
+    from urllib.parse import urlparse as _urlparse
+
+    def _is_us_url(url: str) -> bool:
+        try:
+            hostname = (_urlparse(url.lower()).hostname or "")
+            if any(hostname.endswith(tld) for tld in NON_US_TLDS):
+                return False
+            if any(hint in hostname for hint in NON_US_DOMAIN_HINTS):
+                return False
+        except Exception:
+            pass
+        return True
+
+    pre_filter = len(results)
+    results = [r for r in results if _is_us_url(r.get("url", ""))]
+    if len(results) < pre_filter:
+        print(f"[Sourcing] Tier 2 geographic filter: removed {pre_filter - len(results)} non-US result(s)")
+
+    if not results:
+        return []
+
     snippet_map = {
         r.get("url", ""): (r.get("title", "") + " " + r.get("content", "")).strip()
         for r in results if r.get("url")
