@@ -24,13 +24,17 @@ export function SourcingView({ run, className }: SourcingViewProps) {
   // Only runs once per mount so user toggle changes are not overwritten.
   useEffect(() => {
     if (!results || initialized.current) return;
-    const top3 = [...(results.tier3 ?? [])]
-      .sort((a, b) => b.suitability - a.suitability)
-      .slice(0, 3)
-      .map((c) => c.vendorName);
-    setTier3Selection(run.id, top3);
     initialized.current = true;
-  }, [results, run.id, setTier3Selection]);
+    if (run.tier3_selection && run.tier3_selection.length > 0) {
+      setTier3Selection(run.id, run.tier3_selection);
+    } else {
+      const top3 = [...(results.tier3 ?? [])]
+        .sort((a, b) => b.suitability - a.suitability)
+        .slice(0, 3)
+        .map((c) => c.id);
+      setTier3Selection(run.id, top3);
+    }
+  }, [results, run.id, run.tier3_selection, setTier3Selection]);
 
   if (!results) {
     return <SourcingLoadingState className={className} />;

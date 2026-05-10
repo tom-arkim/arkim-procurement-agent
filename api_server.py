@@ -33,6 +33,7 @@ from utils.procurement_agent.state.persistence import (
     Base,
     _engine,
 )
+from sqlalchemy import text
 from utils.procurement_agent.state.phases import Phase
 
 # ---------------------------------------------------------------------------
@@ -59,6 +60,25 @@ app.add_middleware(
 
 # Ensure tables exist (idempotent)
 Base.metadata.create_all(bind=_engine)
+
+
+def _migrate_schema() -> None:
+    """Add columns introduced after initial table creation."""
+    import logging
+    log = logging.getLogger(__name__)
+    with _engine.connect() as conn:
+        for stmt in [
+            "ALTER TABLE sourcing_runs ADD COLUMN tier3_selection_json TEXT",
+        ]:
+            try:
+                conn.execute(text(stmt))
+                conn.commit()
+                log.info("_migrate_schema: %s", stmt)
+            except Exception:
+                pass  # column already exists
+
+
+_migrate_schema()
 
 # ---------------------------------------------------------------------------
 # In-memory chat message store (Phase 3 prototype — cleared on server restart)
@@ -98,6 +118,7 @@ class RunDetail(BaseModel):
     selected_candidate: Optional[Dict[str, Any]] = None
     approval_history: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
+    tier3_selection: Optional[List[str]] = None
     created_at: str
     updated_at: str
 
@@ -143,11 +164,11 @@ class RejectRequest(BaseModel):
 
 
 class OutreachRequest(BaseModel):
-    vendor_names: List[str]
+    candidate_ids: List[str]
 
 
 class SaveOutreachRequest(BaseModel):
-    vendor_names: List[str]
+    candidate_ids: List[str]
 
 
 class FacilityOut(BaseModel):
@@ -422,6 +443,7 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
         approval_history=json.loads(run.approval_history_json)
             if isinstance(run.approval_history_json, str)
             else (run.approval_history_json or []),
+        tier3_selection=json.loads(run.tier3_selection_json) if run.tier3_selection_json else None,
         created_at=run.initiated_at.isoformat() if run.initiated_at else "",
         updated_at=run.updated_at.isoformat() if run.updated_at else "",
     )
@@ -778,7 +800,7 @@ def initiate_outreach(run_id: str, body: OutreachRequest):
 
     return {
         "run_id": run_id,
-        "vendors_contacted": body.vendor_names,
+        "candidates_contacted": len(body.candidate_ids),
         "status": "stub — outreach dispatch will run in Phase 2",
         "sent_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -791,14 +813,15 @@ def save_outreach_selection(run_id: str, body: SaveOutreachRequest):
         run = session.get(SourcingRunORM, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
-
+        run.tier3_selection_json = json.dumps(body.candidate_ids)
         run.updated_at = datetime.now(timezone.utc)
+        phase = run.current_phase
         session.commit()
 
     return {
         "run_id": run_id,
-        "saved_vendors": body.vendor_names,
-        "phase": Phase.COMPARISON.value,
+        "saved_count": len(body.candidate_ids),
+        "phase": phase,
     }
 
 

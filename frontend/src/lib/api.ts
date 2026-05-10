@@ -151,7 +151,7 @@ export async function confirmIntake(
 export async function initiateOutreach(
   runId: string,
   body: OutreachRequest,
-): Promise<{ run_id: string; vendors_contacted: string[]; sent_at: string }> {
+): Promise<{ run_id: string; candidates_contacted: number; sent_at: string }> {
   return request(`/runs/${runId}/outreach`, {
     method: "POST",
     body: JSON.stringify(body),
@@ -160,11 +160,11 @@ export async function initiateOutreach(
 
 export async function saveOutreachSelection(
   runId: string,
-  vendorNames: string[],
-): Promise<{ run_id: string; saved_vendors: string[]; phase: string }> {
+  candidateIds: string[],
+): Promise<{ run_id: string; saved_count: number; phase: string }> {
   return request(`/runs/${runId}/save-outreach`, {
     method: "POST",
-    body: JSON.stringify({ vendor_names: vendorNames }),
+    body: JSON.stringify({ candidate_ids: candidateIds }),
   });
 }
 

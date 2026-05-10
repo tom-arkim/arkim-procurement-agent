@@ -298,7 +298,7 @@ Border-top `border-hr-2`, `bg-bg-1`.
 | Button | Variant | State | Behavior |
 |---|---|---|---|
 | Preview drafts | ghost | Always disabled | Toast: "Draft preview coming in Phase 5." |
-| Save selection | secondary | Loading during save | Toast (green): "Selection saved" |
+| Save selection | secondary | Loading during save | Toast (green): "Selection saved". Persists candidate IDs to `tier3_selection_json`; hydrated back into Zustand on next mount via `run.tier3_selection`. |
 | Send outreach | primary + Send icon (13px) | Loading during send | Success toast: "Outreach sent · Contacted {count} vendor(s)". Failure toast (amber): "Outreach failed · Check backend connection and retry." |
 
 All three buttons disabled when `count === 0`.

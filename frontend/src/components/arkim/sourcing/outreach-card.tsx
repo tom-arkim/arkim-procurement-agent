@@ -15,7 +15,7 @@ interface OutreachCardProps {
 export function OutreachCard({ candidate, runId, className }: OutreachCardProps) {
   const toggle = useArkimStore((s) => s.toggleTier3Vendor);
   const selection = useArkimStore((s) => s.tier3Selection[runId] ?? new Set<string>());
-  const selected = selection.has(candidate.vendorName);
+  const selected = selection.has(candidate.id);
 
   return (
     <div
@@ -26,7 +26,7 @@ export function OutreachCard({ candidate, runId, className }: OutreachCardProps)
           : "border-hr-2 hover:border-hr-1",
         className,
       )}
-      onClick={() => toggle(runId, candidate.vendorName)}
+      onClick={() => toggle(runId, candidate.id)}
     >
       {/* Checkbox */}
       <div

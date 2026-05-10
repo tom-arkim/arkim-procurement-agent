@@ -17,18 +17,18 @@ export function StickyActionBar({ runId }: StickyActionBarProps) {
   const outreach = useInitiateOutreach(runId);
   const save = useSaveOutreach(runId);
 
-  const vendorNames = Array.from(selection);
+  const candidateIds = Array.from(selection);
   const disabled = count === 0;
 
   const handleSave = () => {
-    save.mutate(vendorNames, {
+    save.mutate(candidateIds, {
       onSuccess: () => pushToast({ tone: "green", head: "Selection saved" }),
     });
   };
 
   const handleSend = () => {
     outreach.mutate(
-      { vendor_names: vendorNames },
+      { candidate_ids: candidateIds },
       {
         onSuccess: () =>
           pushToast({ tone: "green", head: "Outreach sent", sub: `Contacted ${count} vendor${count !== 1 ? "s" : ""}` }),

@@ -47,10 +47,10 @@ interface ArkimState {
   setChatDraft: (text: string) => void;
 
   // --- Tier 3 vendor selection (ephemeral, per active run) ---
-  /** runId → set of selected vendor names */
+  /** runId → set of selected candidate IDs */
   tier3Selection: Record<string, Set<string>>;
-  toggleTier3Vendor: (runId: string, vendorName: string) => void;
-  setTier3Selection: (runId: string, vendors: string[]) => void;
+  toggleTier3Vendor: (runId: string, candidateId: string) => void;
+  setTier3Selection: (runId: string, candidateIds: string[]) => void;
   clearTier3Selection: (runId: string) => void;
 
   // --- Toast notifications ---
@@ -89,21 +89,21 @@ export const useArkimStore = create<ArkimState>()(
 
     // Tier 3 selection
     tier3Selection: {},
-    toggleTier3Vendor: (runId, vendorName) =>
+    toggleTier3Vendor: (runId, candidateId) =>
       set((s) => {
         if (!s.tier3Selection[runId]) {
           s.tier3Selection[runId] = new Set();
         }
         const sel = s.tier3Selection[runId];
-        if (sel.has(vendorName)) {
-          sel.delete(vendorName);
+        if (sel.has(candidateId)) {
+          sel.delete(candidateId);
         } else {
-          sel.add(vendorName);
+          sel.add(candidateId);
         }
       }),
-    setTier3Selection: (runId, vendors) =>
+    setTier3Selection: (runId, candidateIds) =>
       set((s) => {
-        s.tier3Selection[runId] = new Set(vendors);
+        s.tier3Selection[runId] = new Set(candidateIds);
       }),
     clearTier3Selection: (runId) =>
       set((s) => {

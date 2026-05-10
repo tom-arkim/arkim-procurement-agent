@@ -204,6 +204,7 @@ export interface SourcingRunDetail {
   selected_candidate?: Candidate;
   approval_history: ApprovalActionRecord[];
   completion_event?: CompletionEvent;
+  tier3_selection?: string[];
   messages?: ChatMessage[];
   created_at: string;
   updated_at: string;
@@ -275,7 +276,7 @@ export interface RejectRequest {
 }
 
 export interface OutreachRequest {
-  vendor_names: string[];
+  candidate_ids: string[];
 }
 
 // ---------------------------------------------------------------------------

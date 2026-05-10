@@ -193,7 +193,7 @@ export function useInitiateOutreach(runId: string) {
 
 export function useSaveOutreach(runId: string) {
   return useMutation({
-    mutationFn: (vendorNames: string[]) => saveOutreachSelection(runId, vendorNames),
+    mutationFn: (candidateIds: string[]) => saveOutreachSelection(runId, candidateIds),
   });
 }
 
