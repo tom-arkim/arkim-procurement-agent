@@ -242,6 +242,7 @@ def _transform_option(opt: dict, tier: int, idx: int) -> dict:
         "shipFrom":              opt.get("ship_from_country"),
         "contact":               opt.get("contact_email"),
         "relationship":          opt.get("suitability_tier") or None,
+        "comparisonArtifact":    opt.get("comparison_artifact"),
     }
 
 
@@ -271,9 +272,21 @@ def _run_sourcing_background(
     urgency_factor: float,
     warranty_status: str,
 ) -> None:
-    """Run SourcingAgent in a background thread and persist results."""
+    """Run SourcingAgent then ComparisonAgent in a single background thread.
+
+    Order of operations is load-bearing:
+    1. SourcingAgent runs → raw results held in memory, phase stays SOURCING (polling active).
+    2. ComparisonAgent runs in parallel over all candidates (phase still SOURCING).
+    3. Artifacts embedded into results, phase advances to COMPARISON, commit.
+
+    Phase advances only after artifacts exist. Polling stops at COMPARISON, so the
+    frontend always receives a complete payload on the first post-transition poll.
+    """
     import logging
+    from concurrent.futures import ThreadPoolExecutor
     log = logging.getLogger(__name__)
+
+    # ── Step 1: Sourcing ────────────────────────────────────────────────────
     try:
         from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
         from utils.models import SourcingRun as _SourcingRunModel
@@ -289,14 +302,6 @@ def _run_sourcing_background(
             warranty_status=warranty_status,
         )
         result = agent.run(run_model)
-        with _SessionFactory() as session:
-            orm = session.get(SourcingRunORM, run_id)
-            if orm and orm.current_phase == Phase.SOURCING.value:
-                orm.sourcing_results_json = json.dumps(result)
-                orm.current_phase = Phase.COMPARISON.value
-                orm.updated_at = datetime.now(timezone.utc)
-                session.commit()
-        log.info("[%s] Sourcing complete → comparison", run_id)
     except Exception as exc:
         log.error("[%s] Sourcing failed: %s", run_id, exc)
         with _SessionFactory() as session:
@@ -310,6 +315,47 @@ def _run_sourcing_background(
                 })
                 orm.updated_at = datetime.now(timezone.utc)
                 session.commit()
+        return
+
+    # ── Step 2: Comparison (parallel, phase stays SOURCING) ─────────────────
+    try:
+        from utils.procurement_agent.agents.spec_comparison_agent import SpecComparisonAgent
+        comp_agent = SpecComparisonAgent(
+            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY")
+        )
+        work = [
+            (candidate, tier_num)
+            for tier_key, tier_num in [("tier_1", 1), ("tier_2", 2), ("tier_3", 3)]
+            for candidate in result.get(tier_key, {}).get("results", [])
+        ]
+
+        def _compare_one(args: tuple) -> tuple:
+            candidate, tier_num = args
+            try:
+                return candidate, comp_agent.run(run_model, candidate, tier=tier_num)
+            except Exception as cexc:
+                log.warning("[%s] Comparison skipped for %s: %s",
+                            run_id, candidate.get("vendor_name"), cexc)
+                return candidate, None
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            for candidate, artifact in pool.map(_compare_one, work):
+                candidate["comparison_artifact"] = artifact
+
+        log.info("[%s] Comparison artifacts attached (%d candidates)", run_id, len(work))
+    except Exception as exc:
+        log.error("[%s] Comparison step failed: %s", run_id, exc)
+        # Non-fatal: advance to COMPARISON with artifacts absent rather than stalling.
+
+    # ── Step 3: Persist final results and advance phase ──────────────────────
+    with _SessionFactory() as session:
+        orm = session.get(SourcingRunORM, run_id)
+        if orm and orm.current_phase == Phase.SOURCING.value:
+            orm.sourcing_results_json = json.dumps(result)
+            orm.current_phase = Phase.COMPARISON.value
+            orm.updated_at = datetime.now(timezone.utc)
+            session.commit()
+    log.info("[%s] Sourcing + comparison complete → comparison", run_id)
 
 
 # ---------------------------------------------------------------------------

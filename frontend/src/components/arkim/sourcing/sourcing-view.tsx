@@ -142,7 +142,7 @@ function SourcingLoadingState({ className }: { className?: string }) {
       </div>
       <p className="text-sm text-fg-3 max-w-xs">
         Scanning Arkim network, open marketplace, and specialist vendors. This
-        typically takes 30–60 seconds.
+        typically takes 30–90 seconds.
       </p>
       <div className="flex flex-col gap-2 w-full max-w-xs mt-2">
         {[85, 65, 75, 55].map((w, i) => (

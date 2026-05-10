@@ -144,13 +144,17 @@ in dot-leader format (label … value).
 ### Loading state
 Shown when `results === null`. Centered, blue pulsing dot.
 - Header: "Sourcing in progress…"
-- Subtext: "Scanning Arkim network, open marketplace, and specialist vendors. This typically takes 30–60 seconds."
+- Subtext: "Scanning Arkim network, open marketplace, and specialist vendors. This typically takes 30–90 seconds."
 - Four animated skeleton bars, staggered opacity.
 
 ### Polling
 `useRunLive` polls every **5 seconds** while phase is in
 `["sourcing", "executing", "fulfilling", "inventory"]`. Polling stops for all
 other phases. TanStack Query handles refetch; no manual interval management.
+
+Comparison artifact generation runs while phase is still `sourcing`. Phase
+advances to `comparison` only after artifacts are written — the frontend
+always receives a complete payload on its first post-transition poll.
 
 ### Tier layout
 
