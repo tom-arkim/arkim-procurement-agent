@@ -450,6 +450,8 @@ class IntakeAgent:
         if not self._api_key:
             return self._fallback_extract(prior_specs)
 
+        pn_hint = self._pn_prefix_hint(text, prior_specs)
+
         content: list = []
 
         for img_bytes in images[:4]:
@@ -467,10 +469,20 @@ class IntakeAgent:
                                     "confidence_reasoning") and v not in _NULL_VALUES}
             context = f"Previously extracted specs:\n{json.dumps(summary)}\n\n"
 
+        hint_prefix = ""
+        if pn_hint:
+            mfg_name, mfg_conf = pn_hint
+            print(f"[IntakeAgent] PN prefix match (multimodal) → manufacturer={mfg_name!r} conf={mfg_conf}")
+            hint_prefix = (
+                f"SYSTEM NOTE: The part number prefix matches our records. "
+                f"This part is manufactured by {mfg_name}. "
+                f"Set manufacturer={mfg_name!r} and manufacturer_confidence={mfg_conf}.\n\n"
+            )
+
         content.append({
             "type": "text",
             "text": (
-                f"{context}Extract all equipment/part specifications visible in the "
+                f"{hint_prefix}{context}Extract all equipment/part specifications visible in the "
                 f"image(s) and from the text below.\n\n{text or '(no additional text)'}"
             ),
         })
@@ -492,7 +504,15 @@ class IntakeAgent:
                 timeout=30,
             )
             resp.raise_for_status()
-            return self._parse_llm_json(resp.json()["content"][0]["text"])
+            extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
+            if pn_hint:
+                mfg_name, mfg_conf = pn_hint
+                llm_mfg = extracted.get("manufacturer") or ""
+                llm_conf = float(extracted.get("manufacturer_confidence") or 0)
+                if llm_mfg in _NULL_VALUES or llm_conf < mfg_conf:
+                    extracted["manufacturer"] = mfg_name
+                    extracted["manufacturer_confidence"] = mfg_conf
+            return extracted
         except Exception as exc:
             detail = ""
             if hasattr(exc, "response") and exc.response is not None:
