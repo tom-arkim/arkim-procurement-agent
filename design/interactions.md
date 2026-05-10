@@ -244,8 +244,18 @@ Label "Suitability" (shrink-0, w-16) + `MatchBar` + percentage label.
 - Sub-label (monospace 9px):
   - CA facility: "Procured through Arkim"
   - Non-CA: "Visit vendor · your procurement"
-- CA facility buy action: fires `selectCandidate` mutation.
-- Non-CA buy action: `window.open(url, "_blank", "noopener,noreferrer")`.
+- CA facility buy action: opens confirmation modal (see below). Non-CA: `window.open(url, "_blank", "noopener,noreferrer")`.
+
+### CA Buy Now confirmation modal
+Shown before `selectCandidate` fires for CA facilities. Rationale: no actual
+transaction occurs yet; modal prevents misrepresentation in demos.
+
+- `role="dialog"`, `aria-modal="true"`, `aria-labelledby` wired to title.
+- Escape key dismisses. Backdrop click dismisses.
+- Title: "Buy Now via Arkim"
+- Body: explains MoR infrastructure is pending; selection advances run to approval only.
+- "Cancel" — closes modal, no state change.
+- "Continue to approval" (primary) — fires `selectCandidate` mutation, closes modal.
 
 ### External link button
 Ghost variant, External icon (13px). Shown only if URL present.

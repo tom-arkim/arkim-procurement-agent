@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Pill } from "@/components/ui/pill";
@@ -36,10 +37,18 @@ export function VendorCard({ candidate, runId, facilityState, className }: Vendo
   const select = useSelectCandidate(runId);
   const isCA = facilityState === "CA";
   const hasPrice = candidate.price != null;
+  const [showBuyModal, setShowBuyModal] = useState(false);
+
+  useEffect(() => {
+    if (!showBuyModal) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setShowBuyModal(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showBuyModal]);
 
   const handleBuy = () => {
     if (isCA) {
-      select.mutate({ candidate_id: candidate.id, tier: candidate.tier });
+      setShowBuyModal(true);
     } else {
       window.open(candidate.url, "_blank", "noopener,noreferrer");
     }
@@ -148,6 +157,48 @@ export function VendorCard({ candidate, runId, facilityState, className }: Vendo
           </Button>
         )}
       </div>
+
+      {showBuyModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => setShowBuyModal(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="buy-modal-title"
+        >
+          <div
+            className="bg-bg-1 border border-hr-2 rounded-card p-6 max-w-md w-full mx-4 flex flex-col gap-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p id="buy-modal-title" className="font-mono text-sm font-bold text-fg-1">
+              Buy Now via Arkim
+            </p>
+            <p className="font-mono text-xs text-fg-3 leading-relaxed">
+              Procurement transactions through Arkim will be available once our
+              merchant-of-record infrastructure goes live. For now, this records your
+              candidate selection and advances the run to approval. Your facility can
+              complete the purchase using your existing procurement process; Arkim will
+              handle this end-to-end at launch.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <Button variant="secondary" size="sm" onClick={() => setShowBuyModal(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                loading={select.isPending}
+                onClick={() => {
+                  select.mutate({ candidate_id: candidate.id, tier: candidate.tier });
+                  setShowBuyModal(false);
+                }}
+              >
+                Continue to approval
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
