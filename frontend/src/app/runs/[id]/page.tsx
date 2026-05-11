@@ -82,7 +82,7 @@ function IntakeView({
 function TransitionalView({ run, phase }: { run: SourcingRunDetail; phase: Phase }) {
   const isProcessing = ["inventory", "sourcing", "executing", "fulfilling"].includes(phase);
   const isApproval = ["pending_first_approval", "pending_second_approval"].includes(phase);
-  const isDone = ["completed", "approved"].includes(phase);
+  const isDone = phase === "completed";
   const isFailed = ["cancelled", "error"].includes(phase);
 
   return (
@@ -188,8 +188,6 @@ function isSourcingPhase(phase: Phase) {
   return [
     "sourcing",
     "comparison",
-    "pending_first_approval",
-    "pending_second_approval",
     "approved",
   ].includes(phase);
 }

@@ -41,8 +41,8 @@ this file in the same commit.
 | Phase(s) | View |
 |---|---|
 | `intake`, `inventory` | `IntakeView` (two-column) |
-| `sourcing`, `comparison`, `pending_first_approval`, `pending_second_approval`, `approved` | `SourcingView` |
-| `executing`, `fulfilling`, `completed`, `cancelled`, `error` | `TransitionalView` |
+| `sourcing`, `comparison`, `approved` | `SourcingView` |
+| `pending_first_approval`, `pending_second_approval`, `executing`, `fulfilling`, `completed`, `cancelled`, `error` | `TransitionalView` |
 
 ### TransitionalView states
 
@@ -50,7 +50,7 @@ this file in the same commit.
 |---|---|---|
 | `executing`, `fulfilling` | Blue pulsing dot | "The sourcing pipeline is running. This page will update automatically." |
 | `pending_first_approval`, `pending_second_approval` | Amber pill | "Waiting for approver sign-off. The run will advance once approved." |
-| `completed`, `approved` | Green pill | "Run complete. Results and selected vendor are locked." |
+| `completed` | Green pill | "Run complete. Results and selected vendor are locked." |
 | `cancelled`, `error` | Red pill | "This run was cancelled or encountered an error." |
 
 ### Phase progress bar (five steps)
