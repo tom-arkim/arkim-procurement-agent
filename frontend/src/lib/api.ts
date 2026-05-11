@@ -148,6 +148,18 @@ export async function confirmIntake(
   return request(`/runs/${runId}/confirm-intake`, { method: "POST" });
 }
 
+export async function openFromPending(
+  runId: string,
+): Promise<{ run_id: string; phase: string }> {
+  return request(`/runs/${runId}/open-from-pending`, { method: "POST" });
+}
+
+export async function rejectSubmission(
+  runId: string,
+): Promise<{ run_id: string; phase: string }> {
+  return request(`/runs/${runId}/reject-submission`, { method: "POST" });
+}
+
 export async function initiateOutreach(
   runId: string,
   body: OutreachRequest,

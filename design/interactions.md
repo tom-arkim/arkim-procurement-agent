@@ -40,6 +40,7 @@ this file in the same commit.
 
 | Phase(s) | View |
 |---|---|
+| `pending_intake` | `PendingIntakeView` (centered, single column) |
 | `intake`, `inventory` | `IntakeView` (two-column) |
 | `sourcing`, `comparison`, `approved` | `SourcingView` |
 | `pending_first_approval`, `pending_second_approval`, `executing`, `fulfilling`, `completed`, `cancelled`, `error` | `TransitionalView` |
@@ -57,7 +58,7 @@ this file in the same commit.
 Steps: `Intake → Sourcing → Comparison → Approval → Completed`
 
 Phase-to-step mapping:
-- `inventory` → Intake
+- `pending_intake`, `inventory` → Intake
 - `comparison` → Comparison
 - `pending_first_approval`, `pending_second_approval`, `approved`, `executing` → Approval
 - `fulfilling`, `completed`, `cancelled` → Completed
@@ -438,3 +439,62 @@ Frontend never needs to check these flags directly.
 | `selectCandidate` | run detail + run list |
 | `initiateOutreach` | run detail only |
 | `saveOutreach` | none (local selection state only) |
+| `openFromPending` | run detail + run list |
+| `rejectSubmission` | run detail + run list |
+
+---
+
+## 14. Maintenance Handoff (pending_intake phase)
+
+### Handoff payload schema
+
+| Field | Type | Notes |
+|---|---|---|
+| `submission_id` | `string` | Opaque ID from the maintenance app |
+| `facility_id` | `string` | Must match a known facility |
+| `submitted_by` | `string` | Display name of the maintenance tech |
+| `asset_specs` | `object \| null` | Pre-populated specs; seeded into `asset_specs_json` |
+| `context.chat_thread_summary` | `string` | Full maintenance conversation summary |
+| `context.urgency` | `"emergency" \| "predictive" \| "standard"` | Maps to urgency_factor (0.9 / 0.5 / 0.3) |
+| `context.work_order_id` | `string \| null` | Optional; shown as monospace badge |
+| `context.asset_tag` | `string \| null` | Optional; shown as monospace badge |
+
+### Runs list: Pending from Maintenance queue
+
+- A second section, labelled "Pending from maintenance", appears above the Active section when any `pending_intake` run exists.
+- `phaseTone("pending_intake")` → `"amber"`. Pill shows `PHASE_LABELS["pending_intake"]` = "Maintenance".
+- No pulse dot — `isLive` returns `false` for `pending_intake` (waiting on human action, not a running pipeline).
+- "Active" section header only renders when both pending and active sections are non-empty.
+
+### PendingIntakeView layout
+
+Centered single-column. Top to bottom:
+1. `PhaseBar` (maps `pending_intake` → "Intake" step)
+2. Amber "Maintenance Handoff" pill + submitted_by text
+3. `work_order_id` and `asset_tag` as monospace badges (omitted when null)
+4. Asset card: manufacturer · model, part_number (omitted when specs absent)
+5. Context card (`amber-tint` bg, `amber-line` border): `chat_thread_summary` text
+6. Two action buttons: "Open for Review" (primary) + "Reject Submission" (ghost, `red-fg`)
+
+### Open for Review transition
+
+- `POST /api/runs/{run_id}/open-from-pending`
+- Backend: `pending_intake → intake`; injects `chat_thread_summary` as a synthetic `role: "agent"` message into `_messages[run_id]`
+- On success: invalidate run detail + run list → `useRunLive` refetch → phase changes to `intake` → routing predicate `isPendingIntakePhase` returns false → `isIntakePhase` returns true → `IntakeView` renders
+- Chat panel displays the synthetic agent message as the first message; ConfirmCard appears because `asset_specs` is already populated from the handoff
+
+### Reject Submission transition
+
+- `POST /api/runs/{run_id}/reject-submission`
+- Backend: `pending_intake → cancelled`
+- On success: push amber toast "Submission rejected" → `router.push("/runs")` → run disappears from Pending queue (phase is now `cancelled`, filtered out)
+
+### Button states
+
+- Both buttons disabled while either mutation is `isPending`
+- "Open for Review" label → "Opening…" while `openMut.isPending`
+- "Reject Submission" label → "Rejecting…" while `rejectMut.isPending`
+
+### Seeded demo run
+
+`_seed_demo_maintenance_run()` runs at API server startup (idempotent: skips if any `pending_intake` run exists). Creates one E+H Promag 10W run at `fac-stockton` with `urgency_factor = 0.9` (emergency). Submission ID: `maint-sub-demo-001`.

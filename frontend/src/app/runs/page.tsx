@@ -15,7 +15,7 @@ import { cn } from "@/lib/utils";
 
 function phaseTone(phase: Phase): "blue" | "green" | "amber" | "red" | "ghost" {
   if (["completed", "approved"].includes(phase)) return "green";
-  if (["pending_first_approval", "pending_second_approval"].includes(phase)) return "amber";
+  if (["pending_first_approval", "pending_second_approval", "pending_intake"].includes(phase)) return "amber";
   if (["cancelled", "error"].includes(phase)) return "red";
   if (["intake", "inventory", "sourcing", "comparison", "executing", "fulfilling"].includes(phase))
     return "blue";
@@ -43,6 +43,9 @@ function formatDate(iso: string) {
 
 export default function RunsPage() {
   const { data: runs, isLoading, isError } = useRuns();
+
+  const pendingRuns = runs?.filter((r) => r.phase === "pending_intake") ?? [];
+  const activeRuns = runs?.filter((r) => r.phase !== "pending_intake") ?? [];
 
   return (
     <div className="flex flex-col h-full">
@@ -73,10 +76,32 @@ export default function RunsPage() {
         )}
         {runs && runs.length === 0 && <EmptyState />}
         {runs && runs.length > 0 && (
-          <div className="flex flex-col gap-2">
-            {runs.map((run) => (
-              <RunCard key={run.id} run={run} />
-            ))}
+          <div className="flex flex-col gap-4">
+            {/* Pending from maintenance */}
+            {pendingRuns.length > 0 && (
+              <div className="flex flex-col gap-2">
+                <div className="section-cap">
+                  Pending from maintenance <span className="rule" />
+                </div>
+                {pendingRuns.map((run) => (
+                  <RunCard key={run.id} run={run} />
+                ))}
+              </div>
+            )}
+
+            {/* Active sourcing runs */}
+            {activeRuns.length > 0 && (
+              <div className="flex flex-col gap-2">
+                {pendingRuns.length > 0 && (
+                  <div className="section-cap">
+                    Active <span className="rule" />
+                  </div>
+                )}
+                {activeRuns.map((run) => (
+                  <RunCard key={run.id} run={run} />
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

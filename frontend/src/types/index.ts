@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 
 export type Phase =
+  | "pending_intake"
   | "intake"
   | "inventory"
   | "sourcing"
@@ -179,6 +180,7 @@ export interface SourcingRunListItem {
   facility_id: string;
   asset_summary?: string;
   amount?: number;
+  maintenance_submission_id?: string;
   created_at: string;
   updated_at: string;
 }
@@ -205,6 +207,7 @@ export interface SourcingRunDetail {
   approval_history: ApprovalActionRecord[];
   completion_event?: CompletionEvent;
   tier3_selection?: string[];
+  maintenance_handoff?: Record<string, unknown>;
   messages?: ChatMessage[];
   created_at: string;
   updated_at: string;
@@ -292,6 +295,7 @@ export function urgencyTone(u: Urgency): "red" | "amber" | "ghost" {
 
 /** Phase → design system label (matches design canvas Phase component) */
 export const PHASE_LABELS: Record<Phase, string> = {
+  pending_intake: "Maintenance",
   intake: "Intake",
   inventory: "Inventory",
   sourcing: "Sourcing",
@@ -312,6 +316,7 @@ export type PhaseStep = (typeof PHASE_STEPS)[number];
 
 export function phaseToStep(phase: Phase): PhaseStep {
   const map: Record<Phase, PhaseStep> = {
+    pending_intake: "Intake",
     intake: "Intake",
     inventory: "Intake",
     sourcing: "Sourcing",

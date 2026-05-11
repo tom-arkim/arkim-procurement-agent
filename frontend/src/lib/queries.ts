@@ -29,6 +29,8 @@ import {
   listFacilities,
   getApprovalRules,
   upsertApprovalRule,
+  openFromPending,
+  rejectSubmission,
 } from "./api";
 import { queryKeys } from "./query-client";
 import type {
@@ -230,6 +232,32 @@ export function useUpsertApprovalRule() {
       qc.invalidateQueries({
         queryKey: queryKeys.approvalRules.byFacility(variables.facility_id),
       });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance handoff: open / reject
+// ---------------------------------------------------------------------------
+
+export function useOpenFromPending(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => openFromPending(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.all() });
+    },
+  });
+}
+
+export function useRejectSubmission(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => rejectSubmission(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.all() });
     },
   });
 }

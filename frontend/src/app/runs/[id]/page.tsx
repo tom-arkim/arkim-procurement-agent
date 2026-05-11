@@ -6,6 +6,7 @@ import { RunSummaryBar } from "@/components/arkim/run-summary-bar";
 import { ChatPanel } from "@/components/arkim/intake/chat-panel";
 import { SpecPanel } from "@/components/arkim/intake/spec-panel";
 import { SourcingView } from "@/components/arkim/sourcing/sourcing-view";
+import { PendingIntakeView } from "@/components/arkim/pending-intake-view";
 import { PhaseBar } from "@/components/ui/phase";
 import { Pill } from "@/components/ui/pill";
 import { Dot } from "@/components/ui/pill";
@@ -36,7 +37,9 @@ export default function RunDetailPage({
       <RunSummaryBar run={run} />
 
       {/* Phase body */}
-      {isIntakePhase(phase) ? (
+      {isPendingIntakePhase(phase) ? (
+        <PendingIntakeView run={run} className="flex-1" />
+      ) : isIntakePhase(phase) ? (
         <IntakeView run={run} runId={id} />
       ) : isSourcingPhase(phase) ? (
         <SourcingView run={run} className="flex-1" />
@@ -179,6 +182,10 @@ function ErrorShell({ id }: { id: string }) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function isPendingIntakePhase(phase: Phase) {
+  return phase === "pending_intake";
+}
 
 function isIntakePhase(phase: Phase) {
   return ["intake", "inventory"].includes(phase);
