@@ -346,6 +346,16 @@ Sub-label below Send button: monospace 8.5px, "On your behalf · Arkim sends, yo
   connection loss).
 - IDs: auto-generated via `Math.random().toString(36).slice(2)` — not UUIDs.
 
+### Rendering (ToastStack component)
+- Mount: `providers.tsx`, inside `QueryClientProvider` — works across all routes.
+- Position: `fixed bottom-4 right-4`, `w-80`. Mobile (`max-sm`): `inset-x-4 w-auto` (full width minus margins), still anchored to bottom.
+- Stacking: `flex-col-reverse`, `gap-2`. Newest toast rendered last in array → appears at top. Maximum 5 visible; oldest evicted when limit exceeded.
+- Auto-dismiss: 4 000 ms for non-sticky. Sticky toasts dismissed via X button only.
+- Animation: slide-in from right + fade-in over 200ms on mount. Slide-out to right + fade-out over 200ms on dismiss (leaving state drives exit class before DOM removal).
+- Tone styling: `border-l-2` with `{tone}-line` left border; `{tone}-fg` icon. Base: `bg-bg-3 border-hr-2 shadow-card rounded-card`.
+- Structure: tone icon (left, 15px) · head + sub stacked (flex-1) · X dismiss button (right, 13px).
+- `z-[200]` — sits above modals (`z-50`) and sticky action bars (`z-10`).
+
 ---
 
 ## 10. Asset Specs Panel
