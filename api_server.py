@@ -69,6 +69,7 @@ def _migrate_schema() -> None:
     with _engine.connect() as conn:
         for stmt in [
             "ALTER TABLE sourcing_runs ADD COLUMN tier3_selection_json TEXT",
+            "ALTER TABLE sourcing_runs ADD COLUMN maintenance_handoff_json TEXT",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -79,6 +80,59 @@ def _migrate_schema() -> None:
 
 
 _migrate_schema()
+
+
+def _seed_demo_maintenance_run() -> None:
+    """Create one demo pending_intake run if none exists (idempotent)."""
+    with _SessionFactory() as session:
+        existing = (
+            session.query(SourcingRunORM)
+            .filter(SourcingRunORM.current_phase == Phase.PENDING_INTAKE.value)
+            .first()
+        )
+        if existing:
+            return
+        handoff = {
+            "submission_id": "maint-sub-demo-001",
+            "facility_id": "fac-stockton",
+            "submitted_by": "Jake Martinez",
+            "asset_specs": {
+                "manufacturer": "Endress+Hauser",
+                "model": "Promag 10W",
+                "part_number": "10W40-AA2B1AA0AAAA",
+                "description": "Electromagnetic flow meter",
+            },
+            "context": {
+                "chat_thread_summary": (
+                    "Jake reported intermittent flow reading failures on the Promag 10W "
+                    "electromagnetic flow meter (tag PUMP-BL-042) in the bottling line. "
+                    "Unit shows E:731 error code and readings drop to zero for 5–10 s "
+                    "every 2–3 hours. Likely coil or transmitter fault. Urgency: emergency — "
+                    "line cannot run at full capacity until resolved."
+                ),
+                "urgency": "emergency",
+                "work_order_id": "WO-2024-0892",
+                "asset_tag": "PUMP-BL-042",
+            },
+        }
+        now = datetime.now(timezone.utc)
+        run = SourcingRunORM(
+            id=str(uuid.uuid4()),
+            facility_id="fac-stockton",
+            current_phase=Phase.PENDING_INTAKE.value,
+            urgency_factor=0.9,
+            warranty_status="unknown",
+            asset_specs_json=json.dumps(handoff["asset_specs"]),
+            maintenance_handoff_json=json.dumps(handoff),
+            approval_history_json="[]",
+            initiated_at=now,
+            updated_at=now,
+        )
+        session.add(run)
+        session.commit()
+
+
+_seed_demo_maintenance_run()
 
 # ---------------------------------------------------------------------------
 # In-memory chat message store (Phase 3 prototype — cleared on server restart)
@@ -101,6 +155,7 @@ class RunListItem(BaseModel):
     facility_id: str
     asset_summary: Optional[str] = None   # e.g. "Goulds 3196MTX · 5HP pump"
     amount: Optional[float] = None
+    maintenance_submission_id: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -119,8 +174,24 @@ class RunDetail(BaseModel):
     approval_history: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
     tier3_selection: Optional[List[str]] = None
+    maintenance_handoff: Optional[Dict[str, Any]] = None
     created_at: str
     updated_at: str
+
+
+class SubmissionContext(BaseModel):
+    chat_thread_summary: str
+    urgency: str = "standard"   # "emergency" | "predictive" | "standard"
+    work_order_id: Optional[str] = None
+    asset_tag: Optional[str] = None
+
+
+class MaintenanceSubmission(BaseModel):
+    submission_id: str
+    facility_id: str
+    submitted_by: str
+    asset_specs: Optional[Dict[str, Any]] = None
+    context: SubmissionContext
 
 
 class CreateRunRequest(BaseModel):
@@ -205,6 +276,12 @@ _FACILITY_STATES: Dict[str, str] = {
     "fac-modesto":  "CA",
     "fac-fresno":   "CA",
     "fac-salinas":  "CA",
+}
+
+_URGENCY_FACTORS: Dict[str, float] = {
+    "emergency":  0.9,
+    "predictive": 0.5,
+    "standard":   0.3,
 }
 
 
@@ -405,6 +482,8 @@ def _orm_to_list_item(run: SourcingRunORM) -> RunListItem:
         if mfr or model:
             asset_summary = f"{mfr} {model}".strip()
 
+    handoff = json.loads(run.maintenance_handoff_json) if run.maintenance_handoff_json else {}
+
     return RunListItem(
         id=run.id,
         phase=run.current_phase,
@@ -413,6 +492,7 @@ def _orm_to_list_item(run: SourcingRunORM) -> RunListItem:
         facility_id=run.facility_id,
         asset_summary=asset_summary,
         amount=None,
+        maintenance_submission_id=handoff.get("submission_id"),
         created_at=run.initiated_at.isoformat() if run.initiated_at else "",
         updated_at=run.updated_at.isoformat() if run.updated_at else "",
     )
@@ -444,6 +524,7 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
             if isinstance(run.approval_history_json, str)
             else (run.approval_history_json or []),
         tier3_selection=json.loads(run.tier3_selection_json) if run.tier3_selection_json else None,
+        maintenance_handoff=_parse(run.maintenance_handoff_json),
         created_at=run.initiated_at.isoformat() if run.initiated_at else "",
         updated_at=run.updated_at.isoformat() if run.updated_at else "",
     )
@@ -495,6 +576,35 @@ def list_runs(
         return [_orm_to_list_item(r) for r in runs]
 
 
+@app.post("/api/runs/from-maintenance", status_code=201)
+def create_run_from_maintenance(body: MaintenanceSubmission):
+    """Create a sourcing run in pending_intake from a maintenance handoff payload."""
+    now = datetime.now(timezone.utc)
+    urgency_factor = _URGENCY_FACTORS.get(body.context.urgency, 0.3)
+    handoff_dict = body.model_dump()
+    run = SourcingRunORM(
+        id=str(uuid.uuid4()),
+        facility_id=body.facility_id,
+        current_phase=Phase.PENDING_INTAKE.value,
+        urgency_factor=urgency_factor,
+        warranty_status="unknown",
+        asset_specs_json=json.dumps(body.asset_specs) if body.asset_specs else None,
+        maintenance_handoff_json=json.dumps(handoff_dict),
+        approval_history_json="[]",
+        initiated_at=now,
+        updated_at=now,
+    )
+    with _SessionFactory() as session:
+        session.add(run)
+        session.commit()
+        run_id = run.id
+    return {
+        "run_id": run_id,
+        "phase": Phase.PENDING_INTAKE.value,
+        "maintenance_submission_id": body.submission_id,
+    }
+
+
 @app.get("/api/runs/{run_id}", response_model=RunDetail)
 def get_run(run_id: str):
     """Fetch full run state by ID."""
@@ -505,6 +615,52 @@ def get_run(run_id: str):
         detail = _orm_to_detail(run)
         detail.messages = _messages.get(run_id, [])
         return detail
+
+
+@app.post("/api/runs/{run_id}/open-from-pending")
+def open_from_pending(run_id: str):
+    """Transition pending_intake → intake and seed chat with the maintenance summary."""
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.current_phase != Phase.PENDING_INTAKE.value:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "Run is not in pending_intake phase", "current_phase": run.current_phase},
+            )
+        handoff = json.loads(run.maintenance_handoff_json) if run.maintenance_handoff_json else {}
+        summary = handoff.get("context", {}).get("chat_thread_summary")
+        run.current_phase = Phase.INTAKE.value
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+    if summary:
+        _messages[run_id] = [{
+            "id": str(uuid.uuid4()),
+            "role": "agent",
+            "content": summary,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }]
+    return {"run_id": run_id, "phase": Phase.INTAKE.value}
+
+
+@app.post("/api/runs/{run_id}/reject-submission")
+def reject_submission(run_id: str):
+    """Transition pending_intake → cancelled (maintenance handoff declined)."""
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if run.current_phase != Phase.PENDING_INTAKE.value:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "Run is not in pending_intake phase", "current_phase": run.current_phase},
+            )
+        run.current_phase = Phase.CANCELLED.value
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+    return {"run_id": run_id, "phase": Phase.CANCELLED.value}
 
 
 @app.post("/api/runs/{run_id}/messages", response_model=SendMessageResponse)

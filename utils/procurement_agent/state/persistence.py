@@ -80,6 +80,7 @@ class SourcingRunORM(Base):
     selected_candidate_json = Column(Text, nullable=True)
     approval_history_json = Column(Text, nullable=False, default="[]")
     tier3_selection_json = Column(Text, nullable=True)
+    maintenance_handoff_json = Column(Text, nullable=True)
 
     vendor_order_id = Column(String(200), nullable=True)
     fulfillment_status = Column(String(30), nullable=True)
@@ -178,6 +179,7 @@ def _orm_to_dict(row: SourcingRunORM) -> dict:
         "fulfillment_status": row.fulfillment_status,
         "inventory_update_json": _pj(row.inventory_update_json),
         "tier3_selection_json": _pj(row.tier3_selection_json),
+        "maintenance_handoff_json": _pj(row.maintenance_handoff_json),
         "work_order_link": row.work_order_link,
         "audit_log_run_id": row.audit_log_run_id,
         "agent_version": row.agent_version,

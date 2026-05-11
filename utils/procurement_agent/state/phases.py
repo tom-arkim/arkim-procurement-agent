@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class Phase(str, Enum):
     """All legal states of a SourcingRun, matching the brief Section 5 schema."""
+    PENDING_INTAKE = "pending_intake"
     INTAKE = "intake"
     INVENTORY = "inventory"
     SOURCING = "sourcing"
@@ -31,6 +32,7 @@ class Phase(str, Enum):
 # (added programmatically below) so this dict only lists the happy-path edges
 # plus the error-recovery edge (ERROR → INTAKE).
 _FORWARD: dict[Phase, Set[Phase]] = {
+    Phase.PENDING_INTAKE:            {Phase.INTAKE},
     Phase.INTAKE:                   {Phase.INVENTORY},
     Phase.INVENTORY:                {Phase.SOURCING},
     Phase.SOURCING:                 {Phase.COMPARISON},
