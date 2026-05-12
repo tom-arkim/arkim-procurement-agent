@@ -82,53 +82,47 @@ def _migrate_schema() -> None:
 _migrate_schema()
 
 
+_HANDOFFS_PATH = os.path.join(os.path.dirname(__file__), "data", "mock_maintenance_handoffs.json")
+
 def _seed_demo_maintenance_run() -> None:
-    """Create one demo pending_intake run if none exists (idempotent)."""
+    """Seed pending_intake runs from data/mock_maintenance_handoffs.json (idempotent per submission_id)."""
+    try:
+        with open(_HANDOFFS_PATH, encoding="utf-8") as f:
+            handoffs = json.load(f)
+    except FileNotFoundError:
+        return
+
     with _SessionFactory() as session:
-        existing = (
-            session.query(SourcingRunORM)
-            .filter(SourcingRunORM.current_phase == Phase.PENDING_INTAKE.value)
-            .first()
-        )
-        if existing:
-            return
-        handoff = {
-            "submission_id": "maint-sub-demo-001",
-            "facility_id": "fac-stockton",
-            "submitted_by": "Jake Martinez",
-            "asset_specs": {
-                "manufacturer": "Endress+Hauser",
-                "model": "Promag 10W",
-                "part_number": "10W40-AA2B1AA0AAAA",
-                "description": "Electromagnetic flow meter",
-            },
-            "context": {
-                "chat_thread_summary": (
-                    "Jake reported intermittent flow reading failures on the Promag 10W "
-                    "electromagnetic flow meter (tag PUMP-BL-042) in the bottling line. "
-                    "Unit shows E:731 error code and readings drop to zero for 5–10 s "
-                    "every 2–3 hours. Likely coil or transmitter fault. Urgency: emergency — "
-                    "line cannot run at full capacity until resolved."
-                ),
-                "urgency": "emergency",
-                "work_order_id": "WO-2024-0892",
-                "asset_tag": "PUMP-BL-042",
-            },
-        }
+        all_runs = session.query(SourcingRunORM).all()
+        existing_ids: set[str] = set()
+        for r in all_runs:
+            if r.maintenance_handoff_json:
+                try:
+                    sid = json.loads(r.maintenance_handoff_json).get("submission_id")
+                    if sid:
+                        existing_ids.add(sid)
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
+        _urgency_map = {"emergency": 0.9, "predictive": 0.6, "standard": 0.3, "stocking": 0.1}
         now = datetime.now(timezone.utc)
-        run = SourcingRunORM(
-            id=str(uuid.uuid4()),
-            facility_id="fac-stockton",
-            current_phase=Phase.PENDING_INTAKE.value,
-            urgency_factor=0.9,
-            warranty_status="unknown",
-            asset_specs_json=json.dumps(handoff["asset_specs"]),
-            maintenance_handoff_json=json.dumps(handoff),
-            approval_history_json="[]",
-            initiated_at=now,
-            updated_at=now,
-        )
-        session.add(run)
+        for handoff in handoffs:
+            if handoff.get("submission_id") in existing_ids:
+                continue
+            urgency = handoff.get("context", {}).get("urgency", "standard")
+            run = SourcingRunORM(
+                id=str(uuid.uuid4()),
+                facility_id=handoff["facility_id"],
+                current_phase=Phase.PENDING_INTAKE.value,
+                urgency_factor=_urgency_map.get(urgency, 0.3),
+                warranty_status="unknown",
+                asset_specs_json=json.dumps(handoff.get("asset_specs")) if handoff.get("asset_specs") else None,
+                maintenance_handoff_json=json.dumps(handoff),
+                approval_history_json="[]",
+                initiated_at=now,
+                updated_at=now,
+            )
+            session.add(run)
         session.commit()
 
 
@@ -276,6 +270,7 @@ _FACILITY_STATES: Dict[str, str] = {
     "fac-modesto":  "CA",
     "fac-fresno":   "CA",
     "fac-salinas":  "CA",
+    "fac-cerritos": "CA",
 }
 
 _URGENCY_FACTORS: Dict[str, float] = {
@@ -1074,6 +1069,7 @@ _MOCK_FACILITIES: List[FacilityOut] = [
     FacilityOut(id="fac-modesto",  name="Bay Foods · Modesto",  state="CA"),
     FacilityOut(id="fac-fresno",   name="Bay Foods · Fresno",   state="CA"),
     FacilityOut(id="fac-salinas",  name="Bay Foods · Salinas",  state="CA"),
+    FacilityOut(id="fac-cerritos", name="Bay Foods · Cerritos", state="CA"),
 ]
 
 
