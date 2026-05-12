@@ -289,8 +289,14 @@ class SourcingAgent:
                 return []
 
             response = tavily.search(query=query, max_results=5)
-            options  = []
+            from utils.sourcing_archieved.tavily_client import NON_US_TLDS, NON_US_DOMAIN_HINTS
+            from urllib.parse import urlparse as _up
+            options = []
             for r in response.get("results", []):
+                h = (_up(r.get("url", "").lower()).hostname or "")
+                if any(h.endswith(t) for t in NON_US_TLDS) or any(x in h for x in NON_US_DOMAIN_HINTS):
+                    print(f"[SourcingAgent] Capability pivot: excluded non-US result {r.get('url')}")
+                    continue
                 options.append({
                     "vendor_name":               _vendor_name_from_url(r.get("url")) or r.get("title", "Unknown Distributor"),
                     "base_price":                0.0,

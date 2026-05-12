@@ -24,6 +24,10 @@ NON_US_DOMAIN_HINTS = (
     # UK/European industrial distributors that operate on .com TLDs with non-USD pricing
     "farnell", "rs-online", "rsonline", "element14", "rs-components",
     "rscomponents", "distrelec", "buerklin", "mouser.co",
+    # EU specialist distributors confirmed to appear in E+H sourcing runs
+    "tme.eu", "tme.com", "automation24",
+    # Note: "conrad" excluded from hints — substring match would hit unrelated .com domains
+    # (e.g. conradson.com). Add as explicit host entry in _KNOWN_VENDOR_HOSTS when needed.
 )
 
 from utils.sourcing_archieved.constants import (
