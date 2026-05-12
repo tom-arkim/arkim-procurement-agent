@@ -294,7 +294,7 @@ class IntakeAgent:
             merged["detected_type"]          = new_type
             merged["category"]               = new_cat
             merged["classification_override"] = True
-            print(f"[IntakeAgent] Units classification override: {old_type!r} → {new_type!r}")
+            print(f"[IntakeAgent] Units classification override: {old_type!r} -> {new_type!r}")
 
         prior_mfg_conf      = float(prior_specs.get("manufacturer_confidence") or 0)
         prior_part_conf     = float(prior_specs.get("part_id_confidence") or 0)
@@ -408,7 +408,7 @@ class IntakeAgent:
 
         if pn_hint:
             mfg_name, mfg_conf = pn_hint
-            print(f"[IntakeAgent] PN prefix match → manufacturer={mfg_name!r} conf={mfg_conf}")
+            print(f"[IntakeAgent] PN prefix match -> manufacturer={mfg_name!r} conf={mfg_conf}")
             hint_prefix = (
                 f"SYSTEM NOTE: The part number prefix matches our records. "
                 f"This part is manufactured by {mfg_name}. "
@@ -476,7 +476,7 @@ class IntakeAgent:
         hint_prefix = ""
         if pn_hint:
             mfg_name, mfg_conf = pn_hint
-            print(f"[IntakeAgent] PN prefix match (multimodal) → manufacturer={mfg_name!r} conf={mfg_conf}")
+            print(f"[IntakeAgent] PN prefix match (multimodal) -> manufacturer={mfg_name!r} conf={mfg_conf}")
             hint_prefix = (
                 f"SYSTEM NOTE: The part number prefix matches our records. "
                 f"This part is manufactured by {mfg_name}. "
