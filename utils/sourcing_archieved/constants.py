@@ -104,6 +104,17 @@ HIGH_RISK_ELECTRICAL_CATEGORIES = {
 # and a looser floor (35) to price_tbd inquiry candidates, with no floor for Tier 3.
 TIER_SURFACE_MIN_CONFIDENCE: float = 40.0
 
+# Minimum suitability_score (0-100) for a result to surface in the TCA comparison table.
+# Results below this are annotated with rejection_reason="suitability_below_floor" and
+# excluded from the UI. Suitability 0% indicates a search-redirect URL (already capped to
+# 5% by _COLLECTION_URL_PATTERNS) or a spec-unrelated result; 30% allows plausible
+# candidates while filtering both failure modes.
+#
+# Note: this is the first quality gate applied in the active SourcingAgent.run() pipeline.
+# The archived orchestrator filtering machinery (filtering.py, orchestrator.py) was not
+# connected to the active path — Items 4-6 build the first filter layer for production.
+TIER_SURFACE_MIN_SUITABILITY: float = 30.0
+
 # ---------------------------------------------------------------------------
 # Aftermarket sourcing
 # ---------------------------------------------------------------------------

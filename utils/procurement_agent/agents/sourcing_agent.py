@@ -72,6 +72,28 @@ def stem_part_number(pn: str, manufacturer: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Item 4 — Suitability quality gate
+# ---------------------------------------------------------------------------
+
+def _apply_suitability_floor(options: list[dict], threshold: float) -> None:
+    """Annotate options below the suitability floor with rejection_reason.
+
+    First-set wins: options already carrying a rejection_reason are skipped.
+    Mutates in place; options remain in the list for audit log capture.
+    """
+    for o in options:
+        if o.get("rejection_reason"):
+            continue
+        score = float(o.get("suitability_score") or 0.0)
+        if score < threshold:
+            o["rejection_reason"] = "suitability_below_floor"
+            print(
+                f"[SourcingAgent] Rejected (suitability_below_floor): {o.get('vendor_name')} "
+                f"suitability={score:.1f}% < {threshold:.0f}% floor"
+            )
+
+
+# ---------------------------------------------------------------------------
 # SourcingAgent
 # ---------------------------------------------------------------------------
 
@@ -133,6 +155,12 @@ class SourcingAgent:
         filters: list[str] = []
         if warranty == "in_warranty":
             filters.append("in_warranty: aftermarket excluded from tier_3")
+
+        # Item 4: suitability gate — first quality filter on the active pipeline path
+        from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+        for tier in (tier1, tier2, tier3):
+            _apply_suitability_floor(tier.get("results", []), TIER_SURFACE_MIN_SUITABILITY)
+        filters.append(f"suitability_floor:{TIER_SURFACE_MIN_SUITABILITY:.0f}%")
 
         tier3_pivot = any(
             r.get("search_type") == "capability_pivot"
