@@ -339,8 +339,17 @@ class SourcingAgent:
         # Fix 5 — capability pivot when Tier 2 returned zero results
         if tier2_count == 0 and specs.manufacturer not in _UNKNOWN_MANUFACTURERS:
             print(f"[SourcingAgent] Tier 3 capability pivot — Tier 2 empty for {specs.manufacturer!r}")
-            results = self._capability_search(specs)
-            return self._rank(results, weights)
+            seeded = self._seeded_tier3_candidates(specs)
+            seeded_names = {
+                _normalize_vendor_name(c.get("vendor_name") or "")
+                for c in seeded
+            }
+            pivot = self._capability_search(specs)
+            pivot_filtered = [
+                d for d in pivot
+                if _normalize_vendor_name(d.get("vendor_name") or "") not in seeded_names
+            ]
+            return self._rank(seeded + pivot_filtered, weights)
 
         try:
             from utils.sourcing_archieved.enterprise_search import (
