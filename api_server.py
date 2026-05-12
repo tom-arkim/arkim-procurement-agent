@@ -769,50 +769,124 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...)):
     """
     Upload a nameplate image for vision extraction.
 
-    Phase 1: validates the run exists and returns a stub extraction result.
-    Phase 2+: pipes to utils/vision.py.
+    Pipes image bytes to IntakeAgent multimodal extraction, updates asset_specs_json,
+    and returns a three-case agent reply:
+    (a) high confidence  — specs complete, confirm to proceed
+    (b) low confidence   — partial extraction, ask user to verify
+    (c) failed           — nothing readable, offer three recovery paths
     """
     with _SessionFactory() as session:
-        run = session.get(SourcingRunORM, run_id)
-        if not run:
+        orm = session.get(SourcingRunORM, run_id)
+        if not orm:
             raise HTTPException(status_code=404, detail="Run not found")
+        current_phase = orm.current_phase
+        prior_specs: Dict[str, Any] = (
+            json.loads(orm.asset_specs_json) if orm.asset_specs_json else {}
+        )
 
     contents = await file.read()
+    now = datetime.now(timezone.utc).isoformat()
 
-    upload_msg: Dict[str, Any] = {
+    thread = _messages.setdefault(run_id, [])
+    thread.append({
         "id": str(uuid.uuid4()),
         "role": "system",
         "content": f"Nameplate uploaded: {file.filename}",
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": now,
         "attachment": {
             "type": "image",
             "filename": file.filename,
             "size_bytes": len(contents),
         },
-    }
-    agent_msg: Dict[str, Any] = {
+    })
+
+    # Run IntakeAgent multimodal extraction
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    agent = IntakeAgent(anthropic_api_key=api_key)
+    run_obj = SourcingRun(
+        id=run_id,
+        current_phase=current_phase,
+        asset_specs_json=prior_specs,
+    )
+
+    try:
+        result = agent.run(run_obj, {"text": "", "images": [contents]})
+    except Exception:
+        traceback.print_exc()
+        result = None
+
+    if result is None:
+        # Extraction threw — treat as failed case
+        reply_text = (
+            "Something went wrong reading that image.\n\n"
+            "Options:\n"
+            "• Try uploading a clearer photo\n"
+            "• Type the key specs (manufacturer, model, part number) instead\n"
+            "• Continue with partial information already captured"
+        )
+        new_specs = prior_specs
+    else:
+        mfg_conf  = float(result.get("manufacturer_confidence") or 0)
+        part_conf = float(result.get("part_id_confidence") or 0)
+        specs     = result.get("asset_specs") or {}
+        mfg       = specs.get("manufacturer") or ""
+        model     = specs.get("model") or ""
+        pn        = specs.get("part_number") or ""
+
+        # (a) High confidence — both thresholds met
+        if result.get("sufficient"):
+            ident = " ".join(p for p in [mfg, pn or model] if p)
+            reply_text = (
+                f"Extracted: {ident} — specs are in the panel. "
+                "Review and confirm to start sourcing."
+            )
+        # (b) Low confidence — something extracted but thresholds not met
+        elif mfg and mfg not in ("Unknown", "N/A", "null", "unknown"):
+            ident = " ".join(p for p in [mfg, model] if p)
+            reply_text = (
+                f"Read the nameplate: {ident} "
+                f"(manufacturer confidence {mfg_conf:.0f}%). "
+                "Confidence is low — please verify the specs in the panel "
+                "or provide the part number directly."
+            )
+        # (c) Nothing readable
+        else:
+            reply_text = (
+                "Couldn't read the nameplate clearly.\n\n"
+                "Options:\n"
+                "• Try a clearer or closer photo\n"
+                "• Describe the part (manufacturer, model, part number)\n"
+                "• Continue with partial information already captured"
+            )
+
+        new_specs = specs
+
+        # Persist updated specs to DB
+        with _SessionFactory() as session:
+            orm = session.get(SourcingRunORM, run_id)
+            if orm:
+                orm.asset_specs_json = json.dumps(new_specs)
+                orm.updated_at = datetime.now(timezone.utc)
+                session.commit()
+
+    agent_reply: Dict[str, Any] = {
         "id": str(uuid.uuid4()),
         "role": "agent",
-        "content": (
-            f"I've received the nameplate image ({file.filename}, "
-            f"{len(contents):,} bytes). Vision extraction will run in Phase 4 — "
-            "for now, please type the key specs (manufacturer, model, part number) "
-            "so I can start searching."
-        ),
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "content": reply_text,
+        "created_at": now,
     }
-    thread = _messages.setdefault(run_id, [])
-    thread.append(upload_msg)
-    thread.append(agent_msg)
+    thread.append(agent_reply)
 
     return {
-        "run_id": run_id,
+        "run_id":   run_id,
         "filename": file.filename,
         "size_bytes": len(contents),
+        "message":  agent_reply,
         "extraction": {
-            "status": "stub",
-            "message": "Vision extraction will run in Phase 4.",
-            "fields_extracted": 0,
+            "status":           "ok" if result else "error",
+            "sufficient":       result.get("sufficient") if result else False,
+            "mfg_confidence":   result.get("manufacturer_confidence") if result else 0,
+            "part_confidence":  result.get("part_id_confidence") if result else 0,
         },
     }
 

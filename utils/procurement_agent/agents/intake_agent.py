@@ -468,8 +468,9 @@ class IntakeAgent:
         context = ""
         if prior_specs:
             summary = {k: v for k, v in prior_specs.items()
-                       if k not in ("manufacturer_confidence", "part_id_confidence",
-                                    "confidence_reasoning") and v not in _NULL_VALUES}
+                       if not isinstance(v, (list, dict))
+                       and k not in ("manufacturer_confidence", "part_id_confidence",
+                                     "confidence_reasoning") and v not in _NULL_VALUES}
             context = f"Previously extracted specs:\n{json.dumps(summary)}\n\n"
 
         hint_prefix = ""
