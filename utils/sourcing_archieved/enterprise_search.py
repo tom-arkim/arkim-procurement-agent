@@ -753,3 +753,56 @@ def _discover_aftermarket_specialists(
     if not options:
         print("[Sourcing] Aftermarket: no qualifying vendors found")
     return options
+
+
+# ---------------------------------------------------------------------------
+# URL-authoritative vendor identity (Item 7)
+# ---------------------------------------------------------------------------
+
+_KNOWN_VENDOR_HOSTS: dict[str, str] = {
+    # National distributors
+    "mouser.com":             "Mouser Electronics",
+    "digikey.com":            "DigiKey",
+    "grainger.com":           "Grainger",
+    "mcmaster.com":           "McMaster-Carr",
+    "mscdirect.com":          "MSC Industrial",
+    "motionindustries.com":   "Motion Industries",
+    "applied.com":            "Applied Industrial Technologies",
+    "fastenal.com":           "Fastenal",
+    "automationdirect.com":   "AutomationDirect",
+    # Industrial specialists (observed from sourcing runs)
+    "instrumart.com":         "Instrumart",
+    "instrumentation2go.com": "Instrumentation2Go",
+    "controlswarehouse.com":  "Controls Warehouse",
+    "galco.com":              "Galco Industrial",
+    # OEM direct
+    "endress.com":            "Endress+Hauser",
+    "rockwellautomation.com": "Rockwell Automation",
+    "abb.com":                "ABB",
+    "atlas-copco.com":        "Atlas Copco",
+    # Regional / observed from test runs
+    "vectorcontrols.com":     "Vector Controls",
+    "gebooth.com":            "GE Booth",
+    "carotek.com":            "Carotek",
+}
+
+
+def _vendor_name_from_url(url: str) -> Optional[str]:
+    """Return the canonical vendor name for a known host, or None.
+
+    Matches exact hostname (after stripping www.) and subdomain suffixes
+    so subdomains like e-direct.endress.com resolve to Endress+Hauser.
+    """
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        hostname = (urlparse(url.lower()).hostname or "").replace("www.", "")
+        if hostname in _KNOWN_VENDOR_HOSTS:
+            return _KNOWN_VENDOR_HOSTS[hostname]
+        for host, name in _KNOWN_VENDOR_HOSTS.items():
+            if hostname.endswith("." + host):
+                return name
+    except Exception:
+        pass
+    return None

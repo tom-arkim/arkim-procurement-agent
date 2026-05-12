@@ -207,9 +207,12 @@ class SourcingAgent:
         Fix 4: if the first search returns no results, retry with the stemmed PN.
         """
         try:
-            from utils.sourcing_archieved.enterprise_search import _call_enterprise_api
+            from utils.sourcing_archieved.enterprise_search import _call_enterprise_api, _vendor_name_from_url
             options = _call_enterprise_api(specs, search_mode="exact")
             dicts   = [self._option_to_dict(o) for o in options]
+            for d in dicts:
+                if canonical := _vendor_name_from_url(d.get("source_url") or ""):
+                    d["vendor_name"] = canonical
 
             # Fix 4 — stem-based fallback when exact search finds nothing
             if not dicts:
@@ -219,6 +222,9 @@ class SourcingAgent:
                     stemmed_specs = dataclasses.replace(specs, part_number=stem)
                     options2 = _call_enterprise_api(stemmed_specs, search_mode="broad")
                     dicts = [self._option_to_dict(o) for o in options2]
+                    for d in dicts:
+                        if canonical := _vendor_name_from_url(d.get("source_url") or ""):
+                            d["vendor_name"] = canonical
                     print(f"[SourcingAgent] Tier 2 stem fallback: {specs.part_number!r} → {stem!r}, {len(dicts)} result(s)")
 
             return self._rank(dicts, weights)
@@ -248,10 +254,14 @@ class SourcingAgent:
             from utils.sourcing_archieved.enterprise_search import (
                 _discover_national_specialists,
                 _discover_aftermarket_specialists,
+                _vendor_name_from_url,
             )
             national    = _discover_national_specialists(specs, [])
             aftermarket = _discover_aftermarket_specialists(specs, national)
             combined    = [self._option_to_dict(o) for o in (national + aftermarket)]
+            for d in combined:
+                if canonical := _vendor_name_from_url(d.get("source_url") or ""):
+                    d["vendor_name"] = canonical
             return self._rank(combined, weights)
         except Exception as exc:
             print(f"[SourcingAgent] Tier 3 failed: {exc}")
@@ -263,6 +273,7 @@ class SourcingAgent:
 
     def _capability_search(self, specs: AssetSpecs) -> list[dict]:
         """Search for authorized distributors when Tier 2 found nothing."""
+        from utils.sourcing_archieved.enterprise_search import _vendor_name_from_url
         mfg = (specs.manufacturer or "").strip()
         if not mfg or mfg in _UNKNOWN_MANUFACTURERS:
             return []
@@ -281,7 +292,7 @@ class SourcingAgent:
             options  = []
             for r in response.get("results", []):
                 options.append({
-                    "vendor_name":               r.get("title", "Unknown Distributor"),
+                    "vendor_name":               _vendor_name_from_url(r.get("url")) or r.get("title", "Unknown Distributor"),
                     "base_price":                0.0,
                     "lead_time_days":            7,
                     "reliability_score":         70.0,
