@@ -27,6 +27,7 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
 
   const chatDraft = useArkimStore((s) => s.chatDraft);
   const setChatDraft = useArkimStore((s) => s.setChatDraft);
+  const pushToast = useArkimStore((s) => s.pushToast);
 
   const sendMsg = useSendMessage(runId);
   const uploadFile = useUploadNameplate(runId);
@@ -64,7 +65,13 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
 
     sendMsg.mutate(
       { content: text },
-      { onError: () => setPending([]) },
+      {
+        onError: () => {
+          setPending([]);
+          setChatDraft(text);
+          pushToast({ tone: "amber", head: "Message failed", sub: "Check your connection and try again." });
+        },
+      },
     );
   };
 

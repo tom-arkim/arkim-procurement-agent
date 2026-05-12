@@ -284,7 +284,7 @@ class IntakeAgent:
         # Merge with prior specs — new non-null values win
         merged = dict(prior_specs)
         for k, v in extracted.items():
-            if v not in _NULL_VALUES:
+            if not isinstance(v, (list, dict)) and v not in _NULL_VALUES:
                 merged[k] = v
 
         # Fix 1: units-based classification override (runs after VLM merge)
@@ -361,7 +361,10 @@ class IntakeAgent:
         Confidence scores are intentionally included so the LLM knows what's already
         established and can score new information relative to that baseline.
         """
-        return {k: v for k, v in prior_specs.items() if v not in _NULL_VALUES}
+        return {
+            k: v for k, v in prior_specs.items()
+            if not isinstance(v, (list, dict)) and v not in _NULL_VALUES
+        }
 
     def _pn_prefix_hint(self, text: str, prior_specs: dict) -> Optional[tuple]:
         """Scan user text and prior specs for a known PN prefix.
@@ -548,7 +551,7 @@ class IntakeAgent:
                                           f"Can you provide the {missing_field.replace('_', ' ')}?")
 
         specs_summary = {k: v for k, v in specs.items()
-                         if v not in _NULL_VALUES
+                         if not isinstance(v, (list, dict)) and v not in _NULL_VALUES
                          and k not in ("manufacturer_confidence", "part_id_confidence",
                                        "confidence_reasoning")}
         user_msg = (

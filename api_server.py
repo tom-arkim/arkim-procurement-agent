@@ -709,7 +709,15 @@ def send_message(run_id: str, body: SendMessageRequest):
         })
     except Exception:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="IntakeAgent failed — check uvicorn console")
+        print(f"[send_message] IntakeAgent error for run={run_id} — returning synthetic reply")
+        err_reply: Dict[str, Any] = {
+            "id": str(uuid.uuid4()),
+            "role": "agent",
+            "content": "I hit an error processing your message. Please try rephrasing or restart the run.",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        thread.append(err_reply)
+        return SendMessageResponse(run_id=run_id, message=err_reply, updated_phase=current_phase)
     print(f"[send_message] sufficient={result['sufficient']} mfg_conf={result['manufacturer_confidence']} part_conf={result['part_id_confidence']}")
 
     # Determine reply — do NOT auto-advance on sufficient=True.
