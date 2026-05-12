@@ -72,6 +72,26 @@ def stem_part_number(pn: str, manufacturer: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Vendor name normalization
+# ---------------------------------------------------------------------------
+
+_VENDOR_SUFFIX_RE = re.compile(
+    r"\b(?:co(?:mpany)?|inc(?:orporated)?|llc|ltd|corp(?:oration)?|limited)\b\.?$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_vendor_name(name: str) -> str:
+    """Lowercase alphanumeric key, stripping legal suffixes (Co., Inc., LLC…).
+
+    "Gainesville Industrial Electric" and "Gainesville Industrial Electric Co."
+    both produce "gainesvilleindustrialelectric" so cross-tier dedup fires.
+    """
+    s = _VENDOR_SUFFIX_RE.sub("", (name or "").lower()).strip()
+    return re.sub(r"[^a-z0-9]", "", s)
+
+
+# ---------------------------------------------------------------------------
 # Quality filtering functions (Items 4 and 6)
 # ---------------------------------------------------------------------------
 
@@ -92,7 +112,7 @@ def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
 
     for tier_label, tier_data in (("tier_1", tier1), ("tier_2", tier2), ("tier_3", tier3)):
         for o in tier_data.get("results", []):
-            name = re.sub(r"[^a-z0-9]", "", (o.get("vendor_name") or "").lower())
+            name = _normalize_vendor_name(o.get("vendor_name") or "")
             if not name:
                 continue
             if name in seen:
@@ -333,7 +353,7 @@ class SourcingAgent:
             # Tavily results that duplicate a seeded name are dropped.
             seeded = self._seeded_tier3_candidates(specs)
             seeded_names = {
-                re.sub(r"[^a-z0-9]", "", (c.get("vendor_name") or "").lower())
+                _normalize_vendor_name(c.get("vendor_name") or "")
                 for c in seeded
             }
 
@@ -346,7 +366,7 @@ class SourcingAgent:
 
             tavily_filtered = [
                 d for d in raw_tavily
-                if re.sub(r"[^a-z0-9]", "", (d.get("vendor_name") or "").lower())
+                if _normalize_vendor_name(d.get("vendor_name") or "")
                    not in seeded_names
             ]
 
