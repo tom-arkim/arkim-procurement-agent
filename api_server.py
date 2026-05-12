@@ -350,6 +350,7 @@ def _transform_sourcing_results(raw: dict) -> dict:
         return [
             _transform_option(o, n, i)
             for i, o in enumerate(raw.get(key, {}).get("results", []))
+            if not o.get("rejection_reason")
         ]
     return {
         "tier1":               _tier("tier_1", 1),
