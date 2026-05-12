@@ -266,6 +266,11 @@ class SourcingAgent:
                     "found_part_number":          item.get("part_number"),
                 })
 
+        # Item 3: catalog wins — only seed when catalog finds nothing, so a real
+        # Tier 1 match for any other manufacturer always takes precedence.
+        if not results:
+            results = self._seeded_tier1_candidates(specs)
+
         return self._rank(results, weights)
 
     def _run_tier2(self, specs: AssetSpecs, weights: dict) -> list[dict]:
@@ -457,6 +462,61 @@ class SourcingAgent:
             })
         print(f"[SourcingAgent] Seeded {len(candidates)} OEM authorized Tier 3 candidate(s) for {specs.manufacturer!r}")
         return candidates
+
+    # ------------------------------------------------------------------
+    # Item 3 — Seeded Tier 1 Arkim Network candidate (catalog fallback)
+    # ------------------------------------------------------------------
+
+    def _seeded_tier1_candidates(self, specs: AssetSpecs) -> list[dict]:
+        """Return one Tier 1 Arkim Network candidate from seeded authorized brands.
+
+        Called only when the catalog match returns nothing, so real catalog
+        entries always take precedence over this synthetic fallback.
+
+        is_mock: reserved for future filtering (production exclusion,
+        programmatic distinction when real Tier 1 vendors exist). For demos,
+        mock vendors render normally.
+        """
+        try:
+            from utils.brand_intelligence import get_brand_relationships
+            from utils.sourcing_archieved.scoring import _detect_equip_type
+
+            if specs.manufacturer in _UNKNOWN_MANUFACTURERS:
+                return []
+
+            equip_kw = (
+                _detect_equip_type(specs)
+                or specs.detected_type
+                or specs.category
+                or "industrial"
+            )
+            br          = get_brand_relationships(specs.manufacturer, equip_kw)
+            auth_brands = br.get("authorized_service_brands") or []
+            if not auth_brands:
+                return []
+        except Exception:
+            return []
+
+        brand = auth_brands[0]
+        print(f"[SourcingAgent] Seeded Tier 1 mock candidate: {brand!r} for {specs.manufacturer!r}")
+        return [{
+            "vendor_name":                brand,
+            "base_price":                 0.0,
+            "lead_time_days":             4,
+            "reliability_score":          95.0,
+            "merchant_type":              "Arkim Network",
+            "match_type":                 "Exact OEM",
+            "source_url":                 None,
+            "price_tbd":                  True,
+            "suitability_score":          92.0,
+            "confidence_score":           88.0,
+            "vendor_authorization_status": "Authorized",
+            "onboarding_status":          "Active",
+            "in_stock":                   True,
+            "notes":                      "Arkim Network — OEM authorized. Confirmed pricing within 30 min.",
+            "found_part_number":          None,
+            "is_mock":                    True,
+        }]
 
     # ------------------------------------------------------------------
     # Helpers
