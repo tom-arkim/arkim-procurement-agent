@@ -323,12 +323,29 @@ class SourcingAgent:
                 _discover_aftermarket_specialists,
                 _vendor_name_from_url,
             )
+
+            # Item 8: seeded OEM authorized distributors anchor the list;
+            # Tavily results that duplicate a seeded name are dropped.
+            seeded = self._seeded_tier3_candidates(specs)
+            seeded_names = {
+                re.sub(r"[^a-z0-9]", "", (c.get("vendor_name") or "").lower())
+                for c in seeded
+            }
+
             national    = _discover_national_specialists(specs, [])
             aftermarket = _discover_aftermarket_specialists(specs, national)
-            combined    = [self._option_to_dict(o) for o in (national + aftermarket)]
-            for d in combined:
+            raw_tavily  = [self._option_to_dict(o) for o in (national + aftermarket)]
+            for d in raw_tavily:
                 if canonical := _vendor_name_from_url(d.get("source_url") or ""):
                     d["vendor_name"] = canonical
+
+            tavily_filtered = [
+                d for d in raw_tavily
+                if re.sub(r"[^a-z0-9]", "", (d.get("vendor_name") or "").lower())
+                   not in seeded_names
+            ]
+
+            combined = seeded + tavily_filtered
             return self._rank(combined, weights)
         except Exception as exc:
             print(f"[SourcingAgent] Tier 3 failed: {exc}")
@@ -386,6 +403,60 @@ class SourcingAgent:
         except Exception as exc:
             print(f"[SourcingAgent] Capability search failed: {exc}")
             return []
+
+    # ------------------------------------------------------------------
+    # Item 8 — Seeded Tier 3 authorized distributor candidates
+    # ------------------------------------------------------------------
+
+    def _seeded_tier3_candidates(self, specs: AssetSpecs) -> list[dict]:
+        """Synthesize Tier 3 candidates from seeded authorized distributor data.
+
+        Seeded authorized distributors should rank above Tavily-discovered Tier 3
+        results. Adjust if Tavily candidates regularly score 75+.
+        """
+        try:
+            from utils.brand_intelligence import get_brand_relationships
+            from utils.sourcing_archieved.scoring import _detect_equip_type
+
+            if specs.manufacturer in _UNKNOWN_MANUFACTURERS:
+                return []
+
+            equip_kw = (
+                _detect_equip_type(specs)
+                or specs.detected_type
+                or specs.category
+                or "industrial"
+            )
+            br          = get_brand_relationships(specs.manufacturer, equip_kw)
+            auth_brands = (br.get("authorized_service_brands") or [])[:5]
+            if not auth_brands:
+                return []
+        except Exception:
+            return []
+
+        candidates = []
+        for brand in auth_brands:
+            candidates.append({
+                "vendor_name":                brand,
+                "base_price":                 0.0,
+                "lead_time_days":             10,
+                "reliability_score":          85.0,
+                "merchant_type":              "OEM Authorized Distributor",
+                "match_type":                 "OEM Authorized Distributor",
+                "source_url":                 None,
+                "price_tbd":                  True,
+                "suitability_score":          88.0,
+                "confidence_score":           75.0,
+                "vendor_authorization_status": "Authorized",
+                "onboarding_status":          "Not Onboarded",
+                "in_stock":                   None,
+                "notes":                      f"OEM authorized distributor for {specs.manufacturer}",
+                "found_part_number":          None,
+                "is_authorized":              True,
+                "is_mock":                    True,
+            })
+        print(f"[SourcingAgent] Seeded {len(candidates)} OEM authorized Tier 3 candidate(s) for {specs.manufacturer!r}")
+        return candidates
 
     # ------------------------------------------------------------------
     # Helpers
