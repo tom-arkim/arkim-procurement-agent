@@ -72,8 +72,42 @@ def stem_part_number(pn: str, manufacturer: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Item 4 — Suitability quality gate
+# Quality filtering functions (Items 4 and 6)
 # ---------------------------------------------------------------------------
+
+def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
+    """Mark lower-tier duplicates of active higher-tier vendors.
+
+    Vendor identity: normalized vendor_name (lowercase alphanumeric only).
+    Priority: Tier 1 > Tier 2 > Tier 3. An active higher-tier entry claims the
+    vendor slot; the same vendor in a lower tier gets rejection_reason=
+    "duplicate_in_higher_tier". First-set wins: options already rejected are
+    left unchanged. Rejected higher-tier entries do NOT claim the slot, so the
+    same vendor can surface in a lower tier if the higher-tier result was poor.
+
+    Returns the count of newly-marked duplicates.
+    """
+    seen: set[str] = set()
+    deduped = 0
+
+    for tier_label, tier_data in (("tier_1", tier1), ("tier_2", tier2), ("tier_3", tier3)):
+        for o in tier_data.get("results", []):
+            name = re.sub(r"[^a-z0-9]", "", (o.get("vendor_name") or "").lower())
+            if not name:
+                continue
+            if name in seen:
+                if not o.get("rejection_reason"):
+                    o["rejection_reason"] = "duplicate_in_higher_tier"
+                    print(
+                        f"[SourcingAgent] Rejected (duplicate_in_higher_tier): "
+                        f"{o.get('vendor_name')!r} in {tier_label}"
+                    )
+                    deduped += 1
+            elif not o.get("rejection_reason"):
+                seen.add(name)
+
+    return deduped
+
 
 def _apply_suitability_floor(options: list[dict], threshold: float) -> None:
     """Annotate options below the suitability floor with rejection_reason.
@@ -161,6 +195,11 @@ class SourcingAgent:
         for tier in (tier1, tier2, tier3):
             _apply_suitability_floor(tier.get("results", []), TIER_SURFACE_MIN_SUITABILITY)
         filters.append(f"suitability_floor:{TIER_SURFACE_MIN_SUITABILITY:.0f}%")
+
+        # Item 6: cross-tier dedup — vendor in highest active tier wins
+        deduped = _dedup_across_tiers(tier1, tier2, tier3)
+        if deduped:
+            filters.append(f"cross_tier_dedup:{deduped}")
 
         tier3_pivot = any(
             r.get("search_type") == "capability_pivot"
