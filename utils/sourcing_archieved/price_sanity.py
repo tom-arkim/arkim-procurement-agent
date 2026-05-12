@@ -49,7 +49,7 @@ def _apply_price_sanity(items: list[dict], specs=None) -> list[dict]:
     if limited:
         for it in items:
             it["limited_price_data"] = True
-        print(f"[Sourcing] Price sanity: only {len(prices)} peer price(s) — limited_price_data flagged")
+        print(f"[Sourcing] Price sanity: only {len(prices)} peer price(s) -- limited_price_data flagged")
 
     if len(prices) == 1 and specs is not None and _pkg._tavily:
         ref_q = (f"{specs.manufacturer} {specs.model} {specs.part_number} "
@@ -73,7 +73,7 @@ def _apply_price_sanity(items: list[dict], specs=None) -> list[dict]:
                         if p is not None and float(p) > 0:
                             print(f"[Sourcing] Single-price sanity FAIL: "
                                   f"{item.get('vendor','?')} @ ${float(p):.2f} "
-                                  f"vs market ref ${ref_avg:.2f} — stripping price")
+                                  f"vs market ref ${ref_avg:.2f} -- stripping price")
                             item["price"]                = None
                             item["price_sanity_flagged"] = True
         except Exception as exc:
@@ -87,7 +87,7 @@ def _apply_price_sanity(items: list[dict], specs=None) -> list[dict]:
         p = item.get("price")
         if p is not None and float(p) > 0 and float(p) < threshold:
             print(f"[Sourcing] Price sanity FAIL: {item.get('vendor','?')} "
-                  f"@ ${float(p):.2f} vs peer avg ${avg:.2f} (threshold ${threshold:.2f}) — stripping price")
+                  f"@ ${float(p):.2f} vs peer avg ${avg:.2f} (threshold ${threshold:.2f}) -- stripping price")
             item["price"]                = None
             item["price_sanity_flagged"] = True
     return items

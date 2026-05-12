@@ -102,7 +102,7 @@ def _call_enterprise_api(specs: AssetSpecs,
             ))
             cached_vendors.add(vendor_name)
     else:
-        print("[Sourcing] Force refresh — bypassing price DB.")
+        print("[Sourcing] Force refresh -- bypassing price DB.")
 
     missing = [v for v in TARGET_VENDORS if v not in cached_vendors]
     if missing:
@@ -154,7 +154,7 @@ def _call_enterprise_api(specs: AssetSpecs,
 
             if not url or vendor in seen:
                 if not url:
-                    print(f"[Sourcing] Skipping {vendor} — no URL")
+                    print(f"[Sourcing] Skipping {vendor} -- no URL")
                 continue
             seen.add(vendor)
 
@@ -162,7 +162,7 @@ def _call_enterprise_api(specs: AssetSpecs,
             if is_coll:
                 exact_match = False
                 match_type  = "Functional Alternative"
-                print(f"[Sourcing] Collection page detected — flagging as Functional Alternative: {url}")
+                print(f"[Sourcing] Collection page detected -- flagging as Functional Alternative: {url}")
 
             if heavy and resolved_terms is None and ship_fee is None:
                 resolved_terms = "LTL Freight Required"
@@ -175,7 +175,7 @@ def _call_enterprise_api(specs: AssetSpecs,
 
             if found_pn is None and price is not None:
                 print(f"[Sourcing] PN Enforcement: {vendor} has no found_part_number "
-                      f"— stripping price, demoting to Inquiry Required")
+                      f"-- stripping price, demoting to Inquiry Required")
                 price = None
 
             snippet = snippet_map.get(url, "")
@@ -368,7 +368,7 @@ def _discover_national_specialists(specs: AssetSpecs,
     print(f"[Sourcing] Tier 2 national query: {query!r}")
 
     if not _pkg._tavily:
-        print("[Sourcing] Tier 2 skipped — Tavily not initialised.")
+        print("[Sourcing] Tier 2 skipped -- Tavily not initialised.")
         return []
 
     try:
@@ -458,7 +458,7 @@ def _discover_national_specialists(specs: AssetSpecs,
 
         # PN enforcement: no_match → annotate and skip scoring
         if pn_status == "no_match":
-            print(f"[Sourcing] Tier 2 PN no_match (pn_mismatch): {name} — "
+            print(f"[Sourcing] Tier 2 PN no_match (pn_mismatch): {name} -- "
                   f"found '{found_pn}' vs searched '{specs.part_number}'")
             options.append(SourcingOption(
                 vendor_name=name,
@@ -548,7 +548,7 @@ def _discover_national_specialists(specs: AssetSpecs,
             match_type=match_type,
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | "
+        print(f"  Tier 2: {name} -- {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | "
               f"{stier or 'no tier'} | pn={pn_status}")
 
     if not options:
@@ -644,7 +644,7 @@ def _discover_aftermarket_specialists(
 
     warranty = (getattr(specs, "warranty_status", None) or "").lower()
     if warranty == "in_warranty":
-        print("[Sourcing] Aftermarket pass skipped — asset is in warranty")
+        print("[Sourcing] Aftermarket pass skipped -- asset is in warranty")
         return []
 
     # Gate by AFTERMARKET_VIABLE_CATEGORIES rather than category field.
@@ -655,7 +655,7 @@ def _discover_aftermarket_specialists(
     # guard below catches it anyway.
     dtype_lower = (getattr(specs, "detected_type", None) or "").lower()
     if not any(cat in dtype_lower for cat in AFTERMARKET_VIABLE_CATEGORIES):
-        print(f"[Sourcing] Aftermarket pass skipped — '{dtype_lower}' not in viable categories")
+        print(f"[Sourcing] Aftermarket pass skipped -- '{dtype_lower}' not in viable categories")
         return []
 
     if not _pkg._tavily:
@@ -748,7 +748,7 @@ def _discover_aftermarket_specialists(
             notes=f"Aftermarket equivalent — {url}" if url else "Aftermarket equivalent",
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Aftermarket: {name} — {tag} | {lead}d | suit={suit:.0f}% | conf={conf:.0f}%")
+        print(f"  Aftermarket: {name} -- {tag} | {lead}d | suit={suit:.0f}% | conf={conf:.0f}%")
 
     if not options:
         print("[Sourcing] Aftermarket: no qualifying vendors found")

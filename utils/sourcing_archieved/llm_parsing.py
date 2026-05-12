@@ -101,7 +101,7 @@ def _llm_parse_results(specs, results: list[dict]) -> list[dict]:
 
     import utils.sourcing_archieved as _pkg
     if not _pkg.ANTHROPIC_API_KEY:
-        print("[Sourcing] No Anthropic API key — cannot parse results.")
+        print("[Sourcing] No Anthropic API key -- cannot parse results.")
         return []
 
     _BATCH_SIZE = 5

@@ -317,7 +317,7 @@ class SourcingAgent:
                     for d in dicts:
                         if canonical := _vendor_name_from_url(d.get("source_url") or ""):
                             d["vendor_name"] = canonical
-                    print(f"[SourcingAgent] Tier 2 stem fallback: {specs.part_number!r} → {stem!r}, {len(dicts)} result(s)")
+                    print(f"[SourcingAgent] Tier 2 stem fallback: {specs.part_number!r} -> {stem!r}, {len(dicts)} result(s)")
 
             return self._rank(dicts, weights)
         except Exception as exc:
@@ -333,12 +333,12 @@ class SourcingAgent:
         distributor search instead of the standard part-specific queries.
         """
         if warranty == "in_warranty":
-            print("[SourcingAgent] Tier 3 skipped — asset in warranty")
+            print("[SourcingAgent] Tier 3 skipped -- asset in warranty")
             return []
 
         # Fix 5 — capability pivot when Tier 2 returned zero results
         if tier2_count == 0 and specs.manufacturer not in _UNKNOWN_MANUFACTURERS:
-            print(f"[SourcingAgent] Tier 3 capability pivot — Tier 2 empty for {specs.manufacturer!r}")
+            print(f"[SourcingAgent] Tier 3 capability pivot -- Tier 2 empty for {specs.manufacturer!r}")
             seeded = self._seeded_tier3_candidates(specs)
             seeded_names = {
                 _normalize_vendor_name(c.get("vendor_name") or "")
