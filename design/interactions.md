@@ -169,8 +169,12 @@ Shown when `results === null`. Centered, blue pulsing dot.
 
 ### Polling
 `useRunLive` polls every **5 seconds** while phase is in
-`["sourcing", "executing", "fulfilling", "inventory"]`. Polling stops for all
+`["sourcing", "executing", "fulfilling", "inventory", "comparison"]`. Polling stops for all
 other phases. TanStack Query handles refetch; no manual interval management.
+
+`comparison` is included because Tier 1 mock confirmation responses are delivered
+asynchronously while the run remains in `comparison` — polling picks them up without
+a manual refresh.
 
 Comparison artifact generation runs while phase is still `sourcing`. Phase
 advances to `comparison` only after artifacts are written — the frontend
@@ -258,72 +262,104 @@ shown as green pill if present.
 ### Suitability bar
 Label "Suitability" (shrink-0, w-16) + `MatchBar` + percentage label.
 
-### Buy button
-- Tier 1: primary variant. Tier 2+: secondary variant.
-- Label: "Buy Now" if price present, "Request Quote" otherwise.
-- Sub-label (monospace 9px):
-  - CA facility: "Procured through Arkim"
-  - Non-CA: "Visit vendor · your procurement"
-- CA facility buy action: opens confirmation modal (see below). Non-CA: `window.open(url, "_blank", "noopener,noreferrer")`.
+### Tier 1 action states
 
-### CA Buy Now confirmation modal
-Shown before `selectCandidate` fires for CA facilities. Rationale: no actual
-transaction occurs yet; modal prevents misrepresentation in demos.
+Each Tier 1 card resolves to one of three states based on `candidate.confirmationPending`
+(server-side flag, flipped by backend after mock delay) and Zustand `tier1ConfirmSentAt`:
+
+| State | Condition | Display |
+|---|---|---|
+| Request Confirmation | `confirmationPending === true` AND no Zustand sentAt | Primary "Request Confirmation" button. Fires `POST /runs/{id}/request-confirmation`, then records sentAt in Zustand on success. |
+| Awaiting response | `confirmationPending === true` AND sentAt present in Zustand | Disabled ghost button with Clock icon + "Awaiting response". Sub-label: "Sent HH:MM". |
+| Buy Now | `confirmationPending === false` (backend flipped after mock delay, delivered via polling) | Primary "Buy Now" / "Request Quote" button → Buy Now modal → `selectCandidate`. |
+
+Sub-label is "Procured through Arkim" in Request and Buy Now states; "Sent HH:MM" in Awaiting state.
+
+### Tier 2 action
+Always shows secondary "Buy Now" (or "Request Quote" if no price). Buy action opens
+confirmation modal → `selectCandidate` → approval.
+
+Sub-label: "Available via marketplace · Arkim purchases".
+
+### Buy Now confirmation modal
+Applies to both Tier 1 (Buy Now state) and Tier 2. All Arkim-mediated purchases go through
+this modal — no `window.open` external redirects for primary actions.
 
 - `role="dialog"`, `aria-modal="true"`, `aria-labelledby` wired to title.
 - Escape key dismisses. Backdrop click dismisses.
 - Title: "Buy Now via Arkim"
+- Subtitle (tier-appropriate, monospace xs, tertiary):
+  - Tier 1: "This places a purchase order through your Arkim Network Partner."
+  - Tier 2: "This purchases through an open marketplace vendor. Arkim handles the transaction on your behalf."
 - Body: explains MoR infrastructure is pending; selection advances run to approval only.
 - "Cancel" — closes modal, no state change.
-- "Continue to approval" (primary) — fires `selectCandidate` mutation, closes modal.
+- "Confirm Purchase" (primary) — fires `selectCandidate` mutation, closes modal.
 
 ### External link button
-Ghost variant, External icon (13px). Shown only if URL present.
+Ghost variant, External icon (13px). Shown **only on Tier 2 cards** (if URL present).
+Not shown on Tier 1 — Arkim Network Partner transactions are fully mediated; no direct
+vendor page links in the UI.
 
 ---
 
 ## 6. Tier 3 Outreach Cards
 
 ### Card structure
-Horizontal flex. Checkbox on left, content on right.
+Horizontal flex. Checkbox (or Clock icon) on left, content on right.
 
-**Selected state:** `border-green-line`, `bg-green-tint`.
-**Unselected state:** `border-hr-2`, hover `border-hr-1`.
-**Click target:** Entire card div toggles selection.
+**Selected state:** `border-green-line`, `bg-green-tint`, `cursor-pointer`.
+**Unselected state:** `border-hr-2`, hover `border-hr-1`, `cursor-pointer`.
+**Sent state:** `border-hr-2 opacity-60 cursor-default`, non-interactive.
 
-### Checkbox
-Custom rendered 4×4 box. Selected: `border-green-fg bg-green-fg` + white
-checkmark SVG (10×10, stroke-width 2, round caps/joins). Unselected:
-`border-hr-1 bg-bg-2`.
+Click target is the entire card div (disabled in sent state).
+
+### Checkbox / sent indicator
+- Sent state: Clock icon (12px) in place of checkbox.
+- Selected (not sent): `border-green-fg bg-green-fg` + white checkmark SVG
+  (10×10, stroke-width 2, round caps/joins).
+- Unselected: `border-hr-1 bg-bg-2`.
 
 ### Content layout
-- Header row: vendor name (bold, truncate) + location (monospace, uppercase,
-  tertiary, right-aligned).
-- Contact info: right-aligned, monospace 10px, max-width 140px, truncated.
+- Header row: vendor name (bold, truncate) + right-aligned status/contact:
+  - Sent: "Awaiting response · HH:MM" (monospace 10px, tertiary, no max-width truncation).
+  - Not sent: contact info (monospace 10px, max-width 140px, truncated), if present.
 - Suitability: label "Suitability" (shrink-0, w-16) + MatchBar + percentage.
 - Lead time: Clock icon (12px) + monospace text.
+
+### Sent state trigger
+`OutreachCard` receives a `sentAt?: string` prop from `SourcingView`, populated from
+`run.tier3_outreach_sent?.[c.id]`. If `sentAt` is non-empty, the card renders in sent
+state. This persists across page refreshes via the server-stored value.
 
 ---
 
 ## 7. Sticky Action Bar (Tier 3)
 
-Rendered only when `tier3.length > 0`. Sticky bottom-0, z-10.
+Rendered only when `tier3.length > 0`. Returns `null` when Zustand
+`tier3Selection[runId]` count is 0 — hides automatically after successful outreach
+or when all selections are toggled off. Sticky bottom-0, z-10.
 Border-top `border-hr-2`, `bg-bg-1`.
 
 ### Selection count display
-"{count} vendor{s} selected". Count in bold white, remainder tertiary.
+"{count} vendor{s} selected". Count in bold `fg-1`, remainder `fg-3` tertiary.
 
-### Buttons (left to right)
+### Confirm outreach button
+Single primary button with Send icon (13px). Loading while mutation is in flight.
 
-| Button | Variant | State | Behavior |
-|---|---|---|---|
-| Preview drafts | ghost | Always disabled | Toast: "Draft preview coming in Phase 5." |
-| Save selection | secondary | Loading during save | Toast (green): "Selection saved". Persists candidate IDs to `tier3_selection_json`; hydrated back into Zustand on next mount via `run.tier3_selection`. |
-| Send outreach | primary + Send icon (13px) | Loading during send | Success toast: "Outreach sent · Contacted {count} vendor(s)". Failure toast (amber): "Outreach failed · Check backend connection and retry." |
+- Success: clears `tier3Selection[runId]` in Zustand (bar hides) + green toast
+  "Outreach sent · Contacted {count} vendor(s)".
+- Failure: amber toast "Outreach failed · Check backend connection and retry."
 
-All three buttons disabled when `count === 0`.
+Sub-label below button: monospace 8.5px, "On your behalf · Arkim sends, you receive".
 
-Sub-label below Send button: monospace 8.5px, "On your behalf · Arkim sends, you receive".
+### Selection lifecycle
+1. SourcingView mounts → top 3 Tier 3 vendors by suitability pre-selected
+   (guarded by `initialized.current` ref; never overwrites user changes).
+2. User toggles cards freely — selection is fully reversible until Confirm outreach fires.
+3. On success: all selected candidates receive `tier3_outreach_sent[id] = sentAt` in DB.
+4. On next poll/mount: `OutreachCard` receives `sentAt` prop → dims, shows
+   "Awaiting response · HH:MM", disables toggle.
+5. Unselected (unsent) cards remain interactive — subsequent batches can be sent.
 
 ---
 
@@ -456,8 +492,8 @@ Frontend never needs to check these flags directly.
 |---|---|
 | `confirmIntake` | run detail + run list |
 | `selectCandidate` | run detail + run list |
+| `requestConfirmation` | run detail (polling delivers the flip to `confirmationPending=false`) |
 | `initiateOutreach` | run detail only |
-| `saveOutreach` | none (local selection state only) |
 | `openFromPending` | run detail + run list |
 | `rejectSubmission` | run detail + run list |
 

@@ -53,6 +53,11 @@ interface ArkimState {
   setTier3Selection: (runId: string, candidateIds: string[]) => void;
   clearTier3Selection: (runId: string) => void;
 
+  // --- Tier 1 confirmation sent timestamps (ephemeral, survives page nav but not refresh) ---
+  /** runId → candidateId → ISO sentAt. Set when "Request Confirmation" is clicked. */
+  tier1ConfirmSentAt: Record<string, Record<string, string>>;
+  markTier1ConfirmSent: (runId: string, candidateId: string, sentAt: string) => void;
+
   // --- Toast notifications ---
   toasts: Toast[];
   pushToast: (toast: Omit<Toast, "id">) => void;
@@ -108,6 +113,14 @@ export const useArkimStore = create<ArkimState>()(
     clearTier3Selection: (runId) =>
       set((s) => {
         delete s.tier3Selection[runId];
+      }),
+
+    // Tier 1 confirmation sent timestamps
+    tier1ConfirmSentAt: {},
+    markTier1ConfirmSent: (runId, candidateId, sentAt) =>
+      set((s) => {
+        if (!s.tier1ConfirmSentAt[runId]) s.tier1ConfirmSentAt[runId] = {};
+        s.tier1ConfirmSentAt[runId][candidateId] = sentAt;
       }),
 
     // Toasts

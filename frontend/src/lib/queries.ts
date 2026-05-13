@@ -25,6 +25,7 @@ import {
   approveRun,
   rejectRun,
   initiateOutreach,
+  requestConfirmation,
   saveOutreachSelection,
   listFacilities,
   getApprovalRules,
@@ -70,12 +71,16 @@ export function useRun(
   });
 }
 
-/** Poll every 5 s while the run is in a transient phase (sourcing, executing…) */
+/** Poll every 5 s while the run is in a transient phase (sourcing, executing…)
+ *  or in comparison — needed so Tier 1 mock confirmation responses arrive
+ *  without a manual refresh.
+ *  TODO(post-seed): move to push/websocket to avoid prototype-scale polling overhead.
+ */
 export function useRunLive(runId: string) {
   return useRun(runId, {
     refetchInterval: (query) => {
       const phase = query.state.data?.phase;
-      const activePhases = ["sourcing", "executing", "fulfilling", "inventory"];
+      const activePhases = ["sourcing", "executing", "fulfilling", "inventory", "comparison"];
       return phase && activePhases.includes(phase) ? 5_000 : false;
     },
   });
@@ -175,6 +180,23 @@ export function useRejectRun(runId: string) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
       qc.invalidateQueries({ queryKey: queryKeys.runs.all() });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Tier 1 confirmation request
+// ---------------------------------------------------------------------------
+
+export function useRequestConfirmation(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (candidateIds: string[]) =>
+      requestConfirmation(runId, { candidate_ids: candidateIds }),
+    onSuccess: () => {
+      // Poll will pick up confirmation_needed=false after mock delay; no immediate invalidation needed.
+      // Invalidate anyway so the "Awaiting" state (from Zustand sentAt) is consistent with server state.
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
     },
   });
 }

@@ -9,47 +9,66 @@ import type { Candidate } from "@/types";
 interface OutreachCardProps {
   candidate: Candidate;
   runId: string;
+  /** ISO sentAt from run.tier3_outreach_sent — if set, card is in sent/awaiting state. */
+  sentAt?: string;
   className?: string;
 }
 
-export function OutreachCard({ candidate, runId, className }: OutreachCardProps) {
+export function OutreachCard({ candidate, runId, sentAt, className }: OutreachCardProps) {
   const toggle = useArkimStore((s) => s.toggleTier3Vendor);
   const selection = useArkimStore((s) => s.tier3Selection[runId] ?? new Set<string>());
   const selected = selection.has(candidate.id);
+  const hasSent = Boolean(sentAt);
+
+  const sentTime = sentAt
+    ? new Date(sentAt).toLocaleTimeString("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : null;
 
   return (
     <div
       className={cn(
-        "rounded-card border bg-bg-3 p-4 flex gap-3 cursor-pointer",
-        selected
-          ? "border-green-line bg-green-tint"
-          : "border-hr-2 hover:border-hr-1",
+        "rounded-card border bg-bg-3 p-4 flex gap-3",
+        hasSent
+          ? "border-hr-2 opacity-60 cursor-default"
+          : selected
+          ? "border-green-line bg-green-tint cursor-pointer"
+          : "border-hr-2 hover:border-hr-1 cursor-pointer",
         className,
       )}
-      onClick={() => toggle(runId, candidate.id)}
+      onClick={hasSent ? undefined : () => toggle(runId, candidate.id)}
     >
-      {/* Checkbox */}
-      <div
-        className={cn(
-          "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-          selected ? "border-green-fg bg-green-fg" : "border-hr-1 bg-bg-2",
-        )}
-      >
-        {selected && (
-          <svg
-            viewBox="0 0 10 10"
-            width="10"
-            height="10"
-            fill="none"
-            stroke="white"
-            strokeWidth={2}
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M2 5l2.5 2.5L8 3" />
-          </svg>
-        )}
-      </div>
+      {/* Checkbox / sent indicator */}
+      {hasSent ? (
+        <div className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">
+          <Clock size={12} className="text-fg-4" />
+        </div>
+      ) : (
+        <div
+          className={cn(
+            "mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
+            selected ? "border-green-fg bg-green-fg" : "border-hr-1 bg-bg-2",
+          )}
+        >
+          {selected && (
+            <svg
+              viewBox="0 0 10 10"
+              width="10"
+              height="10"
+              fill="none"
+              stroke="white"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M2 5l2.5 2.5L8 3" />
+            </svg>
+          )}
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex flex-col gap-2 min-w-0 flex-1">
@@ -64,11 +83,15 @@ export function OutreachCard({ candidate, runId, className }: OutreachCardProps)
               </span>
             )}
           </div>
-          {candidate.contact && (
+          {hasSent ? (
+            <span className="font-mono text-[10px] text-fg-3 shrink-0">
+              Awaiting response · {sentTime}
+            </span>
+          ) : candidate.contact ? (
             <span className="font-mono text-[10px] text-fg-3 shrink-0 truncate max-w-[140px]">
               {candidate.contact}
             </span>
-          )}
+          ) : null}
         </div>
 
         <div className="flex items-center gap-2">

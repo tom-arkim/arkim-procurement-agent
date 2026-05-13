@@ -163,8 +163,18 @@ export async function rejectSubmission(
 export async function initiateOutreach(
   runId: string,
   body: OutreachRequest,
-): Promise<{ run_id: string; candidates_contacted: number; sent_at: string }> {
+): Promise<{ run_id: string; candidates_contacted: number; sent_at: string; tier3_outreach_sent: Record<string, string> }> {
   return request(`/runs/${runId}/outreach`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function requestConfirmation(
+  runId: string,
+  body: { candidate_ids: string[] },
+): Promise<{ run_id: string; candidates: string[]; mock_response_in: string }> {
+  return request(`/runs/${runId}/request-confirmation`, {
     method: "POST",
     body: JSON.stringify(body),
   });

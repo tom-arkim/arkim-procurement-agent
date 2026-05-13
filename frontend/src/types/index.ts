@@ -92,6 +92,8 @@ export interface AssetSpecs {
   spec_based_sourcing?: boolean;
 }
 
+
+
 export interface FieldComparison {
   field: string;
   fieldLabel: string;
@@ -133,6 +135,8 @@ export interface Candidate {
   priceSource?: string;
   contact?: string;
   relationship?: string;
+  // Tier 1 two-mode display: true = show "Request Confirmation"; false = show "Buy Now".
+  confirmationPending?: boolean;
 }
 
 export interface ApprovalActionRecord {
@@ -210,6 +214,8 @@ export interface SourcingRunDetail {
   approval_history: ApprovalActionRecord[];
   completion_event?: CompletionEvent;
   tier3_selection?: string[];
+  /** candidateId → sentAt ISO — set after POST /outreach fires. Drives OutreachCard "Awaiting" state. */
+  tier3_outreach_sent?: Record<string, string>;
   maintenance_handoff?: Record<string, unknown>;
   messages?: ChatMessage[];
   created_at: string;

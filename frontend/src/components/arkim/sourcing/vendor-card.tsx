@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Pill } from "@/components/ui/pill";
 import { PnMatch, MatchBar } from "@/components/ui/match";
 import { External, Clock, Dollar } from "@/components/ui/icons";
-import { useSelectCandidate } from "@/lib/queries";
+import { useSelectCandidate, useRequestConfirmation } from "@/lib/queries";
+import { useArkimStore } from "@/store";
 import type { Candidate } from "@/types";
 
 // ---------------------------------------------------------------------------
@@ -29,14 +30,15 @@ const VENDOR_TYPE_LABEL: Record<string, string> = {
 interface VendorCardProps {
   candidate: Candidate;
   runId: string;
-  facilityState: string;
   className?: string;
 }
 
-export function VendorCard({ candidate, runId, facilityState, className }: VendorCardProps) {
+export function VendorCard({ candidate, runId, className }: VendorCardProps) {
   const select = useSelectCandidate(runId);
-  const isCA = facilityState === "CA";
-  const hasPrice = candidate.price != null;
+  const requestConfirmation = useRequestConfirmation(runId);
+  const markTier1ConfirmSent = useArkimStore((s) => s.markTier1ConfirmSent);
+  const confirmSentAt = useArkimStore((s) => s.tier1ConfirmSentAt[runId]?.[candidate.id]);
+
   const [showBuyModal, setShowBuyModal] = useState(false);
 
   useEffect(() => {
@@ -46,13 +48,35 @@ export function VendorCard({ candidate, runId, facilityState, className }: Vendo
     return () => window.removeEventListener("keydown", onKey);
   }, [showBuyModal]);
 
-  const handleBuy = () => {
-    if (isCA) {
-      setShowBuyModal(true);
-    } else {
-      window.open(candidate.url, "_blank", "noopener,noreferrer");
-    }
+  // Tier 1 three-state logic:
+  //   isRequestMode → "Request Confirmation" (confirmationPending=true, not yet sent)
+  //   isAwaiting    → "Awaiting response"     (confirmationPending=true, sent via Zustand sentAt)
+  //   buy now       → modal → selectCandidate  (confirmationPending=false, or Tier 2)
+  const isTier1 = candidate.tier === 1;
+  const isRequestMode = isTier1 && candidate.confirmationPending === true && !confirmSentAt;
+  const isAwaiting    = isTier1 && candidate.confirmationPending === true && Boolean(confirmSentAt);
+
+  const sentTime = confirmSentAt
+    ? new Date(confirmSentAt).toLocaleTimeString("en-US", {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : null;
+
+  const handleRequestConfirmation = () => {
+    const sentAt = new Date().toISOString();
+    requestConfirmation.mutate([candidate.id], {
+      onSuccess: () => markTier1ConfirmSent(runId, candidate.id, sentAt),
+    });
   };
+
+  const modalSubtitle =
+    candidate.tier === 1
+      ? "This places a purchase order through your Arkim Network Partner."
+      : "This purchases through an open marketplace vendor. Arkim handles the transaction on your behalf.";
+
+  const hasPrice = candidate.price != null;
 
   return (
     <div
@@ -131,21 +155,53 @@ export function VendorCard({ candidate, runId, facilityState, className }: Vendo
       {/* Actions */}
       <div className="flex items-center gap-2 pt-1">
         <div className="flex flex-col gap-1 flex-1">
-          <Button
-            variant={candidate.tier === 1 ? "primary" : "secondary"}
-            size="sm"
-            className="w-full"
-            loading={select.isPending}
-            onClick={handleBuy}
-          >
-            {hasPrice ? "Buy Now" : "Request Quote"}
-          </Button>
+          {isRequestMode && (
+            <Button
+              variant="primary"
+              size="sm"
+              className="w-full"
+              loading={requestConfirmation.isPending}
+              onClick={handleRequestConfirmation}
+            >
+              Request Confirmation
+            </Button>
+          )}
+
+          {isAwaiting && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full opacity-60 cursor-default"
+              disabled
+            >
+              <Clock size={12} className="mr-1.5" />
+              Awaiting response
+            </Button>
+          )}
+
+          {!isRequestMode && !isAwaiting && (
+            <Button
+              variant={candidate.tier === 1 ? "primary" : "secondary"}
+              size="sm"
+              className="w-full"
+              loading={select.isPending}
+              onClick={() => setShowBuyModal(true)}
+            >
+              {hasPrice ? "Buy Now" : "Request Quote"}
+            </Button>
+          )}
+
           <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-fg-4 text-center">
-            {isCA ? "Procured through Arkim" : "Visit vendor · your procurement"}
+            {isAwaiting
+              ? `Sent ${sentTime}`
+              : candidate.tier === 1
+              ? "Procured through Arkim"
+              : "Available via marketplace · Arkim purchases"}
           </span>
         </div>
 
-        {candidate.url && (
+        {/* External link: Tier 2 only */}
+        {candidate.tier === 2 && candidate.url && (
           <Button
             variant="ghost"
             size="sm"
@@ -170,9 +226,14 @@ export function VendorCard({ candidate, runId, facilityState, className }: Vendo
             className="bg-bg-1 border border-hr-2 rounded-card p-6 max-w-md w-full mx-4 flex flex-col gap-4"
             onClick={(e) => e.stopPropagation()}
           >
-            <p id="buy-modal-title" className="font-mono text-sm font-bold text-fg-1">
-              Buy Now via Arkim
-            </p>
+            <div className="flex flex-col gap-1">
+              <p id="buy-modal-title" className="font-mono text-sm font-bold text-fg-1">
+                Buy Now via Arkim
+              </p>
+              <p className="font-mono text-xs text-fg-3">
+                {modalSubtitle}
+              </p>
+            </div>
             <p className="font-mono text-xs text-fg-3 leading-relaxed">
               Procurement transactions through Arkim will be available once our
               merchant-of-record infrastructure goes live. For now, this records your
@@ -193,7 +254,7 @@ export function VendorCard({ candidate, runId, facilityState, className }: Vendo
                   setShowBuyModal(false);
                 }}
               >
-                Continue to approval
+                Confirm Purchase
               </Button>
             </div>
           </div>

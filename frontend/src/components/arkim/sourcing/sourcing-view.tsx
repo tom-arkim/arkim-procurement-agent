@@ -63,7 +63,6 @@ export function SourcingView({ run, className }: SourcingViewProps) {
                   key={c.id}
                   candidate={c}
                   runId={run.id}
-                  facilityState={run.facility_state}
                 />
               ))}
             </div>
@@ -84,7 +83,6 @@ export function SourcingView({ run, className }: SourcingViewProps) {
                   key={c.id}
                   candidate={c}
                   runId={run.id}
-                  facilityState={run.facility_state}
                 />
               ))}
             </div>
@@ -108,7 +106,12 @@ export function SourcingView({ run, className }: SourcingViewProps) {
           {tier3.length > 0 ? (
             <div className="p-4 flex flex-col gap-3">
               {tier3.map((c) => (
-                <OutreachCard key={c.id} candidate={c} runId={run.id} />
+                <OutreachCard
+                  key={c.id}
+                  candidate={c}
+                  runId={run.id}
+                  sentAt={run.tier3_outreach_sent?.[c.id]}
+                />
               ))}
             </div>
           ) : (
