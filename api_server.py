@@ -1186,3 +1186,32 @@ def debug_llm():
         return {"ok": True, "model": "claude-sonnet-4-6", "reply": text, "key_prefix": key[:14] + "..."}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "key_prefix": key[:14] + "..."}
+
+
+@app.post("/api/dev/reseed-handoffs")
+def dev_reseed_handoffs():
+    """Delete seeded demo handoff runs and re-seed from fixture JSON. Dev/testing only."""
+    try:
+        with open(_HANDOFFS_PATH, encoding="utf-8") as f:
+            handoffs = json.load(f)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="mock_maintenance_handoffs.json not found")
+
+    seed_ids = {h.get("submission_id") for h in handoffs if h.get("submission_id")}
+
+    with _SessionFactory() as session:
+        deleted = 0
+        for run in session.query(SourcingRunORM).all():
+            if not run.maintenance_handoff_json:
+                continue
+            try:
+                sid = json.loads(run.maintenance_handoff_json).get("submission_id")
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            if sid in seed_ids:
+                session.delete(run)
+                deleted += 1
+        session.commit()
+
+    _seed_demo_maintenance_run()
+    return {"ok": True, "deleted": deleted, "reseeded": len(seed_ids)}
