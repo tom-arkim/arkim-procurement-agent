@@ -70,6 +70,7 @@ def _migrate_schema() -> None:
         for stmt in [
             "ALTER TABLE sourcing_runs ADD COLUMN tier3_selection_json TEXT",
             "ALTER TABLE sourcing_runs ADD COLUMN maintenance_handoff_json TEXT",
+            "ALTER TABLE sourcing_runs ADD COLUMN tier3_outreach_sent_json TEXT",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -168,6 +169,7 @@ class RunDetail(BaseModel):
     approval_history: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
     tier3_selection: Optional[List[str]] = None
+    tier3_outreach_sent: Optional[Dict[str, str]] = None  # candidateId → sentAt ISO
     maintenance_handoff: Optional[Dict[str, Any]] = None
     created_at: str
     updated_at: str
@@ -214,6 +216,10 @@ class SendMessageResponse(BaseModel):
 class SelectCandidateRequest(BaseModel):
     candidate_id: str
     tier: int
+
+
+class ConfirmationRequest(BaseModel):
+    candidate_ids: List[str]
 
 
 class ApproveRequest(BaseModel):
@@ -272,6 +278,10 @@ _FACILITY_STATES: Dict[str, str] = {
     "fac-salinas":  "CA",
     "fac-cerritos": "CA",
 }
+
+# Tier 1 mock confirmation delay range (seconds).
+# Simulates vendor response time for prototype demos.
+_MOCK_CONFIRMATION_DELAY_RANGE: tuple = (3, 8)
 
 _URGENCY_FACTORS: Dict[str, float] = {
     "emergency":  0.9,
@@ -336,6 +346,11 @@ def _transform_option(opt: dict, tier: int, idx: int) -> dict:
         "contact":               opt.get("contact_email"),
         "relationship":          opt.get("suitability_tier") or None,
         "comparisonArtifact":    opt.get("comparison_artifact"),
+        # Tier 1 two-mode display: all Tier 1 candidates start in confirmation-needed mode.
+        # After POST /request-confirmation fires and mock response arrives (3-8 s),
+        # confirmation_needed is set False in the raw data and this flips to False,
+        # causing the frontend card to switch from "Request Confirmation" to "Buy Now".
+        "confirmationPending":   tier == 1 and bool(opt.get("confirmation_needed", True)),
     }
 
 
@@ -520,6 +535,7 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
             if isinstance(run.approval_history_json, str)
             else (run.approval_history_json or []),
         tier3_selection=json.loads(run.tier3_selection_json) if run.tier3_selection_json else None,
+        tier3_outreach_sent=json.loads(run.tier3_outreach_sent_json) if run.tier3_outreach_sent_json else None,
         maintenance_handoff=_parse(run.maintenance_handoff_json),
         created_at=run.initiated_at.isoformat() if run.initiated_at else "",
         updated_at=run.updated_at.isoformat() if run.updated_at else "",
@@ -898,6 +914,73 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...)):
     }
 
 
+def _mock_confirmation_response(run_id: str, candidate_ids: list) -> None:
+    """Simulate Tier 1 vendor confirming price and availability after a short delay.
+
+    Invoked as a BackgroundTask after POST /request-confirmation.
+    Sleeps _MOCK_CONFIRMATION_DELAY_RANGE seconds then sets confirmation_needed=False
+    on matching raw Tier 1 candidates in sourcing_results_json. The frontend's
+    comparison-phase polling picks up the change and transitions cards to Buy Now.
+    If a candidate ID cannot be matched in the raw results, logs a warning and skips
+    rather than crashing — guards against results being mutated between request and response.
+    """
+    import time, random, logging
+    log = logging.getLogger(__name__)
+    time.sleep(random.uniform(*_MOCK_CONFIRMATION_DELAY_RANGE))
+
+    candidate_id_set = set(candidate_ids)
+
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run or not run.sourcing_results_json:
+            log.warning("[%s] _mock_confirmation_response: run not found or no sourcing results", run_id)
+            return
+        try:
+            raw = json.loads(run.sourcing_results_json)
+        except (json.JSONDecodeError, ValueError):
+            log.warning("[%s] _mock_confirmation_response: could not parse sourcing_results_json", run_id)
+            return
+
+        t1_results = raw.get("tier_1", {}).get("results", [])
+        matched = 0
+        for i, opt in enumerate(t1_results):
+            cid = f"{opt.get('vendor_name', '')}-t1-{i}"
+            if cid in candidate_id_set:
+                opt["confirmation_needed"] = False
+                matched += 1
+                candidate_id_set.discard(cid)
+
+        if candidate_id_set:
+            log.warning("[%s] _mock_confirmation_response: %d candidate(s) not matched: %s",
+                        run_id, len(candidate_id_set), list(candidate_id_set))
+        if matched == 0:
+            return
+
+        raw["tier_1"]["results"] = t1_results
+        run.sourcing_results_json = json.dumps(raw)
+        run.updated_at = datetime.now(timezone.utc)
+        session.commit()
+
+
+@app.post("/api/runs/{run_id}/request-confirmation")
+def request_confirmation(run_id: str, body: ConfirmationRequest, background_tasks: BackgroundTasks):
+    """Request price and availability confirmation from Tier 1 vendors.
+
+    Schedules a mock response (3-8 seconds) that sets confirmation_needed=False
+    on the matching candidates. Frontend polls at comparison phase and transitions
+    cards from "Awaiting response" to Buy Now when the flag flips.
+    """
+    with _SessionFactory() as session:
+        if not session.get(SourcingRunORM, run_id):
+            raise HTTPException(status_code=404, detail="Run not found")
+    background_tasks.add_task(_mock_confirmation_response, run_id, body.candidate_ids)
+    return {
+        "run_id": run_id,
+        "candidates": body.candidate_ids,
+        "mock_response_in": f"{_MOCK_CONFIRMATION_DELAY_RANGE[0]}-{_MOCK_CONFIRMATION_DELAY_RANGE[1]} seconds",
+    }
+
+
 @app.post("/api/runs/{run_id}/select-candidate")
 def select_candidate(run_id: str, body: SelectCandidateRequest):
     """Lock in a candidate and advance the run to pending_first_approval."""
@@ -1030,25 +1113,31 @@ def confirm_intake(run_id: str, background_tasks: BackgroundTasks):
 
 @app.post("/api/runs/{run_id}/outreach")
 def initiate_outreach(run_id: str, body: OutreachRequest):
-    """
-    Initiate Tier 3 outreach after approval.
+    """Mark Tier 3 vendors as contacted and persist sent timestamps.
 
-    Phase 1: records the selected vendors and returns stub status.
-    Phase 2+: triggers actual email dispatch.
+    EMAIL_SEND_ENABLED is False per brief Section 12 — no actual email dispatch.
+    Records {candidateId: sentAt} in tier3_outreach_sent_json. Frontend polls
+    and transitions cards to "Awaiting response" state.
     """
+    sent_at = datetime.now(timezone.utc).isoformat()
     with _SessionFactory() as session:
         run = session.get(SourcingRunORM, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
 
+        existing: Dict[str, str] = json.loads(run.tier3_outreach_sent_json) if run.tier3_outreach_sent_json else {}
+        for cid in body.candidate_ids:
+            if cid not in existing:  # preserve original sent_at on re-fire
+                existing[cid] = sent_at
+        run.tier3_outreach_sent_json = json.dumps(existing)
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
     return {
         "run_id": run_id,
         "candidates_contacted": len(body.candidate_ids),
-        "status": "stub — outreach dispatch will run in Phase 2",
-        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "sent_at": sent_at,
+        "tier3_outreach_sent": existing,
     }
 
 

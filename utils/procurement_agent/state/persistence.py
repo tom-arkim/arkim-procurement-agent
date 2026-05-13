@@ -80,6 +80,7 @@ class SourcingRunORM(Base):
     selected_candidate_json = Column(Text, nullable=True)
     approval_history_json = Column(Text, nullable=False, default="[]")
     tier3_selection_json = Column(Text, nullable=True)
+    tier3_outreach_sent_json = Column(Text, nullable=True)   # JSON: {candidateId: sentAt ISO}
     maintenance_handoff_json = Column(Text, nullable=True)
 
     vendor_order_id = Column(String(200), nullable=True)
