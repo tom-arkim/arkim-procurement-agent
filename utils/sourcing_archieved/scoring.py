@@ -78,10 +78,16 @@ def _is_low_value_landing_page(url: str, snippet: str, searched_pn: str) -> bool
 # ---------------------------------------------------------------------------
 
 def _detect_equip_type(specs) -> str:
-    """Return the primary equipment-type keyword from detected_type or description."""
+    """Return the primary equipment-type keyword from detected_type or description.
+
+    # TODO: consistency audit between brand_intelligence categories and
+    # detect_equip_type entries pending -- current entries are reactive to known
+    # gaps, not exhaustive.
+    """
     ctx = (getattr(specs, 'detected_type', None) or specs.description or '').lower()
     for kw in ("motor", "pump", "compressor", "blower", "conveyor",
-               "vfd", "starter", "bearing", "seal", "coupling", "belt", "contactor", "sensor"):
+               "vfd", "starter", "bearing", "seal", "coupling", "belt", "contactor",
+               "flow meter", "flowmeter", "transmitter", "sensor"):
         if kw in ctx:
             return kw
     return ""
