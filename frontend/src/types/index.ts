@@ -87,6 +87,9 @@ export interface AssetSpecs {
   failure_mode?: string;
   asset_id?: string;
   diagnostic_event_id?: string;
+  // True when sufficiency reached without a model or part number (spec-based sourcing path).
+  // Set by the backend; drives "By spec" label in the confirm-card secondary fields.
+  spec_based_sourcing?: boolean;
 }
 
 export interface FieldComparison {

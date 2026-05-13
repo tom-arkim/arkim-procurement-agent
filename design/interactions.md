@@ -128,6 +128,25 @@ confirming."
 **Secondary fields:** Model, Part No. (monospace), Type (if present). Rendered
 in dot-leader format (label … value).
 
+- When `spec_based_sourcing` is `true` on the specs: Model and Part No. render
+  as "By spec" in `text-fg-4` italic — indicates the field was intentionally not
+  required for sourcing (spec-based path), not missing or unanswered.
+- When `spec_based_sourcing` is false/absent: null fields render as "—"
+  (not-yet-provided indicator).
+
+**Sufficiency message variants:** The agent message that fires when
+`sufficient=true` depends on whether a model or part number was identified:
+
+| Condition | Message |
+|---|---|
+| `proceed_with_manufacturer_caveat` | "Specs extracted but the manufacturer could not be confirmed. Verify the manufacturer in the panel before confirming." |
+| Both model and part_number absent (spec-based path) | "Sourcing by category — we have enough specs (manufacturer, type, key dimensions) to find functionally equivalent options. No specific part number or model is required." |
+| Model or part number present (fully-identified path) | "Specs look complete — review in the panel and confirm to start sourcing." |
+
+The spec-based path is triggered when both `model` and `part_number` are null
+or null-equivalent ("N/A", "UNKNOWN-PN", etc.) at sufficiency. The backend sets
+`spec_based_sourcing: true` on the AssetSpecs payload in this case.
+
 **Actions:** Two equal-weight secondary buttons. Neither is primary visually.
 - "Edit / Continue Chat" — dismisses card, returns focus to chat.
 - "Confirm & Source" — fires `POST /api/runs/{id}/confirm-intake`, advances

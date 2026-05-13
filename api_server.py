@@ -726,7 +726,19 @@ def send_message(run_id: str, body: SendMessageRequest):
                 "Verify the manufacturer in the panel before confirming."
             )
         else:
-            reply_text = "Specs look complete — review in the panel and confirm to start sourcing."
+            _specs_dict = result.get("asset_specs") or {}
+            _null_vals = {"", "N/A", "n/a", "null", "None", "UNKNOWN-PN", "Unknown", "unknown", None}
+            _has_model = _specs_dict.get("model") not in _null_vals
+            _has_pn = _specs_dict.get("part_number") not in _null_vals
+            if not _has_model and not _has_pn:
+                _specs_dict["spec_based_sourcing"] = True
+                result["asset_specs"] = _specs_dict
+                reply_text = (
+                    "Sourcing by category — we have enough specs (manufacturer, type, key dimensions) "
+                    "to find functionally equivalent options. No specific part number or model is required."
+                )
+            else:
+                reply_text = "Specs look complete — review in the panel and confirm to start sourcing."
         new_phase = current_phase
     else:
         reply_text = result.get("follow_up_question") or (

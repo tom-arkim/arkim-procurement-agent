@@ -113,16 +113,21 @@ function ConfirmCard({ runId, specs, onDismiss }: ConfirmCardProps) {
       </div>
 
       {/* Secondary fields */}
-      <div className="rounded-card border border-hr-2 bg-bg-2 divide-y divide-hr-2">
-        <SpecRow label="Model" value={specs.model || "—"} />
-        <SpecRow label="Part No." value={specs.part_number || "—"} mono />
-        {(specs.detected_type || specs.category) && (
-          <SpecRow
-            label="Type"
-            value={specs.detected_type || specs.category || "—"}
-          />
-        )}
-      </div>
+      {(() => {
+        const specBased = specs.spec_based_sourcing === true;
+        return (
+          <div className="rounded-card border border-hr-2 bg-bg-2 divide-y divide-hr-2">
+            <SpecRow label="Model" value={specs.model || "—"} specBased={specBased} />
+            <SpecRow label="Part No." value={specs.part_number || "—"} mono specBased={specBased} />
+            {(specs.detected_type || specs.category) && (
+              <SpecRow
+                label="Type"
+                value={specs.detected_type || specs.category || "—"}
+              />
+            )}
+          </div>
+        );
+      })()}
 
       {/* Actions — equal weight: both choices are equally valid */}
       <div className="flex gap-2">
@@ -163,15 +168,20 @@ interface SpecRowProps {
   label: string;
   value: string;
   mono?: boolean;
+  specBased?: boolean;
 }
 
-function SpecRow({ label, value, mono }: SpecRowProps) {
+function SpecRow({ label, value, mono, specBased }: SpecRowProps) {
   return (
     <div className="px-4 py-3">
       <div className="leader">
         <span className="lbl">{label}</span>
         <span className="dots" />
-        <span className={cn("val", mono && "font-mono")}>{value}</span>
+        {specBased ? (
+          <span className="val text-fg-4 italic">By spec</span>
+        ) : (
+          <span className={cn("val", mono && "font-mono")}>{value}</span>
+        )}
       </div>
     </div>
   );

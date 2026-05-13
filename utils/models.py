@@ -71,6 +71,10 @@ class AssetSpecs:
     #         "corrected_detected_type": str, "corrected_category": str}
     # Captured by dataclasses.asdict() and written to audit log automatically.
     classification_correction: Optional[dict] = None
+    # True when sufficiency was reached on category-specific physical specs
+    # without an explicit model or part number (spec-based sourcing path).
+    # Set by api_server.py send_message; read by the frontend confirm-card.
+    spec_based_sourcing: bool = False
 
 
 @dataclass
