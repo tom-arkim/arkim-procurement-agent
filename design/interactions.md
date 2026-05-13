@@ -207,6 +207,32 @@ Monospace centered text. Messages:
 If `results.warrantyBanner` is present, amber-tinted banner above all tier
 content.
 
+### No-exact-match banner
+Rendered above all tier content (below warranty banner if both present) when
+`run.no_exact_match === true`.
+
+**Signal computation (backend, `_orm_to_detail`):** Examines transformed Tier 2
++ Tier 3 candidates. If the combined list has ≥ 1 candidate and none have
+`pnMatchLevel == "exact"` (mapped from `pn_match_status == "exact_match"` in
+raw Tavily data), `no_exact_match` is set True. Suppressed when:
+- `asset_specs.spec_based_sourcing === true` (spec-based path, no PN to match)
+- `asset_specs.part_number` is absent or null-equivalent (same — no PN to miss)
+- T2 + T3 are both empty (no results at all is different from "results exist but no match")
+
+Tier 1 candidates are excluded from the signal — they are seeded data with
+assumed-exact match and do not reflect Tavily discovery results.
+
+**Copy:** "No vendors had this exact part number. All candidates below are
+functionally equivalent alternatives — review specs carefully before purchase."
+
+**Visual treatment:** amber-tinted (`bg-amber-tint`, `border-amber-line`,
+`text-amber-fg`), same scheme as warranty banner. Warn icon (14px) left of text.
+Not dismissible — persists while reviewing candidates.
+
+**Behavior:** Informational only. Does not block Buy Now, Request Confirmation,
+or Tier 3 outreach selection. Per brief Section 11: "Trust is built by
+transparency, not polish."
+
 ### Tier 3 capability pivot notice
 If `results.tier3CapabilityPivot` is true, amber banner:
 "Sourcing pivoted to specialist outreach — direct match not found in tiers 1 or 2."

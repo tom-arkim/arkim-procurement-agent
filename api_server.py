@@ -171,6 +171,9 @@ class RunDetail(BaseModel):
     tier3_selection: Optional[List[str]] = None
     tier3_outreach_sent: Optional[Dict[str, str]] = None  # candidateId → sentAt ISO
     maintenance_handoff: Optional[Dict[str, Any]] = None
+    # True when T2+T3 have candidates but none have pnMatchLevel=="exact".
+    # Suppressed when spec_based_sourcing or part_number is absent (not a typo case).
+    no_exact_match: bool = False
     created_at: str
     updated_at: str
 
@@ -520,6 +523,20 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
     elif raw_sourcing:
         sourcing = raw_sourcing  # pass through error dict so frontend can surface it
 
+    # Derive no_exact_match: fires when T2+T3 combined have at least one candidate
+    # but none have pnMatchLevel=="exact" (mapped from pn_match_status=="exact_match").
+    # Suppressed when spec_based_sourcing=True or part_number is absent/null-equivalent
+    # (spec-based and no-PN scenarios are "by design," not typo cases).
+    _null_pn_vals = {"", "N/A", "n/a", "null", "None", "UNKNOWN-PN", "Unknown", "unknown"}
+    _asset_specs = _parse(run.asset_specs_json)
+    _pn = ((_asset_specs or {}).get("part_number") or "").strip()
+    _spec_based = (_asset_specs or {}).get("spec_based_sourcing", False)
+    no_exact_match = False
+    if sourcing and not _spec_based and _pn not in _null_pn_vals:
+        _t2_t3 = sourcing.get("tier2", []) + sourcing.get("tier3", [])
+        if _t2_t3:
+            no_exact_match = not any(c.get("pnMatchLevel") == "exact" for c in _t2_t3)
+
     return RunDetail(
         id=run.id,
         phase=run.current_phase,
@@ -527,7 +544,7 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
         warranty=_warranty_label(run.warranty_status),
         facility_id=run.facility_id,
         facility_state=_FACILITY_STATES.get(run.facility_id, "unknown"),
-        asset_specs=_parse(run.asset_specs_json),
+        asset_specs=_asset_specs,
         inventory_result=_parse(run.inventory_result_json),
         sourcing_results=sourcing,
         selected_candidate=_parse(run.selected_candidate_json),
@@ -537,6 +554,7 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
         tier3_selection=json.loads(run.tier3_selection_json) if run.tier3_selection_json else None,
         tier3_outreach_sent=json.loads(run.tier3_outreach_sent_json) if run.tier3_outreach_sent_json else None,
         maintenance_handoff=_parse(run.maintenance_handoff_json),
+        no_exact_match=no_exact_match,
         created_at=run.initiated_at.isoformat() if run.initiated_at else "",
         updated_at=run.updated_at.isoformat() if run.updated_at else "",
     )

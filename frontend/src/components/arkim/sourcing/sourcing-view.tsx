@@ -7,6 +7,7 @@ import { VendorCard } from "@/components/arkim/sourcing/vendor-card";
 import { OutreachCard } from "@/components/arkim/sourcing/outreach-card";
 import { StickyActionBar } from "@/components/arkim/sourcing/sticky-action-bar";
 import { Dot } from "@/components/ui/pill";
+import { Warn } from "@/components/ui/icons";
 import { useArkimStore } from "@/store";
 import type { SourcingRunDetail } from "@/types";
 
@@ -49,6 +50,15 @@ export function SourcingView({ run, className }: SourcingViewProps) {
       {results.warrantyBanner && (
         <div className="px-4 py-2 bg-amber-tint border-b border-amber-line shrink-0">
           <p className="text-[12px] text-amber-fg">{results.warrantyBanner}</p>
+        </div>
+      )}
+
+      {run.no_exact_match && (
+        <div className="px-4 py-2.5 bg-amber-tint border-b border-amber-line shrink-0 flex items-start gap-2">
+          <Warn size={14} className="text-amber-fg mt-0.5 shrink-0" />
+          <p className="text-[12px] text-amber-fg">
+            No vendors had this exact part number. All candidates below are functionally equivalent alternatives — review specs carefully before purchase.
+          </p>
         </div>
       )}
 

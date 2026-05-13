@@ -218,6 +218,8 @@ export interface SourcingRunDetail {
   tier3_outreach_sent?: Record<string, string>;
   maintenance_handoff?: Record<string, unknown>;
   messages?: ChatMessage[];
+  /** True when T2+T3 have candidates but none are an exact PN match. Drives transparency banner. */
+  no_exact_match?: boolean;
   created_at: string;
   updated_at: string;
 }
