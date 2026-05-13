@@ -88,6 +88,11 @@ def _call_enterprise_api(specs: AssetSpecs,
             source     = data.get("source", "live")
             label      = "Pre-Negotiated" if source == "rfq" else "Cached"
             cached_url = data.get("url")
+            # Option B: no snippet is stored in the cache, so _compute_suitability_score
+            # cannot run. A confirmed price is strong evidence of a real product listing;
+            # use a floor-clearing default so cache hits survive the 30% suitability gate.
+            # rfq = manually entered quote (highest confidence); live = Tavily-fetched price.
+            cached_suit = 70.0 if source == "rfq" else 50.0
             print(f"[Sourcing] Price DB HIT ({label}): {vendor_name} @ ${data['price']:.2f} (fetched {fetched})")
             options.append(SourcingOption(
                 vendor_name=vendor_name,
@@ -99,6 +104,7 @@ def _call_enterprise_api(specs: AssetSpecs,
                 notes=f"{label} Price — fetched {fetched}",
                 source_url=cached_url,
                 price_tbd=False,
+                suitability_score=cached_suit,
             ))
             cached_vendors.add(vendor_name)
     else:

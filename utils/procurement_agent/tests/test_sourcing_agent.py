@@ -656,3 +656,64 @@ class TestTier3CapabilityPivot:
 
         assert "tier3_capability_pivot" in result
         assert isinstance(result["tier3_capability_pivot"], bool)
+
+
+# ---------------------------------------------------------------------------
+# Cache-hit suitability (fix: price-DB entries now get a floor-clearing score)
+# ---------------------------------------------------------------------------
+
+class TestTier2CacheSuitability:
+    """Price-DB cache hits must not enter the pipeline with suitability=0."""
+
+    def _make_cache(self, source: str) -> dict:
+        return {
+            "CachedVendor": {
+                "price":        250.0,
+                "lead_days":    3,
+                "date_fetched": "2026-05-13T00:00:00",
+                "source":       source,
+                "url":          "https://cachedvendor.com/product/PN-TEST-001",
+            }
+        }
+
+    def _run_tier2_with_cache(self, source: str) -> list[dict]:
+        agent = SourcingAgent()
+        run   = _make_run()
+        specs = agent._dict_to_specs(run.asset_specs_json)
+        weights = _URGENCY_WEIGHTS["predictive"]
+
+        # get_cached_prices is imported inside _call_enterprise_api, patch at source
+        with patch("utils.price_db.get_cached_prices",
+                   return_value=self._make_cache(source)):
+            with patch("utils.sourcing_archieved.tavily_client._search_vendor_prices",
+                       return_value=[]):
+                with patch("utils.sourcing_archieved.llm_parsing._llm_parse_results",
+                           return_value=[]):
+                    return agent._run_tier2(specs, weights)
+
+    def test_live_cache_hit_clears_suitability_floor(self):
+        results = self._run_tier2_with_cache("live")
+        assert any(r["vendor_name"] == "CachedVendor" for r in results), \
+            "CachedVendor should not be rejected by suitability floor"
+        vendor = next(r for r in results if r["vendor_name"] == "CachedVendor")
+        assert vendor.get("suitability_score", 0) >= 30, \
+            f"Expected suitability >= 30, got {vendor.get('suitability_score')}"
+
+    def test_live_cache_hit_suitability_is_50(self):
+        results = self._run_tier2_with_cache("live")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("suitability_score") == 50.0
+
+    def test_rfq_cache_hit_suitability_is_70(self):
+        results = self._run_tier2_with_cache("rfq")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("suitability_score") == 70.0
+
+    def test_rfq_cache_hit_is_not_rejected(self):
+        results = self._run_tier2_with_cache("rfq")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert not vendor.get("rejection_reason"), \
+            f"rfq cache hit should not be rejected, got: {vendor.get('rejection_reason')}"
