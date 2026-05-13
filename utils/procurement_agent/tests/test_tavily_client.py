@@ -144,11 +144,11 @@ class TestNordicTldBlocking:
 # ---------------------------------------------------------------------------
 
 class TestPartCategoryAuthAnchor:
-    """Tier 2 query for Parts must include authorized distributor names when available."""
+    """Tier 3 query for Parts must include authorized distributor names when available."""
 
     def test_eh_pmc11_query_includes_representative_names(self):
-        """PMC11 (Part) Tier 2 query must anchor on E+H US Representatives."""
-        from utils.sourcing_archieved.tavily_client import _build_tier2_query
+        """PMC11 (Part) Tier 3 query must anchor on E+H US Representatives."""
+        from utils.sourcing_archieved.tavily_client import _build_tier3_query
         from utils.models import AssetSpecs
 
         specs = AssetSpecs(
@@ -159,7 +159,7 @@ class TestPartCategoryAuthAnchor:
             category="Part",
             detected_type="pressure sensor",
         )
-        query = _build_tier2_query(specs)
+        query = _build_tier3_query(specs)
         # At least one E+H US Representative must appear in the query
         rep_names = ["Carotek", "TriNova", "Eastern Controls", "Vector Controls"]
         assert any(rep in query for rep in rep_names), (
@@ -167,8 +167,8 @@ class TestPartCategoryAuthAnchor:
         )
 
     def test_gusher_seal_query_includes_distributors(self):
-        """Gusher Type 21 (Part) Tier 2 query must anchor on Gusher distributors."""
-        from utils.sourcing_archieved.tavily_client import _build_tier2_query
+        """Gusher Type 21 (Part) Tier 3 query must anchor on Gusher distributors."""
+        from utils.sourcing_archieved.tavily_client import _build_tier3_query
         from utils.models import AssetSpecs
 
         specs = AssetSpecs(
@@ -179,7 +179,7 @@ class TestPartCategoryAuthAnchor:
             category="Part",
             detected_type="mechanical seal",
         )
-        query = _build_tier2_query(specs)
+        query = _build_tier3_query(specs)
         gusher_dists = ["Phoenix Pumps", "Anderson Process", "OTC Industrial",
                         "Great Lakes Pump", "Wagner Process"]
         assert any(d in query for d in gusher_dists), (
@@ -188,7 +188,7 @@ class TestPartCategoryAuthAnchor:
 
     def test_unknown_manufacturer_part_uses_generic_anchor(self):
         """Part query for unknown manufacturer must still work without auth anchoring."""
-        from utils.sourcing_archieved.tavily_client import _build_tier2_query
+        from utils.sourcing_archieved.tavily_client import _build_tier3_query
         from utils.models import AssetSpecs
 
         specs = AssetSpecs(
@@ -199,7 +199,7 @@ class TestPartCategoryAuthAnchor:
             category="Part",
             detected_type="valve",
         )
-        query = _build_tier2_query(specs)
+        query = _build_tier3_query(specs)
         assert "authorized distributor" in query
         assert "USA" in query
 

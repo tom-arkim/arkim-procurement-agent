@@ -1,6 +1,7 @@
 """
 utils/sourcing/enterprise_search.py
-Tier 1/1.5 (_call_enterprise_api) and Tier 2 (_discover_national_specialists).
+Tier 2 marketplace search (_call_enterprise_api) and Tier 3 national specialist
+discovery (_discover_national_specialists) per brief Section 8.3.
 
 Both tiers share helpers (_base_reliability, _is_heavy_item, _vendor_merchant_type)
 and differ mainly in merchant_type assignment and how prices are sourced.
@@ -25,7 +26,7 @@ from utils.sourcing_archieved.scoring import (
     _is_collection_url,
 )
 from utils.sourcing_archieved.filtering import _counterfeit_risk_flag
-from utils.sourcing_archieved.tavily_client import _search_vendor_prices, _build_tier2_query
+from utils.sourcing_archieved.tavily_client import _search_vendor_prices, _build_tier3_query
 from utils.sourcing_archieved.llm_parsing import _anthropic_complete, _llm_parse_results
 from utils.sourcing_archieved.price_sanity import _apply_price_sanity
 from utils.sourcing_archieved.market_confidence import _fetch_market_confidence
@@ -63,13 +64,13 @@ def _is_heavy_item(specs: AssetSpecs, weight_lbs: Optional[float] = None) -> boo
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 / 1.5
+# Tier 2 — Marketplace Price Search (brief Section 8.3)
 # ---------------------------------------------------------------------------
 
 def _call_enterprise_api(specs: AssetSpecs,
                           force_refresh: bool = False,
                           search_mode: str = "exact") -> list[SourcingOption]:
-    """Tier 1 / 1.5: check JSON price DB first, then real-time Tavily search.
+    """Tier 2 marketplace search per brief Section 8.3: check JSON price DB first, then real-time Tavily search.
 
     Produces two kinds of SourcingOptions:
       - price_tbd=False : real price found — goes into TCA comparison table
@@ -317,7 +318,7 @@ def _is_oem_authorized_distributor(
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — National Specialist Discovery
+# Tier 3 — National Specialist Discovery (brief Section 8.3)
 # ---------------------------------------------------------------------------
 
 _NATIONAL_SPECIALIST_SYSTEM = """You are a procurement data extractor for industrial equipment.
@@ -357,11 +358,11 @@ Part number matching (required for every result):
 
 def _discover_national_specialists(specs: AssetSpecs,
                                     enterprise_options: list[SourcingOption]) -> list[SourcingOption]:
-    """Tier 2: open-web national specialist discovery.
+    """Tier 3: open-web national specialist discovery per brief Section 8.3.
 
     Searches the full US internet using detected_type so brand-agnostic specialists
     (e.g. pump distributors, conveyor suppliers) that list Add-to-Cart pricing appear.
-    No price estimation — if price not found in snippet, the option is price_tbd=True (-> Tier 3).
+    No price estimation — if price not found in snippet, the option is price_tbd=True.
     """
     import utils.sourcing_archieved as _pkg
     from utils.brand_intelligence import get_brand_relationships
@@ -370,18 +371,18 @@ def _discover_national_specialists(specs: AssetSpecs,
     _equip_kw_t2 = _detect_equip_type(specs)
     _brand_rels  = get_brand_relationships(specs.manufacturer, _equip_kw_t2 or "general")
 
-    query = _build_tier2_query(specs)
-    print(f"[Sourcing] Tier 2 national query: {query!r}")
+    query = _build_tier3_query(specs)
+    print(f"[Sourcing] Tier 3 national query: {query!r}")
 
     if not _pkg._tavily:
-        print("[Sourcing] Tier 2 skipped -- Tavily not initialised.")
+        print("[Sourcing] Tier 3 skipped -- Tavily not initialised.")
         return []
 
     try:
         response = _pkg._tavily.search(query=query, search_depth="advanced", max_results=10)
         results  = response.get("results", [])
     except Exception as exc:
-        print(f"[Sourcing] Tier 2 Tavily error: {exc}")
+        print(f"[Sourcing] Tier 3 Tavily error: {exc}")
         return []
 
     if not results or not _pkg.ANTHROPIC_API_KEY:
@@ -405,7 +406,7 @@ def _discover_national_specialists(specs: AssetSpecs,
     pre_filter = len(results)
     results = [r for r in results if _is_us_url(r.get("url", ""))]
     if len(results) < pre_filter:
-        print(f"[Sourcing] Tier 2 geographic filter: removed {pre_filter - len(results)} non-US result(s)")
+        print(f"[Sourcing] Tier 3 geographic filter: removed {pre_filter - len(results)} non-US result(s)")
 
     if not results:
         return []
@@ -429,9 +430,9 @@ def _discover_national_specialists(specs: AssetSpecs,
             return []
         vendors = [v for v in json.loads(match.group(0))
                    if isinstance(v, dict) and v.get("name")]
-        print(f"[Sourcing] Tier 2 found {len(vendors)} national specialist(s)")
+        print(f"[Sourcing] Tier 3 found {len(vendors)} national specialist(s)")
     except Exception as exc:
-        print(f"[Sourcing] Tier 2 LLM error: {exc}")
+        print(f"[Sourcing] Tier 3 LLM error: {exc}")
         return []
 
     tier1_lower = {"grainger", "mcmaster", "mcmaster-carr", "msc industrial",
@@ -464,7 +465,7 @@ def _discover_national_specialists(specs: AssetSpecs,
 
         # PN enforcement: no_match → annotate and skip scoring
         if pn_status == "no_match":
-            print(f"[Sourcing] Tier 2 PN no_match (pn_mismatch): {name} -- "
+            print(f"[Sourcing] Tier 3 PN no_match (pn_mismatch): {name} -- "
                   f"found '{found_pn}' vs searched '{specs.part_number}'")
             options.append(SourcingOption(
                 vendor_name=name,
@@ -554,11 +555,11 @@ def _discover_national_specialists(specs: AssetSpecs,
             match_type=match_type,
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Tier 2: {name} -- {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | "
+        print(f"  Tier 3: {name} -- {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | "
               f"{stier or 'no tier'} | pn={pn_status}")
 
     if not options:
-        print("[Sourcing] Tier 2: no qualifying national specialists found")
+        print("[Sourcing] Tier 3: no qualifying national specialists found")
     return options
 
 

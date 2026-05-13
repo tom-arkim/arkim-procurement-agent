@@ -61,7 +61,7 @@ from utils.sourcing_archieved.vendor_tokens import (       # noqa: E402
 from utils.sourcing_archieved.tavily_client import (       # noqa: E402
     _build_search_query,
     _vendor_authority_score,
-    _build_tier2_query,
+    _build_tier3_query,
     _search_vendor_prices,
 )
 from utils.sourcing_archieved.scoring import (             # noqa: E402

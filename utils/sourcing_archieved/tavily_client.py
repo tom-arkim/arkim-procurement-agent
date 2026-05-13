@@ -115,8 +115,10 @@ def _build_search_query(specs, search_mode: str = "exact") -> str:
         return f"{base} US distributor price buy"
 
 
-def _build_tier2_query(specs) -> str:
-    """Build an asset-specific national specialist discovery query.
+def _build_tier3_query(specs) -> str:
+    """Build an asset-specific national specialist discovery query (brief Section 8.3 Tier 3).
+
+    Formerly named _build_tier2_query — see commit history for rename context.
 
     Tavily treats its query parameter as natural language — Boolean operators
     (AND, OR, parenthetical grouping) are literal text, not logical operators.
@@ -163,7 +165,7 @@ def _build_tier2_query(specs) -> str:
             q_parts.append("cross-reference aftermarket interchange")
         q_parts.append("authorized distributor buy USA")
         if _auth_brands:
-            print(f"[Sourcing] Tier 2 Part query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
+            print(f"[Sourcing] Tier 3 Part query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
         return " ".join(q_parts)
     else:
         q_parts = [f'"{niche_term}"']
@@ -184,7 +186,7 @@ def _build_tier2_query(specs) -> str:
             q_parts.append(re.sub(r"\s+", "", specs.gpm).upper())
         q_parts.append("authorized distributor buy USA")
         if _auth_brands:
-            print(f"[Sourcing] Tier 2 query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
+            print(f"[Sourcing] Tier 3 query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
         return " ".join(q_parts)
 
 
