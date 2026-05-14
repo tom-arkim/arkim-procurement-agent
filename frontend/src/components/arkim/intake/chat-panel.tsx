@@ -19,11 +19,13 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const previewUrlRef = useRef<string | null>(null);
 
   // Optimistic pending messages (cleared when server confirms)
   const [pending, setPending] = useState<ChatMessage[]>([]);
   // Records message count at send time; cleared only when count grows past this baseline
   const pendingBaseRef = useRef(0);
+  const [isDragging, setIsDragging] = useState(false);
 
   const chatDraft = useArkimStore((s) => s.chatDraft);
   const setChatDraft = useArkimStore((s) => s.setChatDraft);
@@ -31,6 +33,13 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
 
   const sendMsg = useSendMessage(runId);
   const uploadFile = useUploadNameplate(runId);
+
+  // Revoke object URL on unmount to avoid memory leaks
+  useEffect(() => {
+    return () => {
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    };
+  }, []);
 
   // Scroll to bottom whenever messages update
   useEffect(() => {
@@ -75,11 +84,54 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
     );
   };
 
+  const handleUploadFile = (file: File) => {
+    if (!file.type.startsWith("image/")) return;
+
+    // Revoke previous preview URL before creating a new one
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+    const previewUrl = URL.createObjectURL(file);
+    previewUrlRef.current = previewUrl;
+
+    const optimistic: ChatMessage = {
+      id: `opt-upload-${Date.now()}`,
+      role: "user",
+      content: "",
+      created_at: new Date().toISOString(),
+      attachment: { type: "image", filename: file.name, size_bytes: file.size, previewUrl },
+    };
+    pendingBaseRef.current = messages.length;
+    setPending((p) => [...p, optimistic]);
+
+    uploadFile.mutate(file);
+  };
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    uploadFile.mutate(file);
+    handleUploadFile(file);
     e.target.value = "";
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDragging) setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleUploadFile(file);
   };
 
   const allMessages = [...messages, ...pending];
@@ -108,8 +160,23 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
         )}
       </div>
 
-      {/* Input area */}
-      <div className="shrink-0 border-t border-hr-2 bg-bg-2 p-3">
+      {/* Input area — also a drag-drop target */}
+      <div
+        className={cn(
+          "shrink-0 border-t bg-bg-2 p-3 relative",
+          isDragging ? "border-blue-line" : "border-hr-2",
+        )}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        {isDragging && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center rounded bg-bg-2/90 border-2 border-dashed border-blue-line pointer-events-none">
+            <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-blue-fg">
+              Drop image here
+            </p>
+          </div>
+        )}
         <div className="flex items-end gap-2">
           {/* Hidden file input */}
           <input
@@ -171,7 +238,7 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
         </div>
 
         <p className="mt-1.5 font-mono text-[10px] text-fg-4">
-          Enter to send · Shift+Enter for new line · 📎 for nameplate photo
+          Enter to send · Shift+Enter for new line · 📎 or drag image here
         </p>
       </div>
     </div>

@@ -237,6 +237,8 @@ export interface ChatMessage {
     type: "image";
     filename: string;
     size_bytes: number;
+    /** Local object URL for optimistic preview — only present on client-generated messages, never from server. */
+    previewUrl?: string;
   };
 }
 

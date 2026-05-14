@@ -94,8 +94,29 @@ newlines. Placeholder: "Describe the part or paste specs…" Border goes
 **File upload:** Hidden `<input accept="image/*">`. Button labelled with Plus
 icon, title "Attach nameplate photo". Images only.
 
-**Optimistic messages:** Appended locally with `opacity-60`. Cleared when
-server message count grows past the baseline set at send time. Cleared
+**Drag-and-drop upload:** The entire input area (`border-t` container) is a
+drop target. On `dragover`: border switches to `border-blue-line`; an absolute
+overlay with a dashed blue border and "Drop image here" label appears.
+On `dragleave`/`drop`: overlay clears. Dropped file uses the same upload
+path as the file picker. Non-image drops are silently ignored.
+
+**Image preview in chat:** When a file is uploaded (picker or drag-drop), an
+optimistic user-role message appears immediately in the chat thread
+(right-aligned, same bubble style as text messages). The message contains:
+- Thumbnail of the image (`max-h-200px`, `object-contain`).
+- Filename below the thumbnail (monospace 10px, fg-4, truncated).
+
+The optimistic preview uses a local `URL.createObjectURL` URL stored only on
+the client-side message object (`attachment.previewUrl`). It is cleared when
+the server confirms (message count grows past the pre-upload baseline). The
+URL is revoked on component unmount to avoid memory leaks. Server-issued
+system messages (`Nameplate uploaded: …`) continue to appear as centered
+banners as before; the preview is an additive user-side confirmation.
+
+**Input hint row:** "Enter to send · Shift+Enter for new line · 📎 or drag image here"
+
+**Optimistic messages (text):** Appended locally with `opacity-60`. Cleared
+when server message count grows past the baseline set at send time. Cleared
 immediately on send failure (not persisted).
 
 **Auto-scroll:** Scrolls to bottom on any new message, pending message, or

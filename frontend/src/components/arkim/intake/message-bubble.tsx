@@ -43,9 +43,22 @@ export function MessageBubble({ message, pending = false }: MessageBubbleProps) 
       >
         {/* Image attachment preview */}
         {message.attachment?.type === "image" && (
-          <div className="ph mb-2 h-16 w-full rounded text-[10px]">
-            {message.attachment.filename}
-          </div>
+          message.attachment.previewUrl ? (
+            <div className="mb-2 flex flex-col gap-1">
+              <img
+                src={message.attachment.previewUrl}
+                alt={message.attachment.filename}
+                className="rounded max-h-[200px] max-w-full object-contain"
+              />
+              <span className="font-mono text-[10px] text-fg-4 truncate">
+                {message.attachment.filename}
+              </span>
+            </div>
+          ) : (
+            <div className="ph mb-2 h-16 w-full rounded text-[10px]">
+              {message.attachment.filename}
+            </div>
+          )
         )}
 
         <p className="whitespace-pre-wrap">{message.content}</p>
