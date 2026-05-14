@@ -403,10 +403,20 @@ def _discover_national_specialists(specs: AssetSpecs,
             pass
         return True
 
+    from utils.sourcing_archieved.constants import _TIER3_EXCLUDED_HOSTS
+
     pre_filter = len(results)
     results = [r for r in results if _is_us_url(r.get("url", ""))]
     if len(results) < pre_filter:
         print(f"[Sourcing] Tier 3 geographic filter: removed {pre_filter - len(results)} non-US result(s)")
+
+    pre_excl = len(results)
+    results = [
+        r for r in results
+        if not any(h in (r.get("url") or "").lower() for h in _TIER3_EXCLUDED_HOSTS)
+    ]
+    if len(results) < pre_excl:
+        print(f"[Sourcing] Tier 3 host exclusion: removed {pre_excl - len(results)} excluded host(s)")
 
     if not results:
         return []

@@ -27,6 +27,9 @@ _VENDOR_DOMAINS = [
     "pumpproducts.com", "pumpcatalog.com",
     # Tier 1.5: broad industrial
     "zoro.com", "globalindustrial.com", "fastenal.com",
+    # Compressor parts specialists — added 2026-05 for FS Curtis demo.
+    # Legitimate Tier 2 vendors not in the general MRO marketplace set.
+    "compressedairadvisors.com", "oemaircompressor.com", "filterelementstore.com",
 ]
 
 # Vendors whose prices appear on sites without login walls -> "Enterprise"
@@ -41,6 +44,13 @@ _TIER1_VENDORS = {"Grainger", "McMaster-Carr", "MSC Industrial"}
 _BLACKLISTED_DOMAINS = (
     "amazon", "ebay", "aliexpress", "alibaba", "walmart", "etsy",
     "craigslist", "offerup", "mercari",
+)
+
+# Hostnames excluded from Tier 3 outreach results.
+# aircompressorservices.com positions as a competing procurement platform per its
+# public site copy; excluded from Tier 3 outreach results.
+_TIER3_EXCLUDED_HOSTS = (
+    "aircompressorservices.com",
 )
 
 _AUTHORITY_VIABLE_THRESHOLD = 30.0  # minimum authority score to count as viable
