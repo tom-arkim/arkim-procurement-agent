@@ -32,5 +32,39 @@
       "work_order_id": "WO-2024-1041",
       "asset_tag": "PT-PAST-007"
     }
+  },
+  {
+    "submission_id": "maint-sub-demo-003",
+    "facility_id": "fac-cerritos",
+    "submitted_by": "Jake Martinez",
+    "asset_specs": {
+      "manufacturer": "FS-Curtis",
+      "model": "NX4-15",
+      "part_number": "2605539890",
+      "description": "Standard spin-on oil filter for NX4 series rotary screw compressor. Replacement interval: every 2000 hours or quarterly. Required for thermal management restoration."
+    },
+    "context": {
+      "chat_thread_summary": "FS-Curtis NX4-15 rotary screw compressor in utility room operating above normal thermal range. Discharge temperature elevated to 215°F vs 195°F baseline (normal range 158-212°F, warning at 221°F, automatic shutdown at 230°F). Oil appears darkened at sight glass with faint burnt smell near unit — indicators of thermal breakdown in lubricant. Production currently running but at risk of unplanned shutdown. Root cause assessment: most likely fouled oil cooler (60%) or degraded oil (30%). Maintenance assistant recommends immediate replacement of oil filter and compressor oil before next shift.",
+      "urgency": "emergency",
+      "work_order_id": "WO-2024-1203",
+      "asset_tag": "COMP-UTIL-001"
+    }
+  },
+  {
+    "submission_id": "maint-sub-demo-004",
+    "facility_id": "fac-cerritos",
+    "submitted_by": "Jake Martinez",
+    "asset_specs": {
+      "manufacturer": "FS-Curtis",
+      "model": "NX4-15",
+      "part_number": "FSC-8000-5",
+      "description": "Synthetic compressor oil, 5-gallon pail. NX4 oil capacity 1.05 USG. Current charge thermally degraded per sight glass inspection."
+    },
+    "context": {
+      "chat_thread_summary": "FS-Curtis NX4-15 rotary screw compressor in utility room operating above normal thermal range. Discharge temperature elevated to 215°F vs 195°F baseline (normal range 158-212°F, warning at 221°F, automatic shutdown at 230°F). Oil appears darkened at sight glass with faint burnt smell near unit — indicators of thermal breakdown in lubricant. Production currently running but at risk of unplanned shutdown. Root cause assessment: most likely fouled oil cooler (60%) or degraded oil (30%). Maintenance assistant recommends immediate replacement of oil filter and compressor oil before next shift.",
+      "urgency": "emergency",
+      "work_order_id": "WO-2024-1204",
+      "asset_tag": "COMP-UTIL-001"
+    }
   }
 ]
