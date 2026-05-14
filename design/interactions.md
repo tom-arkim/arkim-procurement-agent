@@ -199,10 +199,42 @@ evaluated in order:
 ## 4. Sourcing Dashboard
 
 ### Loading state
-Shown when `results === null`. Centered, blue pulsing dot.
-- Header: "Sourcing in progress…"
-- Subtext: "Scanning Arkim network, open marketplace, and specialist vendors. This typically takes 30–90 seconds."
-- Four animated skeleton bars, staggered opacity.
+Shown when `results === null`. Centered, blue pulsing dot. Displays three timed
+process-step transitions to communicate what the system is doing during the
+~7-second sourcing window.
+
+**Step sequence:**
+
+| Step | Trigger | Label | Subtext |
+|---|---|---|---|
+| 1 | 0s (immediate) | "Scanning Arkim Network..." | "Checking onboarded partners for confirmed pricing" |
+| 2 | 2s | "Checking marketplaces..." | "Searching public catalogs for live availability" |
+| 3 | 5s | "Reaching out to specialists..." | "Identifying regional distributors and authorized service brands" |
+
+**Transition:** Step label and subtext fade out (200ms) then fade in with the
+next step. The persistent "Sourcing in progress…" header and pulsing dot remain
+visible throughout.
+
+**Progress indicator:** Three pill-shaped dots below the step content. Active
+step: wider pill (`w-4`), `blue-fg`. Completed steps: smaller dot, `blue-fg`
+40% opacity. Upcoming: smaller dot, `bg-bg-3`.
+
+**Timing rationale:** Step timings are hardcoded approximations of the observed
+~7s typical sourcing duration. They are not driven by real backend events — this
+is intentional for this prototype phase. Backend SSE/websocket integration would
+require server-side changes and is deferred. The step labels describe real phases
+that are actually happening (Tier 1 network check → Tier 2 marketplace scan →
+Tier 3 specialist outreach), so the display is semantically honest per brief
+Section 11.
+
+**Result arrival:** When sourcing completes, `results` becomes non-null and
+`SourcingView` immediately renders the comparison layout regardless of which step
+is currently displayed. Step timers are cleaned up on component unmount via
+`useEffect` cleanup. No forced wait for the third step to finish.
+
+**Slow-sourcing behavior:** If sourcing exceeds 7 seconds, Step 3 remains
+visible indefinitely. No looping, no fourth step. Step 3 is the catch-all for
+extended sourcing runs (slow Tavily response, large result sets, etc.).
 
 ### Polling
 `useRunLive` polls every **5 seconds** while phase is in

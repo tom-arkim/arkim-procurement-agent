@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { TierHeader } from "@/components/arkim/tier-header";
 import { VendorCard } from "@/components/arkim/sourcing/vendor-card";
@@ -143,7 +143,40 @@ function EmptyTier({ message }: { message: string }) {
   );
 }
 
+// Step timings are approximations of typical sourcing duration (~7s observed). Not synced to real
+// backend events — this is intentional, see /design/interactions.md for rationale.
+const STEP_TIMINGS_MS = [2000, 5000] as const;
+
+const STEPS = [
+  {
+    label: "Scanning Arkim Network...",
+    subtext: "Checking onboarded partners for confirmed pricing",
+  },
+  {
+    label: "Checking marketplaces...",
+    subtext: "Searching public catalogs for live availability",
+  },
+  {
+    label: "Reaching out to specialists...",
+    subtext: "Identifying regional distributors and authorized service brands",
+  },
+] as const;
+
 function SourcingLoadingState({ className }: { className?: string }) {
+  const [stepIndex, setStepIndex] = useState(0);
+  const [visible, setVisible] = useState(true);
+
+  useEffect(() => {
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    STEP_TIMINGS_MS.forEach((ms, i) => {
+      timers.push(setTimeout(() => setVisible(false), ms));
+      timers.push(setTimeout(() => { setStepIndex(i + 1); setVisible(true); }, ms + 200));
+    });
+    return () => timers.forEach(clearTimeout);
+  }, []);
+
+  const step = STEPS[stepIndex];
+
   return (
     <div
       className={cn(
@@ -157,16 +190,29 @@ function SourcingLoadingState({ className }: { className?: string }) {
           Sourcing in progress…
         </span>
       </div>
-      <p className="text-sm text-fg-3 max-w-xs">
-        Scanning Arkim network, open marketplace, and specialist vendors. This
-        typically takes 30–90 seconds.
-      </p>
-      <div className="flex flex-col gap-2 w-full max-w-xs mt-2">
-        {[85, 65, 75, 55].map((w, i) => (
-          <div
+
+      <div
+        className={cn(
+          "flex flex-col items-center gap-1 transition-opacity duration-200",
+          visible ? "opacity-100" : "opacity-0",
+        )}
+      >
+        <p className="text-sm text-fg-2">{step.label}</p>
+        <p className="text-[12px] text-fg-4 max-w-xs">{step.subtext}</p>
+      </div>
+
+      <div className="flex items-center gap-1.5 mt-1">
+        {STEPS.map((_, i) => (
+          <span
             key={i}
-            className="h-2 rounded bg-bg-3"
-            style={{ width: `${w}%`, opacity: 1 - i * 0.15 }}
+            className={cn(
+              "h-1.5 rounded-full transition-all duration-300",
+              i === stepIndex
+                ? "w-4 bg-blue-fg"
+                : i < stepIndex
+                  ? "w-1.5 bg-blue-fg opacity-40"
+                  : "w-1.5 bg-bg-3",
+            )}
           />
         ))}
       </div>
