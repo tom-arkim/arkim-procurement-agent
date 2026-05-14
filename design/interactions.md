@@ -311,11 +311,9 @@ Each Tier 1 card resolves to one of three states based on `candidate.confirmatio
 
 | State | Condition | Display |
 |---|---|---|
-| Request Confirmation | `confirmationPending === true` AND no Zustand sentAt | Primary "Request Confirmation" button. Fires `POST /runs/{id}/request-confirmation`, then records sentAt in Zustand on success. |
-| Awaiting response | `confirmationPending === true` AND sentAt present in Zustand | Disabled ghost button with Clock icon + "Awaiting response". Sub-label: "Sent HH:MM". |
-| Buy Now | `confirmationPending === false` (backend flipped after mock delay, delivered via polling) | Primary "Buy Now" / "Request Quote" button → Buy Now modal → `selectCandidate`. |
-
-Sub-label is "Procured through Arkim" in Request and Buy Now states; "Sent HH:MM" in Awaiting state.
+| Request Confirmation | `confirmationPending === true` AND no Zustand sentAt | Primary "Request Confirmation" button. Fires `POST /runs/{id}/request-confirmation`, then records sentAt in Zustand on success. Sub-label: "Procured through Arkim". |
+| Awaiting response | `confirmationPending === true` AND sentAt present in Zustand | Card dims to ~60% opacity, becomes non-interactive (`pointer-events-none`). "Awaiting" ghost pill added to header. Action area replaced by a centered status block: Clock icon + "Awaiting response" (medium-weight, fg-2) + "Sent HH:MM" (fg-4, smaller). |
+| Buy Now | `confirmationPending === false` (backend flipped after mock delay, delivered via polling) | Primary "Buy Now" / "Request Quote" button → Buy Now modal → `selectCandidate`. Sub-label: "Procured through Arkim". |
 
 ### Tier 2 action
 Always shows secondary "Buy Now" (or "Request Quote" if no price). Buy action opens
@@ -363,10 +361,13 @@ Click target is the entire card div (disabled in sent state).
 
 ### Content layout
 - Header row: vendor name (bold, truncate) + right-aligned status/contact:
-  - Sent: "Awaiting response · HH:MM" (monospace 10px, tertiary, no max-width truncation).
+  - Sent: "Awaiting" ghost pill (replaces the text label).
   - Not sent: contact info (monospace 10px, max-width 140px, truncated), if present.
 - Suitability: label "Suitability" (shrink-0, w-16) + MatchBar + percentage.
 - Lead time: Clock icon (12px) + monospace text.
+- Sent state bottom block: centered status block below lead time — Clock icon (13px)
+  + "Awaiting response" (monospace 12px, font-medium, fg-2) + "Sent HH:MM" (10px, fg-4).
+  Matches the visual treatment of Tier 1 cards in awaiting state.
 
 ### Sent state trigger
 `OutreachCard` receives a `sentAt?: string` prop from `SourcingView`, populated from

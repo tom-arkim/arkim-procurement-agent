@@ -3,6 +3,7 @@
 import { cn } from "@/lib/utils";
 import { MatchBar } from "@/components/ui/match";
 import { Clock } from "@/components/ui/icons";
+import { Pill } from "@/components/ui/pill";
 import { useArkimStore } from "@/store";
 import type { Candidate } from "@/types";
 
@@ -84,9 +85,7 @@ export function OutreachCard({ candidate, runId, sentAt, className }: OutreachCa
             )}
           </div>
           {hasSent ? (
-            <span className="font-mono text-[10px] text-fg-3 shrink-0">
-              Awaiting response · {sentTime}
-            </span>
+            <Pill tone="ghost">Awaiting</Pill>
           ) : candidate.contact ? (
             <span className="font-mono text-[10px] text-fg-3 shrink-0 truncate max-w-[140px]">
               {candidate.contact}
@@ -108,6 +107,16 @@ export function OutreachCard({ candidate, runId, sentAt, className }: OutreachCa
           <Clock size={12} className="shrink-0" />
           <span className="font-mono text-[11px]">{candidate.leadTime}</span>
         </div>
+
+        {hasSent && (
+          <div className="flex flex-col items-center justify-center gap-1 py-2.5 rounded border border-hr-2 bg-bg-2 mt-1">
+            <div className="flex items-center gap-1.5">
+              <Clock size={13} className="text-fg-4 shrink-0" />
+              <span className="font-mono text-[12px] font-medium text-fg-2">Awaiting response</span>
+            </div>
+            <span className="font-mono text-[10px] text-fg-4">Sent {sentTime}</span>
+          </div>
+        )}
       </div>
     </div>
   );

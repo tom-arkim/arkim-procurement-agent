@@ -83,6 +83,7 @@ export function VendorCard({ candidate, runId, className }: VendorCardProps) {
       className={cn(
         "rounded-card border border-hr-2 bg-bg-3 p-4 flex flex-col gap-3",
         candidate.isOemDirect && "border-blue-line",
+        isAwaiting && "opacity-60 pointer-events-none",
         className,
       )}
     >
@@ -100,6 +101,9 @@ export function VendorCard({ candidate, runId, className }: VendorCardProps) {
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          {isAwaiting && (
+            <Pill tone="ghost">Awaiting</Pill>
+          )}
           {candidate.isOemDirect && (
             <Pill tone="blue">OEM Direct</Pill>
           )}
@@ -155,53 +159,51 @@ export function VendorCard({ candidate, runId, className }: VendorCardProps) {
       {/* Actions */}
       <div className="flex items-center gap-2 pt-1">
         <div className="flex flex-col gap-1 flex-1">
-          {isRequestMode && (
-            <Button
-              variant="primary"
-              size="sm"
-              className="w-full"
-              loading={requestConfirmation.isPending}
-              onClick={handleRequestConfirmation}
-            >
-              Request Confirmation
-            </Button>
-          )}
+          {isAwaiting ? (
+            <div className="flex flex-col items-center justify-center gap-1 py-2.5 rounded border border-hr-2 bg-bg-2">
+              <div className="flex items-center gap-1.5">
+                <Clock size={13} className="text-fg-4 shrink-0" />
+                <span className="font-mono text-[12px] font-medium text-fg-2">Awaiting response</span>
+              </div>
+              <span className="font-mono text-[10px] text-fg-4">Sent {sentTime}</span>
+            </div>
+          ) : (
+            <>
+              {isRequestMode && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  className="w-full"
+                  loading={requestConfirmation.isPending}
+                  onClick={handleRequestConfirmation}
+                >
+                  Request Confirmation
+                </Button>
+              )}
 
-          {isAwaiting && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="w-full opacity-60 cursor-default"
-              disabled
-            >
-              <Clock size={12} className="mr-1.5" />
-              Awaiting response
-            </Button>
-          )}
+              {!isRequestMode && (
+                <Button
+                  variant={candidate.tier === 1 ? "primary" : "secondary"}
+                  size="sm"
+                  className="w-full"
+                  loading={select.isPending}
+                  onClick={() => setShowBuyModal(true)}
+                >
+                  {hasPrice ? "Buy Now" : "Request Quote"}
+                </Button>
+              )}
 
-          {!isRequestMode && !isAwaiting && (
-            <Button
-              variant={candidate.tier === 1 ? "primary" : "secondary"}
-              size="sm"
-              className="w-full"
-              loading={select.isPending}
-              onClick={() => setShowBuyModal(true)}
-            >
-              {hasPrice ? "Buy Now" : "Request Quote"}
-            </Button>
+              <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-fg-4 text-center">
+                {candidate.tier === 1
+                  ? "Procured through Arkim"
+                  : "Available via marketplace · Arkim purchases"}
+              </span>
+            </>
           )}
-
-          <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-fg-4 text-center">
-            {isAwaiting
-              ? `Sent ${sentTime}`
-              : candidate.tier === 1
-              ? "Procured through Arkim"
-              : "Available via marketplace · Arkim purchases"}
-          </span>
         </div>
 
-        {/* External link: Tier 2 only */}
-        {candidate.tier === 2 && candidate.url && (
+        {/* External link: Tier 2 only, not in awaiting state */}
+        {!isAwaiting && candidate.tier === 2 && candidate.url && (
           <Button
             variant="ghost"
             size="sm"
