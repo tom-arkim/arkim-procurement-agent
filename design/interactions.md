@@ -134,18 +134,34 @@ in dot-leader format (label … value).
 - When `spec_based_sourcing` is false/absent: null fields render as "—"
   (not-yet-provided indicator).
 
-**Sufficiency message variants:** The agent message that fires when
-`sufficient=true` depends on whether a model or part number was identified:
+**Sufficiency message variants (text input path — `send_message`):** The agent
+message that fires when `sufficient=true` depends on whether a model or part
+number was identified:
 
 | Condition | Message |
 |---|---|
-| `proceed_with_manufacturer_caveat` | "Specs extracted but the manufacturer could not be confirmed. Verify the manufacturer in the panel before confirming." |
+| `proceed_with_manufacturer_caveat` AND NOT (both confidences ≥ 70 + model + PN present) | "Specs extracted but the manufacturer could not be confirmed. Verify the manufacturer in the panel before confirming." |
 | Both model and part_number absent (spec-based path) | "Sourcing by category — we have enough specs (manufacturer, type, key dimensions) to find functionally equivalent options. No specific part number or model is required." |
 | Model or part number present (fully-identified path) | "Specs look complete — review in the panel and confirm to start sourcing." |
+
+Guard: if both `manufacturer_confidence` and `part_id_confidence` are ≥ 70 AND
+model + part_number are both present, the `proceed_with_manufacturer_caveat`
+branch is bypassed and the full-confidence message fires instead. Prevents
+contradictory caveat on high-confidence extractions.
 
 The spec-based path is triggered when both `model` and `part_number` are null
 or null-equivalent ("N/A", "UNKNOWN-PN", etc.) at sufficiency. The backend sets
 `spec_based_sourcing: true` on the AssetSpecs payload in this case.
+
+**Image upload response variants (`POST /api/runs/{id}/upload`):** Four cases,
+evaluated in order:
+
+| Condition | Message |
+|---|---|
+| `sufficient=true` | "Extracted: {mfg} {pn\|model} — specs are in the panel. Review and confirm to start sourcing." |
+| Both confidences ≥ 70, mfg present, `sufficient=false` (required field missing) | "Read the nameplate: {ident}. Some required fields may still be missing — review the panel and fill in any gaps before confirming." |
+| At least one confidence < 70, mfg present | "Read the nameplate: {ident} (manufacturer confidence N%). {Dimension-specific low-confidence phrase} — please verify the specs in the panel[ or provide the part number directly]." Low-confidence phrase: "Part identification confidence is low" when mfg ≥ 70 and part < 70; "Manufacturer confidence is low" when mfg < 70 and part ≥ 70; "Confidence is low" when both < 70. The PN suggestion is omitted when `part_number` is already populated. |
+| mfg absent or unreadable | Three-option recovery message (try clearer photo / type specs / continue with partial). |
 
 **Actions:** Two equal-weight secondary buttons. Neither is primary visually.
 - "Edit / Continue Chat" — dismisses card, returns focus to chat.

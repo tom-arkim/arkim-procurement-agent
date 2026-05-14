@@ -754,16 +754,25 @@ def send_message(run_id: str, body: SendMessageRequest):
     # The confirm-intake endpoint owns the intake → sourcing transition.
     proceed_state = result.get("confidence_summary", {}).get("proceed_state", "")
     if result["sufficient"]:
-        if proceed_state == "proceed_with_manufacturer_caveat":
+        _null_vals = {"", "N/A", "n/a", "null", "None", "UNKNOWN-PN", "Unknown", "unknown", None}
+        _specs_dict = result.get("asset_specs") or {}
+        _has_model = _specs_dict.get("model") not in _null_vals
+        _has_pn = _specs_dict.get("part_number") not in _null_vals
+        _mfg_c = float(result.get("manufacturer_confidence") or 0)
+        _part_c = float(result.get("part_id_confidence") or 0)
+        # Guard: only emit manufacturer caveat when mfg confidence is genuinely low.
+        # If both dimensions are above threshold and data is present, fall through to
+        # the full-confidence message — avoids contradictory caveat on high-conf extractions.
+        _emit_caveat = (
+            proceed_state == "proceed_with_manufacturer_caveat"
+            and not (_mfg_c >= 70 and _part_c >= 70 and _has_model and _has_pn)
+        )
+        if _emit_caveat:
             reply_text = (
                 "Specs extracted but the manufacturer could not be confirmed. "
                 "Verify the manufacturer in the panel before confirming."
             )
         else:
-            _specs_dict = result.get("asset_specs") or {}
-            _null_vals = {"", "N/A", "n/a", "null", "None", "UNKNOWN-PN", "Unknown", "unknown", None}
-            _has_model = _specs_dict.get("model") not in _null_vals
-            _has_pn = _specs_dict.get("part_number") not in _null_vals
             if not _has_model and not _has_pn:
                 _specs_dict["spec_based_sourcing"] = True
                 result["asset_specs"] = _specs_dict
@@ -881,16 +890,30 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...)):
                 f"Extracted: {ident} — specs are in the panel. "
                 "Review and confirm to start sourcing."
             )
-        # (b) Low confidence — something extracted but thresholds not met
+        # (b) Both confidences above threshold but a required field is still missing
+        elif mfg_conf >= 70 and part_conf >= 70 and mfg and mfg not in ("Unknown", "N/A", "null", "unknown"):
+            ident = " ".join(p for p in [mfg, pn or model] if p)
+            reply_text = (
+                f"Read the nameplate: {ident}. "
+                "Some required fields may still be missing — review the panel and fill in any gaps before confirming."
+            )
+        # (c) Low confidence — something extracted but at least one threshold not met
         elif mfg and mfg not in ("Unknown", "N/A", "null", "unknown"):
             ident = " ".join(p for p in [mfg, model] if p)
+            if mfg_conf >= 70 and part_conf < 70:
+                low_conf_detail = "Part identification confidence is low"
+            elif mfg_conf < 70 and part_conf >= 70:
+                low_conf_detail = "Manufacturer confidence is low"
+            else:
+                low_conf_detail = "Confidence is low"
+            _pn_null = {"", "N/A", "n/a", "null", "None", "UNKNOWN-PN", "Unknown", "unknown"}
+            pn_suggestion = "" if pn and pn not in _pn_null else " or provide the part number directly"
             reply_text = (
                 f"Read the nameplate: {ident} "
                 f"(manufacturer confidence {mfg_conf:.0f}%). "
-                "Confidence is low — please verify the specs in the panel "
-                "or provide the part number directly."
+                f"{low_conf_detail} — please verify the specs in the panel{pn_suggestion}."
             )
-        # (c) Nothing readable
+        # (d) Nothing readable
         else:
             reply_text = (
                 "Couldn't read the nameplate clearly.\n\n"
