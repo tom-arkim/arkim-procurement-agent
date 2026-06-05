@@ -16,6 +16,13 @@ venv_win/
 *.log
 streamlit_err.log
 
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # OS
 .DS_Store
 

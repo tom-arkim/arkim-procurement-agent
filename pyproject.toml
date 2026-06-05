@@ -30,6 +30,17 @@ dev = [
 [tool.uv]
 package = false
 
+[tool.coverage.run]
+branch = true
+source = ["utils", "api_server"]
+omit = ["utils/procurement_agent/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+# Coverage is measured, not gated (Phase 0.1) — intentionally no fail_under,
+# and --cov is NOT in addopts so normal/pre-commit runs stay fast and ungated.
+# Measure with: uv run pytest --cov
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["utils/procurement_agent/tests"]
