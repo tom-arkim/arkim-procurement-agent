@@ -7,14 +7,14 @@ Read this first, every session. It describes the repo **as it is today**, not as
 > - `docs/arkim_procurement_code_standard.md` — the code-quality & testing standard this repo follows. **Authoritative for how to write and test code.**
 > - `docs/arkim_procurement_agent_brief.md` — product/architecture intent (what the system is and why).
 > - `CLEANUP.md` (repo root) — known technical debt backlog.
-> - Rollout plan (sequencing — what's built when, by whom): **internal-only, deliberately not committed to this public repo.** See §0.1.
+> - Rollout plan (sequencing — what's built when, by whom): **internal-only, deliberately not committed to this repo.** See §0.1.
 
-### 0.1 Repo visibility — this repo is PUBLIC
+### 0.1 Repo visibility — this repo is PRIVATE (was public)
 
-`github.com/tom-arkim/arkim-procurement-agent` is a **public** GitHub repository — anything committed here is visible to anyone. Two consequences baked into the doc layout:
+`github.com/tom-arkim/arkim-procurement-agent` is now a **private** GitHub repository (confirmed: an unauthenticated fetch returns 404). It was **public earlier in development** — treat anything committed before the visibility flip as having been publicly visible. A full-history secret scan found **no committed credentials**, so exposure risk is low; rotate anything you're unsure about. Guidance that still holds:
 
-- **The rollout plan is intentionally kept out of the repo.** It names who builds what when (internal sequencing + personnel) and has no place in a public tree. Keep it in an internal channel (Notion/Drive), not here.
-- **What stays in the repo is still public.** This file and `docs/arkim_procurement_code_standard.md` name an internal reviewer (Sergei) and §6 below enumerates live security gaps (RBAC not enforced, price-cache collision, email-send disabled). That is fine for an honest internal prototype but is on display to the world. Don't add credentials, customer names, or anything you wouldn't post publicly — and consider whether this repo should be public at all before the next push.
+- **The rollout plan stays out of the repo.** It names who builds what when (internal sequencing + personnel); keep it in an internal channel (Notion/Drive). A private repo makes this lower-stakes, but there's no reason to track it here.
+- **Don't commit secrets regardless of visibility.** This file and `docs/arkim_procurement_code_standard.md` name an internal reviewer (Sergei) and §6 below enumerates live security gaps (RBAC not enforced, price-cache collision, email-send disabled) — fine for a private internal repo, but never add credentials or customer data, and don't treat "private" as licence to.
 
 ---
 
@@ -85,22 +85,17 @@ cd frontend && next dev --port 3000
 
 ## 4. Testing — READ THIS
 
-**There is currently NO test suite.** No `tests/` dir, no pytest config, no runner. The only `test_*.py` files are two live-integration probes in `scripts/` (`test_dynamic_discovery.py`, `test_llm.py`) that hit real Tavily/Anthropic — they are not unit tests and cannot gate a refactor.
+**A pytest suite EXISTS but is not yet runnable as a gate.** ~3,354 lines across 11 files at `utils/procurement_agent/tests/` — real `Test*` classes, per-function DB-isolation fixtures (`conftest.py`), offline mocking via `patch("requests.post")` + internal-function patches — covering live code (intake, sourcing, orchestrator, persistence, approval_rules, outreach, spec_comparison, brand_intelligence) plus some archived modules. Separately, `scripts/` holds live-integration probes (`test_dynamic_discovery.py`, `test_llm.py`) that hit real Tavily/Anthropic; those are not unit tests.
 
-> ⚠️ Any prior claim of "289 tests passing" was fictional — no such suite ever existed. Do not report tests as passing unless a real suite exists and you ran it.
-
-**This means: there is no regression net.** Until the suite exists, verification is manual (run Streamlit / boot uvicorn, exercise the flow).
+**Why it is not yet a regression net:**
+- **Not runnable in-place** — both venvs (`venv`, `venv_win`) are broken (built from a now-missing Anaconda at a pre-rename path); borrowing site-packages fails on `tiktoken`'s compiled extension. The suite has **not been executed here**, so its current green/red status is unconfirmed.
+- **No pytest config** (`pyproject.toml` / `[tool.pytest.ini_options]`) and **no gate** (no pre-commit, no Docker build step).
+- Suite lives at `utils/procurement_agent/tests/`, not the standard's `tests/unit/`.
 
 ### The first hardening task
-**Stand up the pytest suite per `docs/arkim_procurement_code_standard.md` §2 before refactoring `utils/`.** Start with the pure, deterministic logic that the refactor will touch and that has a bug history:
-- scoring (TCA/TLV, suitability, authority)
-- part-number normalization / prefix lookup
-- cross-tier dedup, suitability floor, rejection-reason precedence
-- intake sufficiency assessment
+**Make the existing suite runnable and wire it into a gate** (per `docs/arkim_procurement_code_standard.md` §2): repair the env (uv + `uv.lock`), add the pytest config, establish a **green baseline**, then add the pre-commit + Docker-build gate. This supersedes any earlier "write a suite from scratch" framing — the suite already exists; it needs an environment and a gate, not authoring.
 
-Mock Tavily/Anthropic at the client boundary (test-injector pattern, `Mock(spec=...)` + `AsyncMock`). The suite must run offline and green. Once it exists, pytest becomes a real gate (pre-commit + Docker build) per the standard.
-
-Until then: when asked to "run tests," say there is no suite and offer to stand one up — do not fabricate a result.
+Until a green baseline is confirmed: when asked to "run tests," do **not** report pass/fail you have not actually observed — the environment does not run yet.
 
 ---
 
