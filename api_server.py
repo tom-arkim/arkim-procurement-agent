@@ -425,6 +425,10 @@ def _run_sourcing_background(
                     "tier_2": {"results": [], "count": 0, "status": "error"},
                     "tier_3": {"results": [], "count": 0, "status": "error"},
                 })
+                # Surface the failure as an explicit terminal-ish state so the run
+                # is not stranded at "sourcing" (where the frontend polls forever).
+                # The error detail above is retained for debugging.
+                orm.current_phase = Phase.ERROR.value
                 orm.updated_at = datetime.now(timezone.utc)
                 session.commit()
         return

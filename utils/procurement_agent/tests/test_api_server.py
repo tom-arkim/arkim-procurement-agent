@@ -467,21 +467,22 @@ class TestConfirmIntake:
         # SpecComparisonAgent artifact flows through to camelCase comparisonArtifact.
         assert tier1[0]["comparisonArtifact"] == {"fit": "confirmed"}
 
-    def test_sourcing_failure_is_SWALLOWED_run_stuck_in_sourcing(self, api, monkeypatch):
-        # INCONSISTENCY (refactor target): a background SourcingAgent failure is
-        # invisible to the caller (sync response already 200) and leaves the run
-        # stuck at phase="sourcing" with an error blob — no phase advance, no
-        # surfaced error. Same swallow-the-failure pattern as send_message.
+    def test_sourcing_failure_advances_to_error_phase(self, api, monkeypatch):
+        # A background SourcingAgent failure advances the run to phase="error"
+        # (the React frontend renders this state and stops polling) rather than
+        # stranding it at "sourcing" forever. The sync response is unchanged
+        # (200 {phase:"sourcing"}); the failure surfaces via the polled phase.
+        # Error detail is retained in sourcing_results.error for debugging.
         rid = _create_run(api)
         _set_run(api, rid, asset_specs_json=json.dumps({"manufacturer": "Goulds"}))
         _mock_sourcing_pipeline(monkeypatch, sourcing_exc=RuntimeError("tavily boom"))
 
         resp = api.post(f"/api/runs/{rid}/confirm-intake")
-        assert resp.status_code == 200          # caller sees success
+        assert resp.status_code == 200          # sync response unchanged
         assert resp.json()["phase"] == "sourcing"
 
         detail = api.get(f"/api/runs/{rid}").json()
-        assert detail["phase"] == "sourcing"     # NOT advanced — stuck
+        assert detail["phase"] == "error"        # advanced to error, not stuck
         assert "error" in detail["sourcing_results"]
 
 
