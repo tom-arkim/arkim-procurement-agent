@@ -1,8 +1,15 @@
 # Arkim Procurement Agent — Architectural Brief
 
 **Author:** Tom Dickie, CEO
-**Status:** Draft for CTO review
+**Status:** Draft for CTO review — v2.1
 **Scope:** Prototype rebuild against revised strategy
+
+### Amendment history
+
+| Version | Date | Change |
+|---------|------|--------|
+| v2.0 | Pre-2026-05-08 | Original brief |
+| v2.1 | 2026-05-08 | Phase 1 no longer auto-advances on threshold; explicit confirm-intake gate required. PN prefix lookup added as pre-LLM manufacturer resolution step. |
 
 ---
 
@@ -35,9 +42,11 @@ Procurement is a durable workflow that may span hours or days from initial reque
 
 User initiates a procurement request via chat or image upload. The Intake Agent extracts available data (manufacturer, model, part number, dimensions, materials, electrical specs) and assesses whether the data is sufficient to proceed with sourcing.
 
-**Stop condition:** Manufacturer confidence ≥ 70 AND part identification confidence ≥ 70. Below these thresholds, the agent generates technical follow-up questions (e.g., "I see the model but need the phase voltage to match correctly") and waits for user response. Loop continues until thresholds are met or user explicitly forces "search anyway."
+**Clarification loop:** Manufacturer confidence ≥ 70 AND part identification confidence ≥ 70. Below these thresholds, the agent generates technical follow-up questions (e.g., "I see the model but need the phase voltage to match correctly") and waits for user response. Loop continues until thresholds are met or user explicitly forces "search anyway."
 
-**Output:** Validated AssetSpecs object with confidence-tagged fields, ready to feed downstream agents.
+**Confirm-intake gate (v2.1):** Meeting the confidence thresholds does not automatically advance the run. The run pauses in `intake` and presents the extracted AssetSpecs to the user as a confirm-card. The user must explicitly confirm the extraction is correct via `POST /api/runs/{id}/confirm-intake` before sourcing fires. This gate exists because threshold-based scoring alone is insufficient — high-confidence LLM extractions can be wrong (e.g., ambiguous PN patterns assigned to the wrong manufacturer at 82% confidence). An explicit human verification step is required before committing to a sourcing pass.
+
+**Output:** User-confirmed AssetSpecs object with confidence-tagged fields, ready to feed downstream agents.
 
 ### Phase 2 — Inventory Check (Best-Effort Step 0)
 
@@ -75,9 +84,9 @@ The system uses five specialized agents coordinated by an orchestrator. Agents d
 
 **Inputs:** User chat message, uploaded images (nameplate photos, part photos, assembly photos), prior context from the current ProcurementRun.
 
-**Outputs:** Validated AssetSpecs object with confidence scores per field. Indication of whether to proceed or to ask follow-up question.
+**Outputs:** Extracted AssetSpecs object presented as a confirm-card for user verification. On confirmation, a finalized AssetSpecs with confidence scores per field. Indication of whether to ask a follow-up question (below sufficiency threshold) or to present the confirm-card (thresholds met).
 
-**Reasoning model:** Multimodal vision-capable model (Claude Sonnet for image-heavy work, Haiku for text-only follow-ups).
+**Reasoning model:** Multimodal vision-capable model (Claude Sonnet for image-heavy work, Haiku for text-only follow-ups). PN prefix lookup (`brand_intelligence.PN_PREFIX_TO_MANUFACTURER`) runs before LLM extraction — see Section 8.1.
 
 ### 3.2 Inventory Agent
 
@@ -278,17 +287,22 @@ Three states with explicit behavior:
 
 ## 8. Detailed Component Specifications
 
-### 8.1 Intake Agent — Sufficiency Logic
+### 8.1 Intake Agent — Sufficiency Logic and Manufacturer Resolution
 
-The agent maintains a per-field confidence score for AssetSpecs fields. Sufficiency is determined by a combination of:
+**Step 0 — PN prefix lookup (pre-LLM):** Before any LLM call, the agent checks the part number (from prior context or current message) against `brand_intelligence.PN_PREFIX_TO_MANUFACTURER`, a static lookup table of known manufacturer prefixes (e.g., `PMC` → Endress+Hauser, `1305` → Allen-Bradley). When a prefix match is found, the manufacturer is populated with confidence 92 before the LLM is invoked. If the LLM subsequently returns a different manufacturer at confidence < 92, the prefix-lookup result wins. If the user has explicitly stated a manufacturer and the LLM extracts it at confidence ≥ 92, the user-stated value is preserved. This step bypasses the hallucination failure mode (high-confidence wrong-manufacturer assignment) that motivated the confirm-card gate.
 
-- Manufacturer confidence ≥ 70 (computed from how the manufacturer was identified — visible on nameplate, stated by user, or pattern-inferred from part number).
-- Part identification confidence ≥ 70 (computed from how the part type and category were identified).
+**Step 1 — LLM extraction:** The agent extracts available fields from the user's message and any uploaded images. Per-field confidence scores are assigned based on evidence quality (nameplate visible, user-stated, pattern-inferred).
+
+**Step 2 — Sufficiency assessment:** Sufficiency is determined by:
+- Manufacturer confidence ≥ 70.
+- Part identification confidence ≥ 70.
 - Category-specific required fields populated. For motors: voltage, phase, frame. For seals: shaft size, material. For VFDs: voltage, current rating. For sensors: signal type, process connection size. The required field list is per-category and lives in a config file.
 
 When sufficiency is not met, the agent identifies the most informative missing field and asks one focused question. It does not chain multiple questions — one question per turn keeps the conversation natural.
 
-Force-proceed escape: the user may respond "search anyway" to bypass sufficiency requirements. The agent proceeds with degraded confidence, and downstream filters apply more conservatively (e.g., higher confidence floor, narrower interchange tolerance).
+**Step 3 — Confirm-card gate (v2.1):** When sufficiency thresholds are met, the run does not auto-advance to sourcing. The extracted AssetSpecs are presented to the user as a confirm-card. The user reviews the extraction (manufacturer, model, part number, category, key specs) and explicitly confirms or corrects before proceeding. This gate is retained as defense-in-depth for unknown-prefix and edge-case extractions even when Step 0 resolves the manufacturer confidently.
+
+**Force-proceed escape:** The user may respond "search anyway" to bypass sufficiency requirements. The agent proceeds with degraded confidence, and downstream filters apply more conservatively (e.g., higher confidence floor, narrower interchange tolerance). The confirm-card gate is still presented even on force-proceed.
 
 ### 8.2 Inventory Agent — Connection Patterns
 
@@ -458,11 +472,11 @@ The current implementation has 11 modules in `utils/sourcing/` plus supporting i
 
 ## 11. UI and User Experience Principles
 
-The Streamlit UI is the prototype interface. Production will replace it with a proper frontend, but the UI principles remain.
+The prototype now has two UI layers: a Streamlit app (`app.py`) for internal/admin use and a React/Next.js frontend (`frontend/`) served alongside a FastAPI backend (`api_server.py`, port 8001). The React frontend is the primary user-facing interface and implements the workflow-first model described below. The UI principles apply to both.
 
 ### Workflow-first rendering
 
-The UI displays the current ProcurementRun state and renders appropriate controls for the current phase. During Intake, the user sees a chat interface and can upload images. During Sourcing, the user sees the three-tier results. During Approval, the user sees the candidate selection and approval flow. The UI does not show all phases at once.
+The UI displays the current ProcurementRun state and renders appropriate controls for the current phase. During Intake, the user sees a chat interface and can upload images. When sufficiency thresholds are met, the UI presents the confirm-card for explicit user verification before sourcing fires. During Sourcing, the user sees the three-tier results dashboard. During Approval, the user sees the candidate selection and approval flow. The UI does not show all phases at once.
 
 ### Discrete controls over continuous controls
 
@@ -489,8 +503,8 @@ The following are deliberately deferred to post-seed work. They are flagged here
 - Real-time inventory integrations with Maximo, Fiix, eMaint, etc. Prototype supports CSV upload only.
 - Vendor API integrations for Tier 1 onboarded suppliers. Tier 1 is mocked with hardcoded sample data.
 - Production observability (Datadog, Sentry, structured log aggregation).
-- Comprehensive automated test coverage. Prototype includes targeted tests on pure functions (scoring, comparison logic) but not end-to-end integration tests.
-- Replacement of Streamlit with a production frontend. Streamlit is the prototype UI substrate.
+- Comprehensive automated test coverage. Prototype includes targeted tests on pure functions (scoring, comparison logic, intake agent sufficiency and extraction) but not end-to-end integration tests.
+- Production-hardened React frontend. The current React/Next.js frontend (`frontend/`) implements the full intake-through-approval workflow and is functional for prototype use; it is not production-hardened (no auth, no error boundary coverage, no observability).
 
 ---
 
@@ -498,7 +512,7 @@ The following are deliberately deferred to post-seed work. They are flagged here
 
 The rebuild is structured in phases that produce working software at each step. The prototype is functional after Phase 2 and progressively richer through Phase 5.
 
-### Phase 1 — Foundation (Week 1)
+### Phase 1 — Foundation ✓ Complete
 
 - ProcurementRun SQLAlchemy model and persistence.
 - Orchestrator class skeleton with state transition logic.
@@ -506,39 +520,36 @@ The rebuild is structured in phases that produce working software at each step. 
 - Streamlit UI skeleton showing current phase and state.
 - Existing modules (scoring, filtering, audit log, brand intelligence) wired into the new structure.
 
-**Definition of done:** A ProcurementRun can be created, persists to SQLite, and transitions through phases (with stubbed agent behavior). UI renders the current state.
-
-### Phase 2 — Intake and Sourcing (Week 2)
+### Phase 2 — Intake and Sourcing ✓ Complete
 
 - Intake Agent with multimodal extraction, sufficiency logic, dynamic questioning.
+- PN prefix lookup (`brand_intelligence.PN_PREFIX_TO_MANUFACTURER`) as pre-LLM manufacturer resolution step.
 - Sourcing Agent with all three tiers running in parallel.
 - New tier definitions and query construction for Tier 1 (mocked), Tier 2, Tier 3.
-- UI rendering of three-tier results with appropriate badges.
+- Geographic filtering applied to both Tier 1 and Tier 2 results (non-US vendors excluded pre-LLM).
 
-**Definition of done:** A user can submit a request via chat or image upload, the agent verifies sufficiency and asks follow-ups when needed, and three tiers of results return correctly.
-
-### Phase 3 — Comparison and Approval (Week 3)
+### Phase 3 — Comparison and Approval ✓ Complete
 
 - Spec Comparison Agent with three-fidelity output.
 - Approval Rules Engine with admin UI for rule editing.
 - ProcurementRun state transitions for approval flow.
-- UI rendering of comparison artifacts and approval workflow.
+- React/Next.js frontend with FastAPI backend (`api_server.py`, port 8001).
+- Confirm-intake gate: run pauses at `intake` phase; sourcing fires only after explicit user confirmation via `POST /api/runs/{id}/confirm-intake`.
 
-**Definition of done:** A user can review surfaced candidates with appropriate-fidelity comparisons, initiate approval, and see the dual approval flow when triggered by dollar threshold rules.
+### Phase 4 — React Sourcing Dashboard ✓ Complete
 
-### Phase 4 — Execution and Reconciliation (Week 4)
+- Three-tier sourcing dashboard (Tier 1/2 vendor cards, Tier 3 outreach selection with checkboxes).
+- Sourcing background task fires on confirm-intake; frontend polls every 5s during sourcing phase.
+- OEM Authorized Distributor badge, match level labels, suitability bars, lead time display.
+- Tier 3 outreach workflow: multi-select, sticky action bar, save/send stubs.
+- FastAPI `confirm-intake` endpoint schedules `SourcingAgent` as background task.
 
-- Procurement Agent with simulated execution (no real payment).
-- Fulfillment tracking states.
-- Inventory reconciliation logic with chat-driven location capture.
-- Work order linkage (placeholder until Maintenance Assistant integration).
-
-**Definition of done:** An approved candidate proceeds through a simulated procurement flow with all state transitions captured in the audit log.
-
-### Phase 5 — Inventory Agent and Polish (Week 5, optional)
+### Phase 5 — Inventory Agent and Polish (next)
 
 - Inventory Agent with CSV upload and basic API stub.
 - Step 0 inventory check integrated into orchestrator.
+- Real Tier 3 outreach email dispatch (currently stubbed).
+- Vision extraction path for nameplate image uploads wired to PN prefix lookup.
 - UI polish, error handling improvements, end-to-end testing of full flow.
 
 **Definition of done:** The full five-phase workflow runs end-to-end against representative test cases (mechanical seal, motor, sensor) with appropriate behavior at each stage.
