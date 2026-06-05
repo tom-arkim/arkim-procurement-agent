@@ -504,6 +504,9 @@ class TestRequestConfirmation:
         # Neutralize the 3-8s sleep so the BackgroundTask is instant.
         monkeypatch.setattr(api._api_server, "_MOCK_CONFIRMATION_DELAY_RANGE", (0, 0))
         rid = _create_run(api)
+        raw = _empty_sourcing()
+        raw["tier_1"]["results"] = [{"vendor_name": "Acme", "confirmation_needed": True}]
+        _set_run(api, rid, sourcing_results_json=json.dumps(raw))
         resp = api.post(f"/api/runs/{rid}/request-confirmation",
                         json={"candidate_ids": ["Acme-t1-0"]})
         assert resp.status_code == 200
@@ -530,19 +533,30 @@ class TestRequestConfirmation:
         after = api.get(f"/api/runs/{rid}").json()
         assert after["sourcing_results"]["tier1"][0]["confirmationPending"] is False
 
-    def test_non_matching_candidate_is_silent_noop(self, api, monkeypatch):
-        # INCONSISTENCY: an unmatched candidate id is silently ignored (logged
-        # warning only); the run is unchanged and the caller still got 200.
+    def test_unmatched_candidate_returns_404(self, api, monkeypatch):
+        # An id that matches no Tier 1 candidate is now rejected synchronously
+        # (404) so the caller can distinguish a real confirmation from a no-op,
+        # rather than getting 200 for work that never happens.
         monkeypatch.setattr(api._api_server, "_MOCK_CONFIRMATION_DELAY_RANGE", (0, 0))
         rid = _create_run(api)
         raw = _empty_sourcing()
         raw["tier_1"]["results"] = [{"vendor_name": "Acme", "confirmation_needed": True}]
         _set_run(api, rid, sourcing_results_json=json.dumps(raw))
 
-        api.post(f"/api/runs/{rid}/request-confirmation",
-                 json={"candidate_ids": ["Ghost-t1-0"]})
+        resp = api.post(f"/api/runs/{rid}/request-confirmation",
+                        json={"candidate_ids": ["Ghost-t1-0"]})
+        assert resp.status_code == 404
+        # Run is untouched.
         after = api.get(f"/api/runs/{rid}").json()
         assert after["sourcing_results"]["tier1"][0]["confirmationPending"] is True
+
+    def test_no_sourcing_results_returns_404(self, api, monkeypatch):
+        # A run with no Tier 1 candidates at all has nothing to confirm → 404.
+        monkeypatch.setattr(api._api_server, "_MOCK_CONFIRMATION_DELAY_RANGE", (0, 0))
+        rid = _create_run(api)
+        resp = api.post(f"/api/runs/{rid}/request-confirmation",
+                        json={"candidate_ids": ["Acme-t1-0"]})
+        assert resp.status_code == 404
 
 
 # ---------------------------------------------------------------------------

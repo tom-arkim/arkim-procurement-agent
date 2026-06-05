@@ -1016,8 +1016,20 @@ def request_confirmation(run_id: str, body: ConfirmationRequest, background_task
     cards from "Awaiting response" to Buy Now when the flag flips.
     """
     with _SessionFactory() as session:
-        if not session.get(SourcingRunORM, run_id):
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
             raise HTTPException(status_code=404, detail="Run not found")
+        # Validate the requested ids against the run's Tier 1 candidates before
+        # scheduling, so an id that matches nothing fails loudly here rather than
+        # returning 200 for a background no-op the caller can't detect.
+        raw = json.loads(run.sourcing_results_json) if run.sourcing_results_json else {}
+        t1_results = raw.get("tier_1", {}).get("results", [])
+        valid_ids = {f"{opt.get('vendor_name', '')}-t1-{i}" for i, opt in enumerate(t1_results)}
+        if not (set(body.candidate_ids) & valid_ids):
+            raise HTTPException(
+                status_code=404,
+                detail="No matching Tier 1 candidate for the requested id(s)",
+            )
     background_tasks.add_task(_mock_confirmation_response, run_id, body.candidate_ids)
     return {
         "run_id": run_id,
