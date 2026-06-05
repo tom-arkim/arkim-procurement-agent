@@ -60,7 +60,7 @@ def score_result(r):
 print(f"\n{SEP}")
 print("STAGE 1 — Cache lookup (price_db)")
 print(SEP)
-cached = get_cached_prices("2605539890")
+cached = get_cached_prices("FS Curtis", "2605539890")
 if cached:
     for vendor, data in cached.items():
         print(f"  HIT: {vendor} @ ${data['price']:.2f}  (fetched {data.get('date_fetched','?')[:10]})")

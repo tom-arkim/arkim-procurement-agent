@@ -83,7 +83,7 @@ def _call_enterprise_api(specs: AssetSpecs,
     cached_vendors: set[str] = set()
 
     if not force_refresh:
-        cached = get_cached_prices(specs.part_number)
+        cached = get_cached_prices(specs.manufacturer, specs.part_number)
         for vendor_name, data in cached.items():
             fetched    = data["date_fetched"][:10]
             source     = data.get("source", "live")
@@ -220,7 +220,7 @@ def _call_enterprise_api(specs: AssetSpecs,
                 is_oem_direct=is_oem_dir,
             )
             if price is not None:
-                save_price(specs.part_number, vendor, float(price), int(lead), source="live", url=url)
+                save_price(specs.manufacturer, specs.part_number, vendor, float(price), int(lead), source="live", url=url)
                 print(f"[Sourcing] Priced{tag} suit={suit:.0f}%: {vendor} @ ${price:.2f} | {url}")
                 options.append(SourcingOption(
                     vendor_name=vendor,
