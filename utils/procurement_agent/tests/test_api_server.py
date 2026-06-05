@@ -247,6 +247,18 @@ class TestSendMessage:
         assert resp.status_code == 422
         assert "detail" in resp.json()
 
+    def test_intake_agent_failure_returns_error_response(self, api, monkeypatch):
+        # An IntakeAgent failure now surfaces as a non-2xx error envelope instead
+        # of a fake-200 synthetic agent reply that masked the failure as success.
+        rid = _create_run(api)
+        agent = Mock()
+        agent.run.side_effect = RuntimeError("anthropic boom")
+        monkeypatch.setattr(api._api_server, "IntakeAgent", Mock(return_value=agent))
+
+        resp = api.post(f"/api/runs/{rid}/messages", json={"content": "hello"})
+        assert resp.status_code == 502
+        assert "detail" in resp.json()
+
 
 # ---------------------------------------------------------------------------
 # POST /api/runs/{id}/upload

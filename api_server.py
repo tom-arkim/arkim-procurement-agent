@@ -742,16 +742,17 @@ def send_message(run_id: str, body: SendMessageRequest):
             "prior_question": prior_question,
         })
     except Exception:
+        # Surface the failure honestly as a 502 rather than masking it as a
+        # successful 200 with a synthetic agent reply. The frontend's send-message
+        # mutation already handles a non-2xx via its onError path (restores the
+        # draft + "Message failed" toast). Broad catch is intentional: any agent /
+        # upstream (Anthropic) failure maps to a Bad Gateway.
         traceback.print_exc()
-        print(f"[send_message] IntakeAgent error for run={run_id} — returning synthetic reply")
-        err_reply: Dict[str, Any] = {
-            "id": str(uuid.uuid4()),
-            "role": "agent",
-            "content": "I hit an error processing your message. Please try rephrasing or restart the run.",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        thread.append(err_reply)
-        return SendMessageResponse(run_id=run_id, message=err_reply, updated_phase=current_phase)
+        print(f"[send_message] IntakeAgent error for run={run_id} — returning 502")
+        raise HTTPException(
+            status_code=502,
+            detail="Intake processing failed — please retry.",
+        )
     print(f"[send_message] sufficient={result['sufficient']} mfg_conf={result['manufacturer_confidence']} part_conf={result['part_id_confidence']}")
 
     # Determine reply — do NOT auto-advance on sufficient=True.
