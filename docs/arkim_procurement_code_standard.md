@@ -25,7 +25,7 @@ Both reference repos agree on the following. These are not choices; they are Ark
 - Local setup: `uv venv .venv` then `uv sync --group dev`.
 - Config/secrets via environment variables + `python-dotenv` (`.env` from a checked-in `.env.template` documenting every variable). No `pydantic-settings`, no central Settings object — read config at point of use via `os.environ` / `os.getenv`.
 
-> **Migration note:** the procurement agent currently uses two raw venvs (`venv`, `venv_win`) and `requirements.txt`. First standardization task: move to uv + `uv.lock`, delete the raw venvs and `requirements.txt`.
+> **Migration note (done):** the procurement agent has moved to uv + `uv.lock` as the single dependency source. The legacy raw venvs (`venv`, `venv_win`) and `requirements.txt` have been removed.
 
 ### Linting & formatting — ruff
 Copy this block verbatim into `pyproject.toml`:

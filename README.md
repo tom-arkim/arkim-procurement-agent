@@ -131,10 +131,10 @@ python scripts/refresh_brand_intel.py invalidate Baldor motor
 ## Setup
 
 ```bash
-pip install -r requirements.txt
+uv sync
 export TAVILY_API_KEY=tvly-...
 export ANTHROPIC_API_KEY=sk-ant-...
-streamlit run chat_app.py
+uv run streamlit run app.py
 ```
 
 ### Environment variables

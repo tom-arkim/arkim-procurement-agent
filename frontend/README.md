@@ -23,17 +23,13 @@ FastAPI backend (`api_server.py`) running alongside it during development.
 From the **repository root** (`Arkim Procurement Agent Prototype/`):
 
 ```powershell
-# Activate the project venv first (PowerShell)
-.\venv_win\Scripts\Activate.ps1
-pip install -r requirements.txt
+uv sync
 ```
 
-`fastapi`, `uvicorn[standard]`, and `python-multipart` are already in
-`requirements.txt`. If you prefer a clean install without the venv:
-
-```powershell
-pip install fastapi "uvicorn[standard]" python-multipart sqlalchemy
-```
+This creates `.venv` and installs the backend dependencies (`fastapi`,
+`uvicorn[standard]`, `python-multipart`, `sqlalchemy`, etc.) from
+`pyproject.toml` / `uv.lock`. Run backend commands via `uv run`
+(e.g. `uv run uvicorn api_server:app --port 8001`).
 
 ### 2 · Start the FastAPI backend
 
