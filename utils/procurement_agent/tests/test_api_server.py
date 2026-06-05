@@ -28,6 +28,7 @@ Documented current inconsistencies (targets for the refactor, NOT fixed here):
     thresholds, and accepts any approver_role from the body unchecked
     (no RBAC — CLEANUP.md §4.1).
 """
+import json
 import pytest
 from unittest.mock import Mock
 
@@ -82,6 +83,58 @@ def _mock_intake(client, monkeypatch, result):
     agent = Mock()
     agent.run.return_value = result
     monkeypatch.setattr(client._api_server, "IntakeAgent", Mock(return_value=agent))
+
+
+def _set_run(client, run_id, **fields):
+    """Mutate a run's columns directly in the temp DB (characterization setup)."""
+    SF = client._api_server._SessionFactory
+    ORM = client._api_server.SourcingRunORM
+    with SF() as session:
+        run = session.get(ORM, run_id)
+        for key, value in fields.items():
+            setattr(run, key, value)
+        session.commit()
+
+
+def _create_pending(client, submission_id="sub-1", facility_id="fac-stockton",
+                    summary="Pump leaking at seal — needs replacement"):
+    """Create a pending_intake run via /from-maintenance; return its run id."""
+    resp = client.post("/api/runs/from-maintenance", json={
+        "submission_id": submission_id,
+        "facility_id": facility_id,
+        "submitted_by": "tech-1",
+        "context": {"chat_thread_summary": summary},
+    })
+    assert resp.status_code == 201
+    return resp.json()["run_id"]
+
+
+def _mock_sourcing_pipeline(monkeypatch, sourcing_result=None, artifact=None,
+                            sourcing_exc=None):
+    """Mock the background SourcingAgent + SpecComparisonAgent at their source
+    modules (api_server imports them function-locally inside
+    _run_sourcing_background, so patching the source module is the seam)."""
+    import utils.procurement_agent.agents.sourcing_agent as sa_mod
+    import utils.procurement_agent.agents.spec_comparison_agent as sca_mod
+
+    sourcing_agent = Mock()
+    if sourcing_exc is not None:
+        sourcing_agent.run.side_effect = sourcing_exc
+    else:
+        sourcing_agent.run.return_value = sourcing_result
+    monkeypatch.setattr(sa_mod, "SourcingAgent", Mock(return_value=sourcing_agent))
+
+    comp_agent = Mock()
+    comp_agent.run.return_value = artifact
+    monkeypatch.setattr(sca_mod, "SpecComparisonAgent", Mock(return_value=comp_agent))
+
+
+def _empty_sourcing():
+    return {
+        "tier_1": {"results": [], "count": 0},
+        "tier_2": {"results": [], "count": 0},
+        "tier_3": {"results": [], "count": 0},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -342,3 +395,251 @@ class TestStaticEndpoints:
         assert len(rules) == 4
         assert {"id", "facility_id", "threshold", "cap", "approvers_required",
                 "approver_roles", "applies_to"} == set(rules[0])
+
+
+# ---------------------------------------------------------------------------
+# POST /api/runs/{id}/confirm-intake   (BackgroundTask: SourcingAgent + Comparison)
+# ---------------------------------------------------------------------------
+
+class TestConfirmIntake:
+    def test_not_found_404_string_detail(self, api):
+        resp = api.post("/api/runs/missing/confirm-intake")
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "Run not found"}
+
+    def test_wrong_phase_409_with_DICT_detail(self, api):
+        # INCONSISTENCY: 409 detail is a dict, not a string (refactor target).
+        rid = _create_run(api)
+        _set_run(api, rid, current_phase="approved")
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert isinstance(detail, dict)
+        assert detail["current_phase"] == "approved"
+        assert detail["message"] == "Run is not in intake phase"
+
+    def test_no_specs_422_with_STRING_detail(self, api):
+        # INCONSISTENCY: 422 detail is a string here (vs dict for 409 above).
+        rid = _create_run(api)  # intake, but no asset_specs captured
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 422
+        assert resp.json()["detail"] == \
+            "No asset specs captured yet — complete intake chat first"
+
+    def test_happy_sync_response_then_advances_to_comparison(self, api, monkeypatch):
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({"manufacturer": "Goulds"}))
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing())
+
+        # (i) Synchronous response: phase reported as "sourcing".
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 200
+        assert resp.json() == {"run_id": rid, "phase": "sourcing"}
+
+        # (ii) Post-background state: phase advanced to "comparison", inventory stub
+        # written, sourcing_results present. (TestClient runs the BackgroundTask
+        # synchronously before returning from the POST above.)
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["phase"] == "comparison"
+        assert detail["inventory_result"] == {
+            "status": "no_data",
+            "message": "Inventory agent not yet connected (Phase 5).",
+        }
+        assert detail["sourcing_results"] is not None
+        assert detail["sourcing_results"]["tier1"] == []
+
+    def test_happy_attaches_comparison_artifact_to_candidate(self, api, monkeypatch):
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({"manufacturer": "Goulds"}))
+        sourcing = _empty_sourcing()
+        sourcing["tier_1"]["results"] = [{
+            "vendor_name": "Acme", "base_price": 100, "lead_time_days": 3,
+            "suitability_score": 80, "confidence_score": 70,
+        }]
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=sourcing,
+                                artifact={"fit": "confirmed"})
+
+        api.post(f"/api/runs/{rid}/confirm-intake")
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["phase"] == "comparison"
+        tier1 = detail["sourcing_results"]["tier1"]
+        assert len(tier1) == 1
+        # SpecComparisonAgent artifact flows through to camelCase comparisonArtifact.
+        assert tier1[0]["comparisonArtifact"] == {"fit": "confirmed"}
+
+    def test_sourcing_failure_is_SWALLOWED_run_stuck_in_sourcing(self, api, monkeypatch):
+        # INCONSISTENCY (refactor target): a background SourcingAgent failure is
+        # invisible to the caller (sync response already 200) and leaves the run
+        # stuck at phase="sourcing" with an error blob — no phase advance, no
+        # surfaced error. Same swallow-the-failure pattern as send_message.
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({"manufacturer": "Goulds"}))
+        _mock_sourcing_pipeline(monkeypatch, sourcing_exc=RuntimeError("tavily boom"))
+
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 200          # caller sees success
+        assert resp.json()["phase"] == "sourcing"
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["phase"] == "sourcing"     # NOT advanced — stuck
+        assert "error" in detail["sourcing_results"]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/runs/{id}/request-confirmation   (BackgroundTask: mock vendor reply)
+# ---------------------------------------------------------------------------
+
+class TestRequestConfirmation:
+    def test_not_found_404(self, api):
+        resp = api.post("/api/runs/missing/request-confirmation",
+                        json={"candidate_ids": ["x"]})
+        assert resp.status_code == 404
+
+    def test_validation_missing_candidate_ids_422(self, api):
+        resp = api.post("/api/runs/any/request-confirmation", json={})
+        assert resp.status_code == 422
+
+    def test_happy_sync_response_echoes_delay_range(self, api, monkeypatch):
+        # Neutralize the 3-8s sleep so the BackgroundTask is instant.
+        monkeypatch.setattr(api._api_server, "_MOCK_CONFIRMATION_DELAY_RANGE", (0, 0))
+        rid = _create_run(api)
+        resp = api.post(f"/api/runs/{rid}/request-confirmation",
+                        json={"candidate_ids": ["Acme-t1-0"]})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["run_id"] == rid
+        assert body["candidates"] == ["Acme-t1-0"]
+        # The field echoes the configured delay range (default in prod is "3-8 seconds").
+        assert body["mock_response_in"] == "0-0 seconds"
+
+    def test_post_background_flips_confirmation_pending(self, api, monkeypatch):
+        monkeypatch.setattr(api._api_server, "_MOCK_CONFIRMATION_DELAY_RANGE", (0, 0))
+        rid = _create_run(api)
+        raw = _empty_sourcing()
+        raw["tier_1"]["results"] = [{"vendor_name": "Acme", "confirmation_needed": True}]
+        _set_run(api, rid, sourcing_results_json=json.dumps(raw))
+
+        before = api.get(f"/api/runs/{rid}").json()
+        assert before["sourcing_results"]["tier1"][0]["confirmationPending"] is True
+
+        resp = api.post(f"/api/runs/{rid}/request-confirmation",
+                        json={"candidate_ids": ["Acme-t1-0"]})
+        assert resp.status_code == 200
+
+        after = api.get(f"/api/runs/{rid}").json()
+        assert after["sourcing_results"]["tier1"][0]["confirmationPending"] is False
+
+    def test_non_matching_candidate_is_silent_noop(self, api, monkeypatch):
+        # INCONSISTENCY: an unmatched candidate id is silently ignored (logged
+        # warning only); the run is unchanged and the caller still got 200.
+        monkeypatch.setattr(api._api_server, "_MOCK_CONFIRMATION_DELAY_RANGE", (0, 0))
+        rid = _create_run(api)
+        raw = _empty_sourcing()
+        raw["tier_1"]["results"] = [{"vendor_name": "Acme", "confirmation_needed": True}]
+        _set_run(api, rid, sourcing_results_json=json.dumps(raw))
+
+        api.post(f"/api/runs/{rid}/request-confirmation",
+                 json={"candidate_ids": ["Ghost-t1-0"]})
+        after = api.get(f"/api/runs/{rid}").json()
+        assert after["sourcing_results"]["tier1"][0]["confirmationPending"] is True
+
+
+# ---------------------------------------------------------------------------
+# Plain DB endpoints (no background work)
+# ---------------------------------------------------------------------------
+
+class TestSelectCandidate:
+    def test_happy_advances_to_pending_first_approval(self, api):
+        rid = _create_run(api)
+        resp = api.post(f"/api/runs/{rid}/select-candidate",
+                        json={"candidate_id": "Acme-t1-0", "tier": 1})
+        assert resp.status_code == 200
+        assert resp.json() == {"run_id": rid, "phase": "pending_first_approval"}
+
+    def test_not_found_404(self, api):
+        resp = api.post("/api/runs/missing/select-candidate",
+                        json={"candidate_id": "x", "tier": 1})
+        assert resp.status_code == 404
+
+    def test_validation_missing_tier_422(self, api):
+        resp = api.post("/api/runs/any/select-candidate", json={"candidate_id": "x"})
+        assert resp.status_code == 422
+
+
+class TestFromMaintenance:
+    def test_happy_creates_pending_intake(self, api):
+        resp = api.post("/api/runs/from-maintenance", json={
+            "submission_id": "sub-9", "facility_id": "fac-modesto",
+            "submitted_by": "tech", "context": {"chat_thread_summary": "Bearing noise"},
+        })
+        assert resp.status_code == 201
+        body = resp.json()
+        assert set(body) == {"run_id", "phase", "maintenance_submission_id"}
+        assert body["phase"] == "pending_intake"
+        assert body["maintenance_submission_id"] == "sub-9"
+
+    def test_validation_missing_context_422(self, api):
+        resp = api.post("/api/runs/from-maintenance", json={
+            "submission_id": "s", "facility_id": "f", "submitted_by": "t",
+        })
+        assert resp.status_code == 422
+
+
+class TestOpenFromPending:
+    def test_happy_transitions_to_intake_and_seeds_summary(self, api):
+        rid = _create_pending(api, summary="Seal is leaking")
+        resp = api.post(f"/api/runs/{rid}/open-from-pending")
+        assert resp.status_code == 200
+        assert resp.json() == {"run_id": rid, "phase": "intake"}
+        # Summary seeded as an agent chat message.
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["phase"] == "intake"
+        assert any(m["role"] == "agent" and m["content"] == "Seal is leaking"
+                   for m in detail["messages"])
+
+    def test_not_found_404(self, api):
+        resp = api.post("/api/runs/missing/open-from-pending")
+        assert resp.status_code == 404
+
+    def test_wrong_phase_409_dict_detail(self, api):
+        rid = _create_run(api)  # phase=intake, not pending_intake
+        resp = api.post(f"/api/runs/{rid}/open-from-pending")
+        assert resp.status_code == 409
+        assert isinstance(resp.json()["detail"], dict)
+        assert resp.json()["detail"]["current_phase"] == "intake"
+
+
+class TestRejectSubmission:
+    def test_happy_transitions_to_cancelled(self, api):
+        rid = _create_pending(api, submission_id="sub-rej")
+        resp = api.post(f"/api/runs/{rid}/reject-submission")
+        assert resp.status_code == 200
+        assert resp.json() == {"run_id": rid, "phase": "cancelled"}
+
+    def test_not_found_404(self, api):
+        resp = api.post("/api/runs/missing/reject-submission")
+        assert resp.status_code == 404
+
+    def test_wrong_phase_409_dict_detail(self, api):
+        rid = _create_run(api)  # intake, not pending_intake
+        resp = api.post(f"/api/runs/{rid}/reject-submission")
+        assert resp.status_code == 409
+        assert isinstance(resp.json()["detail"], dict)
+
+
+class TestSaveOutreach:
+    def test_happy_persists_selection_keeps_phase(self, api):
+        rid = _create_run(api)
+        resp = api.post(f"/api/runs/{rid}/save-outreach",
+                        json={"candidate_ids": ["a-t3-0", "b-t3-1"]})
+        assert resp.status_code == 200
+        assert resp.json() == {"run_id": rid, "saved_count": 2, "phase": "intake"}
+
+    def test_not_found_404(self, api):
+        resp = api.post("/api/runs/missing/save-outreach",
+                        json={"candidate_ids": ["x"]})
+        assert resp.status_code == 404
+
+    def test_validation_missing_candidate_ids_422(self, api):
+        resp = api.post("/api/runs/any/save-outreach", json={})
+        assert resp.status_code == 422
