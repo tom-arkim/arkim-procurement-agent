@@ -1,5 +1,7 @@
 # Secrets
 .env
+.env.*
+!.env.example
 
 # Python
 __pycache__/
@@ -27,6 +29,10 @@ data/*.sqlite-shm
 data/*.sqlite-wal
 # Keep directory marker
 !data/.gitkeep
+
+# Runtime price caches under utils/ (regenerated at runtime — not seed data)
+utils/*.db
+utils/price_db.json
 
 # Frontend — build artefacts, dependencies, and local env overrides (never commit)
 frontend/node_modules/
