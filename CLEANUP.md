@@ -126,6 +126,16 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **Risk / impact** | The brief is the source-of-truth document; an unreconciled divergence produces confusion during onboarding and design reviews. A vendor not in `_VENDOR_DOMAINS` can surface in Tier 2 if their page has strong commerce signals — behavior the brief language doesn't anticipate. |
 | **Recommended action** | Amend brief §8.3 language to match implementation: "Tavily search weighted toward known marketplace domains via authority scoring, falling back to domain-restricted search if too few results surface." Code does not change. The brief is the document that updates. |
 
+### 4.5 api_server ↔ Streamlit divergence on sourcing-failure handling
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/orchestrator/core.py:296-315` (`_stub_sourcing`) vs `api_server.py` `_run_sourcing_background` (error branch) |
+| **Kind** | Two front ends handle an identical background sourcing failure differently. The api_server/React path advances the run to `Phase.ERROR` (honest failure state; commit `99b48b5`). The Streamlit/orchestrator path catches the same `SourcingAgent` exception and advances to `Phase.COMPARISON` with an empty/error result — masking the failure as "no candidates found." |
+| **Why it exists** | The api_server failure-masking was fixed (commit `99b48b5`); the same anti-pattern remains on the Streamlit surface, which was not in scope for that fix. |
+| **Risk / impact** | On the Streamlit harness, a real sourcing failure (e.g. Tavily/Anthropic error) presents as a successful run that simply found no vendors — indistinguishable from a genuine zero-result search. This is a debugging trap: it looks like a sourcing bug but is error-masking. The React surface no longer has this problem. |
+| **Recommended action** | When reconciling, make `core.py` also advance to `Phase.ERROR` on a hard sourcing failure (matching api_server). Or accept the divergence until Streamlit is retired — Streamlit is the throwaway build/demo harness and the React/FastAPI path is the durable surface (per CLAUDE.md §2/§8). Low urgency if Streamlit retirement is near. |
+
 ---
 
 ## 5. Frontend / API Calibration
