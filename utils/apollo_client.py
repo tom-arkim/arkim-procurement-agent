@@ -64,7 +64,25 @@ class ApolloClient:
 
     @staticmethod
     def _clean_domain(domain: Optional[str]) -> str:
-        return (domain or "").strip()
+        """Normalize to a bare host: lowercase, no scheme/path, no leading www.
+
+        Mirrors supplier_registry._normalize_domain so the client and the store
+        agree on the same domain key (store-check-first lookups match). Apollo's
+        org-enrich requires a bare domain (no scheme, no www.). Replicated rather
+        than imported to keep this client standalone (no store dependency).
+        """
+        raw = (domain or "").lower().strip()
+        if not raw:
+            return ""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+            host = parsed.hostname or raw
+        except Exception:
+            host = raw
+        if host.startswith("www."):
+            host = host[4:]
+        return host.strip()
 
     # ------------------------------------------------------------------
     # Public API

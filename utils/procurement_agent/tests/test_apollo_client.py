@@ -28,6 +28,41 @@ _TEST_KEY = "test-apollo-key"
 
 
 # ---------------------------------------------------------------------------
+# _clean_domain — normalize to bare host (consistent with supplier_registry)
+# ---------------------------------------------------------------------------
+
+class TestCleanDomain:
+    def test_strips_www(self):
+        assert ApolloClient._clean_domain("www.mescocorp.com") == "mescocorp.com"
+
+    def test_strips_scheme_and_path(self):
+        assert ApolloClient._clean_domain("https://www.x.com/path") == "x.com"
+
+    def test_strips_scheme_without_www(self):
+        assert ApolloClient._clean_domain("http://x.com") == "x.com"
+
+    def test_lowercases(self):
+        assert ApolloClient._clean_domain("X.COM") == "x.com"
+
+    def test_bare_domain_idempotent(self):
+        assert ApolloClient._clean_domain("mescocorp.com") == "mescocorp.com"
+
+    def test_surrounding_whitespace_and_www(self):
+        assert ApolloClient._clean_domain("  www.x.com  ") == "x.com"
+
+    def test_empty_stays_empty(self):
+        assert ApolloClient._clean_domain("") == ""
+        assert ApolloClient._clean_domain(None) == ""
+
+    def test_matches_supplier_registry_normalization(self):
+        """Client and store must produce the same key so cache lookups align."""
+        from utils.supplier_registry import _normalize_domain
+        for d in ("www.mescocorp.com", "https://www.x.com/path", "http://x.com",
+                  "X.COM", "mescocorp.com", "  www.x.com  ", ""):
+            assert ApolloClient._clean_domain(d) == _normalize_domain(d)
+
+
+# ---------------------------------------------------------------------------
 # org_enrich
 # ---------------------------------------------------------------------------
 
@@ -74,6 +109,14 @@ class TestOrgEnrich:
         client = ApolloClient(api_key=_TEST_KEY)
         with patch("utils.apollo_client.requests.get", return_value=_mock_response({})):
             assert client.org_enrich("nonexistent-domain.com") is None
+
+    def test_sends_bare_domain_stripping_www_and_scheme(self):
+        """The www./scheme are stripped before the request hits Apollo."""
+        client = ApolloClient(api_key=_TEST_KEY)
+        payload = {"organization": {"name": "Mesco"}}
+        with patch("utils.apollo_client.requests.get", return_value=_mock_response(payload)) as mget:
+            client.org_enrich("https://www.mescocorp.com/about")
+        assert mget.call_args.kwargs["params"]["domain"] == "mescocorp.com"
 
     def test_empty_domain_returns_none_without_http(self):
         client = ApolloClient(api_key=_TEST_KEY)
