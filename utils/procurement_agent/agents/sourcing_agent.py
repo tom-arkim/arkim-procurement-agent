@@ -613,7 +613,7 @@ class SourcingAgent:
                     c["rejection_reason"] = None
                     c["suitability_note"] = "rescued_by_apollo_confirmed"
                     print(f"[SourcingAgent] Rescued (apollo_confirmed): "
-                          f"{c.get('vendor_name')} — cleared suitability_below_floor "
+                          f"{c.get('vendor_name')} - cleared suitability_below_floor "
                           f"(score={float(c.get('suitability_score') or 0):.0f}%)")
 
             elif status == "rejected_unsuitable":
