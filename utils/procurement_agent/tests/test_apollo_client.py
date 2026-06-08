@@ -147,7 +147,8 @@ class TestPeopleSearch:
         client = ApolloClient(api_key=_TEST_KEY)
         payload = {
             "people": [
-                {"name": "Jane Sales", "title": "Sales Manager",
+                {"id": "p1", "name": "Jane Sales", "first_name": "Jane", "last_name": "Sales",
+                 "title": "Sales Manager", "seniority": "manager",
                  "email": "ja***@phoenixpumps.com", "email_status": "verified"},
                 {"first_name": "Bob", "last_name": "Support", "title": "Customer Service",
                  "email": None, "email_status": "guessed"},
@@ -159,8 +160,12 @@ class TestPeopleSearch:
         mpost.assert_called_once()
         assert len(contacts) == 2
         assert contacts[0] == {
+            "person_id": "p1",
             "name": "Jane Sales",
+            "first_name": "Jane",
+            "last_name": "Sales",
             "title": "Sales Manager",
+            "seniority": "manager",
             "email_status": "verified",
             "has_email": True,
             "masked_email": "ja***@phoenixpumps.com",
@@ -168,6 +173,10 @@ class TestPeopleSearch:
         # Name composed from first/last when 'name' absent.
         assert contacts[1]["name"] == "Bob Support"
         assert contacts[1]["has_email"] is False
+        # Domain goes out as the list param + include_similar_titles present.
+        sent = mpost.call_args.kwargs["json"]
+        assert sent["q_organization_domains_list"] == ["phoenixpumps.com"]
+        assert "include_similar_titles" in sent
 
     def test_titles_and_verified_filter_passed_in_payload(self):
         client = ApolloClient(api_key=_TEST_KEY)
@@ -207,6 +216,53 @@ class TestPeopleSearch:
         bad.raise_for_status.side_effect = requests.exceptions.HTTPError("500")
         with patch("utils.apollo_client.requests.post", return_value=bad):
             assert client.people_search("x.com") == []
+
+
+# ---------------------------------------------------------------------------
+# people_match (People Enrichment — 1 credit; reveals email)
+# ---------------------------------------------------------------------------
+
+class TestPeopleMatch:
+    def test_hit_returns_email(self):
+        client = ApolloClient(api_key=_TEST_KEY)
+        payload = {"person": {"id": "p1", "name": "Jane Sales", "title": "Sales Manager",
+                              "email": "jane@phoenixpumps.com", "email_status": "verified"}}
+        with patch("utils.apollo_client.requests.post", return_value=_mock_response(payload)) as mpost:
+            res = client.people_match(person_id="p1", domain="phoenixpumps.com")
+        mpost.assert_called_once()
+        assert res == {"name": "Jane Sales", "title": "Sales Manager",
+                       "email": "jane@phoenixpumps.com", "email_status": "verified", "person_id": "p1"}
+        assert mpost.call_args.kwargs["json"]["id"] == "p1"
+
+    def test_miss_no_email_returns_none(self):
+        client = ApolloClient(api_key=_TEST_KEY)
+        with patch("utils.apollo_client.requests.post",
+                   return_value=_mock_response({"person": {"id": "p1", "email": None}})):
+            assert client.people_match(person_id="p1") is None
+        with patch("utils.apollo_client.requests.post", return_value=_mock_response({})):
+            assert client.people_match(person_id="p1") is None
+
+    def test_no_identifiers_no_http(self):
+        client = ApolloClient(api_key=_TEST_KEY)
+        with patch("utils.apollo_client.requests.post") as mpost:
+            assert client.people_match() is None
+        mpost.assert_not_called()
+
+    def test_timeout_and_http_error_return_none(self):
+        client = ApolloClient(api_key=_TEST_KEY)
+        with patch("utils.apollo_client.requests.post", side_effect=requests.exceptions.Timeout):
+            assert client.people_match(person_id="p1") is None
+        bad = MagicMock()
+        bad.raise_for_status.side_effect = requests.exceptions.HTTPError("429")
+        with patch("utils.apollo_client.requests.post", return_value=bad):
+            assert client.people_match(person_id="p1") is None
+
+    def test_noop_without_key(self, monkeypatch):
+        monkeypatch.delenv("APOLLO_API_KEY", raising=False)
+        client = ApolloClient()
+        with patch("utils.apollo_client.requests.post") as mpost:
+            assert client.people_match(person_id="p1") is None
+        mpost.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

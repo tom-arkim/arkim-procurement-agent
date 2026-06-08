@@ -33,6 +33,7 @@ import requests
 
 _ORG_ENRICH_URL = "https://api.apollo.io/api/v1/organizations/enrich"
 _PEOPLE_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/search"
+_PEOPLE_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
 
 _TIMEOUT = 30  # seconds — matches _anthropic_complete in llm_parsing.py
 
@@ -140,17 +141,19 @@ class ApolloClient:
         domain: Optional[str],
         titles: Optional[list] = None,
         verified_email_only: bool = False,
+        include_similar_titles: bool = False,
     ) -> list:
-        """Search people at an organization domain. Free endpoint.
+        """Search people at an organization domain. FREE endpoint (no credit).
 
-        Returns a list of contact dicts (possibly empty). Emails are MASKED by
-        Apollo and are NOT unmasked here. Each contact:
-            name, title, email_status, has_email, masked_email.
+        Returns who works there with identity fields — but NOT a usable email
+        (Apollo masks it; revealing it requires people_match, which costs a credit).
+        Each contact dict: person_id, name, first_name, last_name, title, seniority,
+        email_status, has_email, masked_email.
 
         Args:
-            titles: optional list of person titles to filter on (e.g. sales/CS).
-            verified_email_only: when True, only contacts with a verified email
-                status are returned.
+            titles: person titles to filter on (e.g. ["sales", "account executive"]).
+            include_similar_titles: let Apollo expand the title set.
+            verified_email_only: keep only verified-email-status people.
 
         Returns [] on any error / unset key.
         """
@@ -164,9 +167,10 @@ class ApolloClient:
             return []
 
         payload: dict = {
-            "q_organization_domains": clean,
+            "q_organization_domains_list": [clean],
             "page": 1,
             "per_page": 10,
+            "include_similar_titles": bool(include_similar_titles),
         }
         if titles:
             payload["person_titles"] = list(titles)
@@ -196,14 +200,78 @@ class ApolloClient:
                 x for x in (p.get("first_name"), p.get("last_name")) if x
             ).strip() or None
             contacts.append({
+                "person_id": p.get("id"),               # used by people_match to enrich
                 "name": name,
+                "first_name": p.get("first_name"),
+                "last_name": p.get("last_name"),
                 "title": p.get("title"),
+                "seniority": p.get("seniority"),        # used to pick the best contact
                 "email_status": email_status,  # "verified" | "guessed" | "unavailable" | None
                 "has_email": bool(p.get("email")) or email_status == "verified",
-                "masked_email": p.get("email"),  # masked by Apollo — do NOT unmask in this step
+                "masked_email": p.get("email"),  # masked by Apollo — NOT a usable address
             })
 
         if verified_email_only:
             contacts = [c for c in contacts if c["email_status"] == "verified"]
 
         return contacts
+
+    def people_match(
+        self,
+        person_id: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Enrich ONE person (People Enrichment, /people/match) to reveal their email.
+
+        Costs 1 Apollo credit per match. Provide person_id (preferred, from
+        people_search) or first_name+last_name (+domain). Fail-soft: returns None on
+        miss / error / timeout / unset key — never raises.
+
+        Returns {name, title, email, email_status, person_id} or None.
+        """
+        if not self.enabled:
+            print("[Apollo] people_match skipped -- APOLLO_API_KEY unset")
+            return None
+
+        payload: dict = {}
+        if person_id:
+            payload["id"] = person_id
+        if first_name:
+            payload["first_name"] = first_name
+        if last_name:
+            payload["last_name"] = last_name
+        clean = self._clean_domain(domain)
+        if clean:
+            payload["domain"] = clean
+        if not payload:
+            print("[Apollo] people_match skipped -- no identifiers")
+            return None
+
+        try:
+            resp = requests.post(
+                _PEOPLE_MATCH_URL,
+                headers=self._headers(),
+                json=payload,
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json() or {}
+        except Exception as exc:
+            print(f"[Apollo] people_match failed: {type(exc).__name__}: {exc}")
+            return None
+
+        person = data.get("person") or None
+        if not person or not person.get("email"):
+            # Miss — no email revealed.
+            print("[Apollo] people_match miss (no email revealed)")
+            return None
+
+        return {
+            "name": person.get("name"),
+            "title": person.get("title"),
+            "email": person.get("email"),
+            "email_status": person.get("email_status"),
+            "person_id": person.get("id"),
+        }
