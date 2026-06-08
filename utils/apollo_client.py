@@ -22,8 +22,9 @@ heuristic when Apollo is unavailable or unconfigured.
 
 Credit model:
   - org_enrich  : 1 Apollo credit on a match, 0 on a miss.
-  - people_search: free, and returns MASKED emails. This step does NOT attempt to
-    reveal/unmask emails; it only surfaces name/title/email_status/has_email.
+  - people_search: free (mixed_people/api_search), and returns NO email at all. This
+    step only surfaces who works there (person_id/first_name/title/has_email);
+    revealing an email requires people_match (1 credit).
 """
 
 import os
@@ -32,7 +33,12 @@ from typing import Optional
 import requests
 
 _ORG_ENRICH_URL = "https://api.apollo.io/api/v1/organizations/enrich"
-_PEOPLE_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/search"
+# NOTE: the legacy mixed_people/search endpoint is deprecated for API callers
+# (returns HTTP 422 "deprecated for API callers"). The current People Search API is
+# mixed_people/api_search. Its response is leaner: people carry id / first_name /
+# last_name_obfuscated / title / has_email / organization, and DO NOT include a
+# plain last_name, seniority, or any email (masked or otherwise).
+_PEOPLE_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 _PEOPLE_MATCH_URL = "https://api.apollo.io/api/v1/people/match"
 
 _TIMEOUT = 30  # seconds — matches _anthropic_complete in llm_parsing.py
@@ -143,12 +149,15 @@ class ApolloClient:
         verified_email_only: bool = False,
         include_similar_titles: bool = False,
     ) -> list:
-        """Search people at an organization domain. FREE endpoint (no credit).
+        """Search people at an organization domain (mixed_people/api_search). FREE.
 
         Returns who works there with identity fields — but NOT a usable email
-        (Apollo masks it; revealing it requires people_match, which costs a credit).
-        Each contact dict: person_id, name, first_name, last_name, title, seniority,
-        email_status, has_email, masked_email.
+        (the search API never returns one; revealing it requires people_match, which
+        costs a credit). The api_search response is lean: it carries person_id /
+        first_name / title / has_email, but typically NOT a plain last_name (it is
+        obfuscated), seniority, or any email. The output dict keeps the full key set
+        (last_name, seniority, email_status, masked_email present but usually None)
+        for a stable contract; has_email is taken from Apollo's boolean when present.
 
         Args:
             titles: person titles to filter on (e.g. ["sales", "account executive"]).
@@ -199,16 +208,21 @@ class ApolloClient:
             name = p.get("name") or " ".join(
                 x for x in (p.get("first_name"), p.get("last_name")) if x
             ).strip() or None
+            # api_search returns an explicit has_email boolean; fall back to the
+            # legacy derivation (email present / verified status) when it's absent.
+            has_email = p.get("has_email")
+            if has_email is None:
+                has_email = bool(p.get("email")) or email_status == "verified"
             contacts.append({
                 "person_id": p.get("id"),               # used by people_match to enrich
                 "name": name,
                 "first_name": p.get("first_name"),
-                "last_name": p.get("last_name"),
+                "last_name": p.get("last_name"),        # obfuscated/absent in api_search
                 "title": p.get("title"),
                 "seniority": p.get("seniority"),        # used to pick the best contact
                 "email_status": email_status,  # "verified" | "guessed" | "unavailable" | None
-                "has_email": bool(p.get("email")) or email_status == "verified",
-                "masked_email": p.get("email"),  # masked by Apollo — NOT a usable address
+                "has_email": bool(has_email),
+                "masked_email": p.get("email"),  # api_search returns no email here
             })
 
         if verified_email_only:

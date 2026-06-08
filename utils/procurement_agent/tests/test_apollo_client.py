@@ -178,6 +178,48 @@ class TestPeopleSearch:
         assert sent["q_organization_domains_list"] == ["phoenixpumps.com"]
         assert "include_similar_titles" in sent
 
+    def test_uses_api_search_endpoint_not_deprecated(self):
+        """The legacy mixed_people/search is deprecated for API callers (HTTP 422);
+        the client must hit mixed_people/api_search."""
+        client = ApolloClient(api_key=_TEST_KEY)
+        with patch("utils.apollo_client.requests.post", return_value=_mock_response({})) as mpost:
+            client.people_search("x.com")
+        url = mpost.call_args.args[0] if mpost.call_args.args else mpost.call_args.kwargs.get("url")
+        assert url.endswith("/mixed_people/api_search")
+        assert not url.endswith("/mixed_people/search")
+
+    def test_parses_lean_api_search_shape(self):
+        """api_search returns a leaner person: id / first_name / title / has_email,
+        with last_name obfuscated and no email/seniority. Parse it into the stable
+        contact contract (person_id present for the later enrich; has_email honored)."""
+        client = ApolloClient(api_key=_TEST_KEY)
+        payload = {
+            "total_entries": 2,
+            "people": [
+                {"id": "p1", "first_name": "Jeff", "last_name_obfuscated": "S.",
+                 "title": "Inside Sales", "has_email": True, "organization": {"name": "Bay Power"}},
+                {"id": "p2", "first_name": "Dana", "last_name": "Reed",
+                 "title": "Account Executive", "has_email": False},
+            ],
+        }
+        with patch("utils.apollo_client.requests.post", return_value=_mock_response(payload)):
+            contacts = client.people_search("baypower.com")
+
+        assert contacts[0] == {
+            "person_id": "p1",
+            "name": "Jeff",            # only first_name available (last name obfuscated)
+            "first_name": "Jeff",
+            "last_name": None,
+            "title": "Inside Sales",
+            "seniority": None,
+            "email_status": None,
+            "has_email": True,         # taken from Apollo's explicit boolean
+            "masked_email": None,      # api_search returns no email
+        }
+        # Falls back to composing name when a plain last_name happens to be present.
+        assert contacts[1]["name"] == "Dana Reed"
+        assert contacts[1]["has_email"] is False
+
     def test_titles_and_verified_filter_passed_in_payload(self):
         client = ApolloClient(api_key=_TEST_KEY)
         payload = {"people": [
