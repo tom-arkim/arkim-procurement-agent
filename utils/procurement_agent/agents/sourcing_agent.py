@@ -251,6 +251,27 @@ def _names_plausibly_match(vendor_name: Optional[str], apollo_org_name: Optional
 # Tier 3 suitability ordering buckets (lower sorts first).
 _TIER3_RANK_ORDER = {"top": 0, "middle": 1, "bottom": 2}
 
+# Named-contact escalation: sales/account-exec title match + seniority preference.
+_SENIORITY_RANK = {
+    "owner": 0, "founder": 1, "c_suite": 2, "partner": 3, "vp": 4,
+    "head": 5, "director": 6, "manager": 7, "senior": 8, "entry": 9, "intern": 10,
+}
+
+
+def _is_sales_title(title: Optional[str]) -> bool:
+    t = (title or "").lower()
+    return "sales" in t or "account executive" in t or "account exec" in t
+
+
+def _pick_sales_contact(people: list) -> Optional[dict]:
+    """Pick the best sales/account-exec person: highest seniority among sales-titled,
+    tiebroken by search order (stable sort). None if no sales-titled person."""
+    sales = [p for p in (people or []) if _is_sales_title(p.get("title"))]
+    if not sales:
+        return None
+    sales.sort(key=lambda p: _SENIORITY_RANK.get((p.get("seniority") or "").lower(), 99))
+    return sales[0]
+
 
 # ---------------------------------------------------------------------------
 # SourcingAgent
@@ -828,6 +849,88 @@ class SourcingAgent:
         candidate["contact_email_fallback"] = fallback
         if method == "human_flag":
             candidate["contact_note"] = "no domain — needs human contact resolution"
+
+    # ------------------------------------------------------------------
+    # Tier 3 named-contact escalation — Apollo people-search -> enrich (credit-gated,
+    # TRIGGERED ONLY: manual or on generic-inbox bounce). NOT in the default flow.
+    # ------------------------------------------------------------------
+
+    def _escalate_contact(self, candidate: dict) -> dict:
+        """Escalate to a named PRIMARY contact via Apollo (credit-gated).
+
+        people_search (free) -> pick best sales/account-exec -> people_match (exactly
+        ONE, 1 credit, reveals email) -> store as PRIMARY; the generic inbox stays the
+        FALLBACK. Cache-hard: a resolved primary in the store is reused (never
+        re-enriched). Fail-soft: search empty / no sales person / enrich miss / Apollo
+        disabled -> no primary (primary_contact_status='none'); the fallback stands.
+        Never called by the default _resolve_contact flow — triggered only.
+        """
+        from utils import supplier_registry
+
+        url = candidate.get("source_url")
+        domain = ApolloClient._clean_domain(url) if url else ""
+        if not domain:
+            self._annotate_primary(candidate, None, status="none")
+            return candidate
+
+        # Cache-hard: reuse an already-resolved primary (zero Apollo calls).
+        record = supplier_registry.lookup_by_domain(domain)
+        if record and record.get("primary_contact_email") and \
+                record.get("primary_contact_status") == "resolved":
+            self._annotate_primary(
+                candidate, record.get("primary_contact_email"),
+                name=record.get("primary_contact_name"),
+                title=record.get("primary_contact_title"),
+                source=record.get("primary_contact_source") or "store",
+                status="resolved",
+            )
+            return candidate
+
+        # people_search (free) -> pick one sales/account-exec.
+        people = self._apollo.people_search(
+            domain, titles=["sales", "account executive"], include_similar_titles=True
+        )
+        person = _pick_sales_contact(people)
+        if not person:
+            self._annotate_primary(candidate, None, status="none")
+            return candidate
+
+        # Enrich exactly ONE person — the only credit-spending call.
+        enriched = self._apollo.people_match(
+            person_id=person.get("person_id"),
+            first_name=person.get("first_name"),
+            last_name=person.get("last_name"),
+            domain=domain,
+        )
+        if not enriched or not enriched.get("email"):
+            self._annotate_primary(candidate, None, status="none")
+            return candidate
+
+        name  = enriched.get("name") or person.get("name")
+        title = enriched.get("title") or person.get("title")
+        supplier_registry.upsert_primary_contact(domain, {
+            "primary_contact_email":  enriched["email"],
+            "primary_contact_name":   name,
+            "primary_contact_title":  title,
+            "primary_contact_source": "apollo_enriched",
+            "primary_contact_status": "resolved",
+        })
+        self._annotate_primary(candidate, enriched["email"], name=name, title=title,
+                               source="apollo_enriched", status="resolved")
+        return candidate
+
+    @staticmethod
+    def _annotate_primary(
+        candidate: dict, email: Optional[str], name: Optional[str] = None,
+        title: Optional[str] = None, source: Optional[str] = None,
+        status: str = "none",
+    ) -> None:
+        """Attach the named PRIMARY contact (the generic-inbox fallback is untouched)."""
+        candidate["primary_contact_email"] = email
+        candidate["primary_contact_name"] = name
+        candidate["primary_contact_title"] = title
+        candidate["primary_contact_source"] = source
+        candidate["primary_contact_status"] = status
 
     # ------------------------------------------------------------------
     # Fix 5 — Capability search (Tier 3 pivot)

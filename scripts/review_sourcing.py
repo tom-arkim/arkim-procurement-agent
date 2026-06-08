@@ -12,6 +12,7 @@ Usage:
     uv run python scripts/review_sourcing.py 0          # only PARTS[0]
     uv run python scripts/review_sourcing.py 0 2        # PARTS[0] and PARTS[2]
     uv run python scripts/review_sourcing.py 2 --refresh  # re-enrich (force fresh Apollo)
+    uv run python scripts/review_sourcing.py 2 --escalate # named-contact escalation (1 enrich credit/supplier)
 
 --refresh expires the Apollo cache (backdates apollo_enriched_at on non-onboarded
 rows) so the clarifier re-fetches and re-persists fields (incl. apollo_org_name),
@@ -82,7 +83,7 @@ def _yn(v) -> str:
     return "Y" if v else "N"
 
 
-def _run_one(agent: SourcingAgent, label: str, specs: dict) -> None:
+def _run_one(agent: SourcingAgent, label: str, specs: dict, escalate: bool = False) -> None:
     print("\n" + "=" * 110)
     print(f"PART: {label}")
     print("=" * 110)
@@ -98,12 +99,20 @@ def _run_one(agent: SourcingAgent, label: str, specs: dict) -> None:
     )
     res = agent.run(run)
 
+    if escalate:
+        # Triggered named-contact escalation (LIVE Apollo people-search + 1 enrich
+        # credit per default-selected Tier 3 supplier). Off the default path.
+        for c in (res.get("tier_3") or {}).get("results", []):
+            if c.get("default_outreach_selected"):
+                agent._escalate_contact(c)
+
     for tier in ("tier_1", "tier_2", "tier_3"):
         block = res.get(tier) or {}
         rows = block.get("results") or []
         print(f"\n-- {tier}  ({block.get('count')} candidates, status={block.get('status')}) --")
-        hdr = (f"{'vendor':26} {'suit_status':18} {'rank':7} {'sel':4} {'cnf':4} "
-               f"{'contact (method:email)':34} {'rejection_reason':18} {'suit%':>5}  note/flag")
+        hdr = (f"{'vendor':24} {'suit_status':16} {'rank':7} {'sel':4} {'cnf':4} "
+               f"{'contact (method:email)':30} {'primary (status:email)':30} "
+               f"{'rejection_reason':16} {'suit%':>5}  note/flag")
         print(hdr)
         print("-" * len(hdr))
         for c in rows:
@@ -112,13 +121,16 @@ def _run_one(agent: SourcingAgent, label: str, specs: dict) -> None:
                 contact = f"{c['contact_method']}:{c.get('resolved_contact_email') or '-'}"
             else:
                 contact = "-"
-            print(f"{(c.get('vendor_name') or '')[:25]:26} "
-                  f"{str(c.get('suitability_status') or '-')[:18]:18} "
+            pstatus = c.get("primary_contact_status")
+            primary = f"{pstatus}:{c.get('primary_contact_email') or '-'}" if pstatus else "-"
+            print(f"{(c.get('vendor_name') or '')[:23]:24} "
+                  f"{str(c.get('suitability_status') or '-')[:16]:16} "
                   f"{str(c.get('suitability_rank_tier') or '-'):7} "
                   f"{_yn(c.get('default_outreach_selected')):4} "
                   f"{_yn(c.get('requires_outreach_confirmation')):4} "
-                  f"{contact[:33]:34} "
-                  f"{str(c.get('rejection_reason') or '-')[:17]:18} "
+                  f"{contact[:29]:30} "
+                  f"{primary[:29]:30} "
+                  f"{str(c.get('rejection_reason') or '-')[:15]:16} "
                   f"{float(c.get('suitability_score') or 0):5.0f}  "
                   f"{note}")
     print("\nfilters_applied:", res.get("filters_applied"))
@@ -174,12 +186,16 @@ def main() -> None:
 
     argv = sys.argv[1:]
     refresh = "--refresh" in argv
+    escalate = "--escalate" in argv
     idx = [int(a) for a in argv if a.isdigit()]
     if refresh:
         _expire_apollo_cache()
     selected = [PARTS[i] for i in idx] if idx else PARTS
-    print(f"Running {len(selected)} part(s): {[p['label'] for p in selected]}"
-          + (" [--refresh]" if refresh else ""))
+    flags = "".join(f" [{f}]" for f, on in (("--refresh", refresh), ("--escalate", escalate)) if on)
+    print(f"Running {len(selected)} part(s): {[p['label'] for p in selected]}{flags}")
+    if escalate:
+        print("[review] --escalate: LIVE Apollo people-search + 1 enrich credit per "
+              "default-selected Tier 3 supplier (named-contact escalation).")
 
     agent = SourcingAgent(
         tavily_api_key=os.environ.get("TAVILY_API_KEY"),
@@ -188,7 +204,7 @@ def main() -> None:
     )
     for p in selected:
         try:
-            _run_one(agent, p["label"], p["specs"])
+            _run_one(agent, p["label"], p["specs"], escalate=escalate)
         except Exception as exc:
             print(f"[review] run FAILED for {p['label']}: {type(exc).__name__}: {exc}")
 

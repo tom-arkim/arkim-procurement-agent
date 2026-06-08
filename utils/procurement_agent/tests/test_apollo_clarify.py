@@ -14,7 +14,9 @@ import pytest
 
 from utils import supplier_registry
 from utils.models import AssetSpecs, SourcingRun
-from utils.procurement_agent.agents.sourcing_agent import SourcingAgent, _names_plausibly_match
+from utils.procurement_agent.agents.sourcing_agent import (
+    SourcingAgent, _names_plausibly_match, _pick_sales_contact, _is_sales_title,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -613,3 +615,144 @@ class TestResolveContact:
         assert len(out) == 3 and len(cands) == 3
         agent._apollo.org_enrich.assert_not_called()
         agent._apollo.people_search.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Named-contact escalation — pick heuristic
+# ---------------------------------------------------------------------------
+
+class TestPickSalesContact:
+    def test_is_sales_title(self):
+        assert _is_sales_title("Director of Sales")
+        assert _is_sales_title("Account Executive")
+        assert not _is_sales_title("Operations Manager")
+        assert not _is_sales_title(None)
+
+    def test_picks_highest_seniority_sales(self):
+        people = [
+            {"title": "Sales Rep", "seniority": "entry", "name": "a"},
+            {"title": "VP of Sales", "seniority": "vp", "name": "b"},
+            {"title": "Sales Manager", "seniority": "manager", "name": "c"},
+        ]
+        assert _pick_sales_contact(people)["name"] == "b"  # vp most senior
+
+    def test_ignores_non_sales(self):
+        people = [{"title": "Operations Manager", "seniority": "director", "name": "ops"},
+                  {"title": "Account Executive", "seniority": "entry", "name": "ae"}]
+        assert _pick_sales_contact(people)["name"] == "ae"  # only sales-titled considered
+
+    def test_no_sales_returns_none(self):
+        assert _pick_sales_contact([{"title": "Engineer"}]) is None
+        assert _pick_sales_contact([]) is None
+        assert _pick_sales_contact(None) is None
+
+    def test_tiebreak_is_stable(self):
+        people = [{"title": "Sales", "seniority": "manager", "name": "first"},
+                  {"title": "Sales", "seniority": "manager", "name": "second"}]
+        assert _pick_sales_contact(people)["name"] == "first"
+
+
+# ---------------------------------------------------------------------------
+# Named-contact escalation — triggered only, credit-gated, fail-soft
+# ---------------------------------------------------------------------------
+
+class TestEscalateContact:
+    @staticmethod
+    def _agent(apollo):
+        a = SourcingAgent(apollo_api_key="")
+        a._apollo = apollo
+        return a
+
+    @staticmethod
+    def _sales_people():
+        return [
+            {"person_id": "p1", "name": "Sam Rep", "first_name": "Sam", "last_name": "Rep",
+             "title": "Sales Representative", "seniority": "entry"},
+            {"person_id": "p2", "name": "Dana Dir", "first_name": "Dana", "last_name": "Dir",
+             "title": "Director of Sales", "seniority": "director"},
+            {"person_id": "p3", "name": "Pat Ops", "title": "Operations Manager", "seniority": "manager"},
+        ]
+
+    def test_happy_path_one_enrich_stores_primary(self, isolated_registry):
+        sr = isolated_registry
+        apollo = MagicMock()
+        apollo.people_search.return_value = self._sales_people()
+        apollo.people_match.return_value = {"name": "Dana Dir", "title": "Director of Sales",
+                                            "email": "dana@x.com", "email_status": "verified", "person_id": "p2"}
+        agent = self._agent(apollo)
+        c = {"vendor_name": "X", "source_url": "https://x.com"}
+        agent._escalate_contact(c)
+
+        apollo.people_match.assert_called_once()  # exactly ONE enrich
+        assert apollo.people_match.call_args.kwargs["person_id"] == "p2"  # highest-seniority sales
+        assert c["primary_contact_email"] == "dana@x.com"
+        assert c["primary_contact_status"] == "resolved"
+        assert c["primary_contact_source"] == "apollo_enriched"
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["primary_contact_email"] == "dana@x.com"
+        assert rec["primary_contact_status"] == "resolved"
+
+    def test_cache_hard_reuses_primary_zero_apollo(self, isolated_registry):
+        sr = isolated_registry
+        sr.upsert_primary_contact("x.com", {"primary_contact_email": "jane@x.com",
+                                            "primary_contact_name": "Jane",
+                                            "primary_contact_source": "apollo_enriched",
+                                            "primary_contact_status": "resolved"})
+        apollo = MagicMock()
+        agent = self._agent(apollo)
+        c = {"vendor_name": "X", "source_url": "https://x.com"}
+        agent._escalate_contact(c)
+        apollo.people_search.assert_not_called()
+        apollo.people_match.assert_not_called()
+        assert c["primary_contact_email"] == "jane@x.com"
+
+    def test_no_sales_person_no_enrich(self, isolated_registry):
+        apollo = MagicMock()
+        apollo.people_search.return_value = [{"person_id": "p", "title": "Operations Manager", "seniority": "manager"}]
+        agent = self._agent(apollo)
+        c = {"vendor_name": "X", "source_url": "https://x.com"}
+        agent._escalate_contact(c)
+        apollo.people_match.assert_not_called()
+        assert c["primary_contact_status"] == "none"
+        assert c["primary_contact_email"] is None
+
+    def test_search_empty_no_primary(self, isolated_registry):
+        apollo = MagicMock()
+        apollo.people_search.return_value = []
+        agent = self._agent(apollo)
+        c = {"vendor_name": "X", "source_url": "https://x.com"}
+        agent._escalate_contact(c)
+        apollo.people_match.assert_not_called()
+        assert c["primary_contact_status"] == "none"
+
+    def test_enrich_miss_no_primary(self, isolated_registry):
+        apollo = MagicMock()
+        apollo.people_search.return_value = self._sales_people()
+        apollo.people_match.return_value = None
+        agent = self._agent(apollo)
+        c = {"vendor_name": "X", "source_url": "https://x.com"}
+        agent._escalate_contact(c)
+        apollo.people_match.assert_called_once()  # tried exactly once, then fail-soft
+        assert c["primary_contact_status"] == "none"
+
+    def test_no_domain_no_primary_no_calls(self, isolated_registry):
+        apollo = MagicMock()
+        agent = self._agent(apollo)
+        c = {"vendor_name": "Seeded", "source_url": None}
+        agent._escalate_contact(c)
+        apollo.people_search.assert_not_called()
+        assert c["primary_contact_status"] == "none"
+
+    def test_disabled_apollo_noops(self, isolated_registry):
+        agent = SourcingAgent(apollo_api_key="")  # real, disabled -> people_search returns []
+        c = {"vendor_name": "X", "source_url": "https://x.com"}
+        agent._escalate_contact(c)
+        assert c["primary_contact_status"] == "none"
+
+    def test_default_resolve_makes_zero_people_calls(self, isolated_registry):
+        apollo = MagicMock()
+        agent = self._agent(apollo)
+        cands = [{"vendor_name": "X", "source_url": "https://x.com", "default_outreach_selected": True}]
+        agent._resolve_contact(cands)
+        apollo.people_search.assert_not_called()
+        apollo.people_match.assert_not_called()
