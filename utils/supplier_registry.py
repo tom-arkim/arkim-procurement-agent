@@ -31,6 +31,15 @@ Contact resolution (added by _migrate; resolved email reuses base `contact_email
   contact_method                 text        "store" | "generic_inbox" | "human_flag"
   contact_status                 text        "resolved" | "needs_human" | "bounced"
   contact_resolved_at            text        ISO 8601 UTC
+The above is the FALLBACK (generic inbox). The PRIMARY (named, Apollo-enriched)
+contact sits above it (dual-contact model; set only by the escalation, never the
+free default path):
+  primary_contact_email          text
+  primary_contact_name           text
+  primary_contact_title          text
+  primary_contact_source         text        "apollo_enriched"
+  primary_contact_status         text        "resolved" | "no_response" | "bounced" | "none"
+  primary_contact_at             text        ISO 8601 UTC
 
 `suitability_status` is INDEPENDENT of `onboarding_status`: the former records Apollo's
 US+requirement verdict, the latter the onboarding lifecycle. A supplier can legitimately be
@@ -112,6 +121,18 @@ _CONTACT_COLUMNS: dict[str, str] = {
 # Fields upsert_contact() may write (resolved email reuses the base contact_email).
 _CONTACT_WRITABLE = {"contact_email", "contact_method", "contact_status", "contact_resolved_at"}
 
+# PRIMARY (named) contact columns — the Apollo-enriched escalation contact, sitting
+# ABOVE the generic-inbox fallback (contact_email/contact_method). Added by _migrate.
+_PRIMARY_COLUMNS: dict[str, str] = {
+    "primary_contact_email":  "TEXT",
+    "primary_contact_name":   "TEXT",
+    "primary_contact_title":  "TEXT",
+    "primary_contact_source": "TEXT",   # "apollo_enriched"
+    "primary_contact_status": "TEXT",   # "resolved" | "no_response" | "bounced" | "none"
+    "primary_contact_at":     "TEXT",   # ISO 8601 UTC
+}
+_PRIMARY_WRITABLE = set(_PRIMARY_COLUMNS)
+
 # Seed data — Tier 1 and Tier 1.5 known vendors, all discovery_only until onboarded
 _SEED_VENDORS = [
     ("grainger.com",          "Grainger"),
@@ -150,7 +171,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(suppliers)").fetchall()}
     added = []
-    for col, coltype in {**_APOLLO_COLUMNS, **_CONTACT_COLUMNS}.items():
+    for col, coltype in {**_APOLLO_COLUMNS, **_CONTACT_COLUMNS, **_PRIMARY_COLUMNS}.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE suppliers ADD COLUMN {col} {coltype}")
             added.append(col)
@@ -444,27 +465,95 @@ def upsert_contact(domain: str, fields: dict) -> bool:
         return False
 
 
-def mark_contact_bounced(domain: str) -> bool:
-    """Bounce primitive: clear the stored contact_email and set contact_status=
-    'bounced' so the next resolution does NOT reuse a dead address (it falls
-    through to re-construct the generic inbox or human-flag). Logic only — the
-    future inbound-bounce handler calls this; no SMTP/inbound wiring here.
+def upsert_primary_contact(domain: str, fields: dict) -> bool:
+    """Write the PRIMARY (named, Apollo-enriched) contact, keyed by domain.
+
+    Upsert semantics (mirrors upsert_contact): creates a discovery_only stub if the
+    domain is absent. Only `_PRIMARY_WRITABLE` keys accepted. Auto-stamps
+    primary_contact_at. The generic-inbox fallback (contact_email/contact_method) is
+    left untouched. Returns True on a write.
     """
     norm = _normalize_domain(domain)
     if not norm:
+        print("[SupplierRegistry] upsert_primary_contact skipped -- empty domain")
         return False
+
+    updates = {k: v for k, v in (fields or {}).items() if k in _PRIMARY_WRITABLE}
+    if not updates:
+        print(f"[SupplierRegistry] upsert_primary_contact skipped -- no primary fields for {norm!r}")
+        return False
+
+    updates.setdefault("primary_contact_at", datetime.utcnow().isoformat())
+    updates["updated_at"] = datetime.utcnow().isoformat()
     try:
         conn = _get_conn()
+        exists = conn.execute(
+            "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
+        ).fetchone()
+        if not exists:
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                """INSERT OR IGNORE INTO suppliers
+                   (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
+                   VALUES (?,?,?,'discovery_only','Unknown',?,?)""",
+                (str(uuid.uuid4()), norm, norm, now, now),
+            )
+        set_clause = ", ".join(f"{k} = :{k}" for k in updates)
         cursor = conn.execute(
-            "UPDATE suppliers SET contact_email = NULL, contact_status = 'bounced', "
-            "updated_at = ? WHERE domain = ?",
-            (datetime.utcnow().isoformat(), norm),
+            f"UPDATE suppliers SET {set_clause} WHERE domain = :_domain",
+            {**updates, "_domain": norm},
         )
         conn.commit()
         return cursor.rowcount > 0
     except Exception as exc:
-        print(f"[SupplierRegistry] mark_contact_bounced failed for {norm!r}: {exc}")
+        print(f"[SupplierRegistry] upsert_primary_contact failed for {norm!r}: {exc}")
         return False
+
+
+def mark_contact_bounced(domain: str, which: str = "generic") -> bool:
+    """Bounce primitive (logic only — the future inbound-bounce handler calls this).
+
+    which="generic" (default): clear the generic-inbox contact_email and set
+      contact_status='bounced' — a trigger to escalate (try a named contact) and a
+      signal the next free resolution must not reuse the dead address.
+    which="primary": clear primary_contact_email and set primary_contact_status=
+      'bounced' — failover then uses the generic-inbox fallback (see effective_contact).
+    """
+    norm = _normalize_domain(domain)
+    if not norm:
+        return False
+    if which == "primary":
+        sql = ("UPDATE suppliers SET primary_contact_email = NULL, "
+               "primary_contact_status = 'bounced', updated_at = ? WHERE domain = ?")
+    else:
+        sql = ("UPDATE suppliers SET contact_email = NULL, contact_status = 'bounced', "
+               "updated_at = ? WHERE domain = ?")
+    try:
+        conn = _get_conn()
+        cursor = conn.execute(sql, (datetime.utcnow().isoformat(), norm))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as exc:
+        print(f"[SupplierRegistry] mark_contact_bounced({which}) failed for {norm!r}: {exc}")
+        return False
+
+
+def effective_contact(record: Optional[dict]) -> dict:
+    """Failover decision (data-model only): which email to actually use.
+
+    Rule: a resolved PRIMARY (named) contact wins; otherwise (primary none /
+    no_response / bounced) fall back to the generic inbox (when not itself bounced);
+    otherwise none. The future send layer sets primary_contact_status and calls this.
+
+    Returns {"email": str|None, "source": "primary"|"fallback"|"none"}.
+    """
+    if not record:
+        return {"email": None, "source": "none"}
+    if record.get("primary_contact_email") and record.get("primary_contact_status") == "resolved":
+        return {"email": record["primary_contact_email"], "source": "primary"}
+    if record.get("contact_email") and record.get("contact_status") != "bounced":
+        return {"email": record["contact_email"], "source": "fallback"}
+    return {"email": None, "source": "none"}
 
 
 def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_DAYS) -> bool:

@@ -254,3 +254,74 @@ class TestContactResolution:
         rec = sr.lookup_by_domain("x.com")
         assert rec["contact_email"] is None     # email cleared
         assert rec["contact_status"] == "bounced"
+
+
+# ---------------------------------------------------------------------------
+# Dual primary/fallback contact model
+# ---------------------------------------------------------------------------
+
+class TestPrimaryContact:
+    def test_primary_columns_added(self, isolated_db):
+        cols = _table_columns(isolated_db)
+        for col in isolated_db._PRIMARY_COLUMNS:
+            assert col in cols
+
+    def test_upsert_primary_contact_roundtrip(self, isolated_db):
+        sr = isolated_db
+        ok = sr.upsert_primary_contact("x.com", {
+            "primary_contact_email": "jane@x.com", "primary_contact_name": "Jane Sales",
+            "primary_contact_title": "Sales Manager", "primary_contact_source": "apollo_enriched",
+            "primary_contact_status": "resolved",
+        })
+        assert ok is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["primary_contact_email"] == "jane@x.com"
+        assert rec["primary_contact_name"] == "Jane Sales"
+        assert rec["primary_contact_status"] == "resolved"
+        assert rec["primary_contact_at"]  # auto-stamped
+
+    def test_primary_upsert_leaves_generic_fallback_intact(self, isolated_db):
+        sr = isolated_db
+        sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                    "contact_method": "generic_inbox", "contact_status": "resolved"})
+        sr.upsert_primary_contact("x.com", {"primary_contact_email": "jane@x.com",
+                                            "primary_contact_status": "resolved"})
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["contact_email"] == "sales@x.com"     # fallback preserved
+        assert rec["primary_contact_email"] == "jane@x.com"
+
+    def test_mark_primary_bounced(self, isolated_db):
+        sr = isolated_db
+        sr.upsert_primary_contact("x.com", {"primary_contact_email": "jane@x.com",
+                                            "primary_contact_status": "resolved"})
+        sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                    "contact_method": "generic_inbox", "contact_status": "resolved"})
+        assert sr.mark_contact_bounced("x.com", which="primary") is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["primary_contact_email"] is None
+        assert rec["primary_contact_status"] == "bounced"
+        assert rec["contact_email"] == "sales@x.com"     # generic fallback untouched
+
+
+class TestEffectiveContact:
+    def test_resolved_primary_wins(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "resolved",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.effective_contact(rec) == {"email": "jane@x.com", "source": "primary"}
+
+    def test_primary_no_response_falls_back_to_generic(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "no_response",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.effective_contact(rec) == {"email": "sales@x.com", "source": "fallback"}
+
+    def test_primary_bounced_falls_back_to_generic(self):
+        rec = {"primary_contact_email": None, "primary_contact_status": "bounced",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.effective_contact(rec) == {"email": "sales@x.com", "source": "fallback"}
+
+    def test_both_bounced_is_none(self):
+        rec = {"primary_contact_status": "bounced", "contact_email": None, "contact_status": "bounced"}
+        assert supplier_registry.effective_contact(rec) == {"email": None, "source": "none"}
+
+    def test_empty_record(self):
+        assert supplier_registry.effective_contact(None) == {"email": None, "source": "none"}
