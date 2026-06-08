@@ -136,6 +136,16 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **Risk / impact** | On the Streamlit harness, a real sourcing failure (e.g. Tavily/Anthropic error) presents as a successful run that simply found no vendors — indistinguishable from a genuine zero-result search. This is a debugging trap: it looks like a sourcing bug but is error-masking. The React surface no longer has this problem. |
 | **Recommended action** | When reconciling, make `core.py` also advance to `Phase.ERROR` on a hard sourcing failure (matching api_server). Or accept the divergence until Streamlit is retired — Streamlit is the throwaway build/demo harness and the React/FastAPI path is the durable surface (per CLAUDE.md §2/§8). Low urgency if Streamlit retirement is near. |
 
+### 4.6 Apollo suitability clarifier — annotate-only; exclusion ungated; wrong-org risk; `_is_us` hardening deferred
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/agents/sourcing_agent.py` (`_apollo_clarify`, `_requirement_match`, `_is_us`); verdict (`suitability_status`) consumed downstream by: nothing yet |
+| **Kind** | Intentional prototype boundary + a deferred hardening, recorded so the eventual exclusion step is built safely. See CLAUDE.md §9. |
+| **Why it exists** | The Tier 3 clarifier annotates `suitability_status` (`confirmed` / `unconfirmed_flag_human` / `rejected_unsuitable`) but **nothing excludes on it** (annotate-don't-remove). Exclusion was deliberately not built pending verification of the signal's reliability. |
+| **Risk / impact** | Apollo can resolve the **wrong org** from a discovered domain and return a self-consistent but wrong verdict. Observed live: `ibtinc.com` (Tavily vendor "IBT Industrial Solutions", a US/Kansas distributor) → Apollo org = a Lahore, Pakistan "professional training & coaching" company — country, state, raw_address and industry all Pakistani → `rejected_unsuitable`. Defensible *given Apollo's data*, but the org is wrong. If a future step auto-excludes on a lone `rejected_unsuitable`, it would silently drop legitimate suppliers on a wrong-org match. Separately, `suitability_status` and the `suitability_floor` (§4.2 / §8.3) are independent and can disagree (Apollo-`confirmed` US supplier dropped by a sub-floor `suitability_score`). |
+| **Recommended action** | (1) Before gating exclusion, require **corroboration** (non-US **and** requirement-match reject and/or below the suitability floor) or keep `rejected_unsuitable` human-in-the-loop — see CLAUDE.md §9. (2) **Deferred / not built (was option a1):** a defensive `_is_us` fallback to accept a US state / `…, US` raw_address when Apollo's `country` is blank/wrong. **Demoted after verification** — it addresses an *unobserved* case and would **not** have caught the IBT match (that org is genuinely Pakistani; `_is_us` read `country` correctly, verified reliable across 5 live samples: US/CA, US/IL → confirmed; CN, UK, PK → rejected). Revisit only if a real wrong-country/right-address case appears. |
+
 ---
 
 ## 5. Frontend / API Calibration
