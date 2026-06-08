@@ -356,6 +356,48 @@ Part number matching (required for every result):
 """
 
 
+def _is_us_url(url: str) -> bool:
+    """True unless the URL is on a known non-US TLD or domain hint.
+
+    Shared Tier 3 geo gate so the national and aftermarket discovery branches
+    can't drift (was previously inline in national discovery only).
+    """
+    from utils.sourcing_archieved.tavily_client import NON_US_TLDS, NON_US_DOMAIN_HINTS
+    from urllib.parse import urlparse
+    try:
+        hostname = (urlparse((url or "").lower()).hostname or "")
+        if any(hostname.endswith(tld) for tld in NON_US_TLDS):
+            return False
+        if any(hint in hostname for hint in NON_US_DOMAIN_HINTS):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _filter_us_tier3_results(results: list[dict], label: str = "Tier 3") -> list[dict]:
+    """Drop non-US and excluded-host results before they reach the LLM.
+
+    The single geo filter used by BOTH Tier 3 discovery paths (national +
+    aftermarket). Mirrors the original inline national-path logic exactly.
+    """
+    from utils.sourcing_archieved.constants import _TIER3_EXCLUDED_HOSTS
+
+    pre_filter = len(results)
+    results = [r for r in results if _is_us_url(r.get("url", ""))]
+    if len(results) < pre_filter:
+        print(f"[Sourcing] {label} geographic filter: removed {pre_filter - len(results)} non-US result(s)")
+
+    pre_excl = len(results)
+    results = [
+        r for r in results
+        if not any(h in (r.get("url") or "").lower() for h in _TIER3_EXCLUDED_HOSTS)
+    ]
+    if len(results) < pre_excl:
+        print(f"[Sourcing] {label} host exclusion: removed {pre_excl - len(results)} excluded host(s)")
+    return results
+
+
 def _discover_national_specialists(specs: AssetSpecs,
                                     enterprise_options: list[SourcingOption]) -> list[SourcingOption]:
     """Tier 3: open-web national specialist discovery per brief Section 8.3.
@@ -388,35 +430,8 @@ def _discover_national_specialists(specs: AssetSpecs,
     if not results or not _pkg.ANTHROPIC_API_KEY:
         return []
 
-    # Filter non-US URLs before passing to LLM — same geographic check used in Tier 1.
-    from utils.sourcing_archieved.tavily_client import NON_US_TLDS, NON_US_DOMAIN_HINTS
-    from urllib.parse import urlparse as _urlparse
-
-    def _is_us_url(url: str) -> bool:
-        try:
-            hostname = (_urlparse(url.lower()).hostname or "")
-            if any(hostname.endswith(tld) for tld in NON_US_TLDS):
-                return False
-            if any(hint in hostname for hint in NON_US_DOMAIN_HINTS):
-                return False
-        except Exception:
-            pass
-        return True
-
-    from utils.sourcing_archieved.constants import _TIER3_EXCLUDED_HOSTS
-
-    pre_filter = len(results)
-    results = [r for r in results if _is_us_url(r.get("url", ""))]
-    if len(results) < pre_filter:
-        print(f"[Sourcing] Tier 3 geographic filter: removed {pre_filter - len(results)} non-US result(s)")
-
-    pre_excl = len(results)
-    results = [
-        r for r in results
-        if not any(h in (r.get("url") or "").lower() for h in _TIER3_EXCLUDED_HOSTS)
-    ]
-    if len(results) < pre_excl:
-        print(f"[Sourcing] Tier 3 host exclusion: removed {pre_excl - len(results)} excluded host(s)")
+    # Filter non-US / excluded-host results before passing to LLM (shared gate).
+    results = _filter_us_tier3_results(results, label="Tier 3")
 
     if not results:
         return []
@@ -690,6 +705,13 @@ def _discover_aftermarket_specialists(
         return []
 
     if not results or not _pkg.ANTHROPIC_API_KEY:
+        return []
+
+    # Same US geo gate as national discovery — drop non-US / excluded hosts before
+    # the LLM. Previously missing here, so non-US suppliers (e.g. made-in-china.com)
+    # leaked into Tier 3 via the aftermarket path.
+    results = _filter_us_tier3_results(results, label="Aftermarket")
+    if not results:
         return []
 
     snippet_map = {
