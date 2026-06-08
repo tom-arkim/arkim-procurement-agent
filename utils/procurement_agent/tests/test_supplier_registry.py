@@ -71,6 +71,7 @@ class TestUpsertApolloData:
     def test_write_and_readback_including_json(self, isolated_db):
         sr = isolated_db
         ok = sr.upsert_apollo_data("phoenixpumps.com", {
+            "apollo_org_name": "Phoenix Pumps Inc",
             "apollo_description": "Industrial pump distributor",
             "apollo_industry": "industrial automation",
             "apollo_keywords": ["pumps", "seals"],
@@ -85,6 +86,7 @@ class TestUpsertApolloData:
         assert ok is True
 
         rec = sr.lookup_by_domain("phoenixpumps.com")
+        assert rec["apollo_org_name"] == "Phoenix Pumps Inc"
         assert rec["apollo_description"] == "Industrial pump distributor"
         assert rec["apollo_industry"] == "industrial automation"
         assert rec["apollo_country"] == "United States"

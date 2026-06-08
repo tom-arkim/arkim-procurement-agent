@@ -14,6 +14,7 @@ Schema (suppliers table):
   updated_at                  text          ISO 8601 UTC
 
 Apollo enrichment cache (added by _migrate; all nullable, populated by upsert_apollo_data):
+  apollo_org_name                text        Apollo's resolved org name (domain->org mismatch checks)
   apollo_description             text        org short description
   apollo_industry                text
   apollo_keywords                text        JSON-encoded list[str]
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS suppliers (
 # a safe ALTER TABLE ADD COLUMN on existing rows (no default backfill needed).
 # Column -> SQLite type. JSON-valued columns are stored as TEXT.
 _APOLLO_COLUMNS: dict[str, str] = {
+    "apollo_org_name":                "TEXT",     # Apollo's resolved org name (domain->org mismatch checks)
     "apollo_description":             "TEXT",
     "apollo_industry":                "TEXT",
     "apollo_keywords":                "TEXT",     # JSON list[str]

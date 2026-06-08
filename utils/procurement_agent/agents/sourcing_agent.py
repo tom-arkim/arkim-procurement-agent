@@ -177,6 +177,7 @@ def _is_us(org: dict) -> bool:
 def _apollo_fields_from_org(org: dict) -> dict:
     """Project Apollo org-enrich output onto the supplier_registry apollo_* columns."""
     return {
+        "apollo_org_name":   org.get("name"),
         "apollo_description": org.get("description"),
         "apollo_industry":    org.get("industry"),
         "apollo_keywords":    org.get("keywords") or [],
@@ -206,6 +207,45 @@ def _build_suitability_user(specs: AssetSpecs, org: dict) -> str:
         "REQUIRED PART:\n" + json.dumps(required, default=str)
         + "\n\nCANDIDATE SUPPLIER:\n" + json.dumps(supplier, default=str)
     )
+
+
+# Legal/entity suffixes stripped before comparing org names.
+_NAME_LEGAL_SUFFIXES = {
+    "inc", "incorporated", "llc", "ltd", "limited", "co", "company", "corp",
+    "corporation", "gmbh", "ag", "sa", "srl", "bv", "plc", "lp", "llp", "pllc",
+    "pte", "pvt", "group", "holdings", "intl", "international",
+}
+
+
+def _normalize_org_name(name: Optional[str]) -> set:
+    """Lowercase, drop punctuation + legal suffixes; return the set of core tokens."""
+    if not name:
+        return set()
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", name.lower())
+    return {t for t in cleaned.split() if t and t not in _NAME_LEGAL_SUFFIXES}
+
+
+def _names_plausibly_match(vendor_name: Optional[str], apollo_org_name: Optional[str]) -> bool:
+    """Lenient check: do the discovery vendor name and Apollo's resolved org name
+    plausibly refer to the same entity?
+
+    Catches GROSS mismatches (domain->wrong-org resolution, e.g. "J&D Manufacturing"
+    vs "QC Supply"; "IBT Industrial Solutions" vs a Pakistani training company) while
+    tolerating legal-suffix / extra-word variants ("All Seals Inc" vs "All Seals
+    Incorporated"; "Warfield Electric" vs "Warfield Electric Products Inc"). Bias is
+    toward matching legitimate variants — a false "mismatch" only withholds a rescue
+    (mild); the goal is to deny rescue on a clearly different org.
+
+    Missing/empty either name -> False (fail safe: can't corroborate -> withhold).
+    """
+    a = _normalize_org_name(vendor_name)
+    b = _normalize_org_name(apollo_org_name)
+    if not a or not b:
+        return False
+    if a <= b or b <= a:                      # one core-token set contains the other
+        return True
+    overlap = a & b
+    return bool(overlap) and len(overlap) / min(len(a), len(b)) >= 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -566,6 +606,7 @@ class SourcingAgent:
         """Attach the verdict (annotate-don't-remove; never sets rejection_reason)."""
         candidate["suitability_status"] = status
         if org:
+            candidate["apollo_org_name"] = org.get("name")
             candidate["apollo_industry"] = org.get("industry")
             candidate["apollo_country"]  = org.get("country")
         if is_us is not None:
@@ -577,6 +618,7 @@ class SourcingAgent:
         candidate["suitability_status"] = (
             record.get("suitability_status") or "unconfirmed_flag_human"
         )
+        candidate["apollo_org_name"] = record.get("apollo_org_name")
         candidate["apollo_industry"] = record.get("apollo_industry")
         candidate["apollo_country"]  = record.get("apollo_country")
         candidate["is_us_confirmed"] = record.get("is_us_confirmed")
@@ -589,9 +631,12 @@ class SourcingAgent:
         """Reconcile Apollo suitability_status with the suitability_floor verdict.
 
         ASYMMETRIC and REMOVES NOTHING (count out == count in):
-          - "confirmed"              -> RESCUE: clear ONLY a "suitability_below_floor"
-            rejection (Apollo resolved the org as US + right-business; it overrides
-            the crude floor score). Never clears any other rejection type.
+          - "confirmed"              -> RESCUE (gated): clear ONLY a
+            "suitability_below_floor" rejection, and ONLY when the candidate's vendor
+            name plausibly matches Apollo's resolved org name. Otherwise withhold the
+            rescue (leave the floor reject) and annotate "rescue_withheld_name_mismatch"
+            — Apollo can "confirm" a DIFFERENT org from a mis-attributed domain.
+            Never clears any other rejection type.
           - "rejected_unsuitable"    -> FLAG ONLY: attach a human-readable apollo_flag
             from apollo_country/apollo_industry. Never sets rejection_reason, never
             removes — Apollo can resolve the WRONG org from a domain (§9 / IBT).
@@ -608,13 +653,28 @@ class SourcingAgent:
                 continue
 
             if status == "confirmed":
-                # RESCUE — only override the crude floor score, nothing else.
+                # RESCUE — only override the crude floor score, and only when the
+                # candidate's identity corroborates Apollo's resolved org (Apollo can
+                # "confirm" a DIFFERENT org from a mis-attributed domain — §9 / J&D).
                 if c.get("rejection_reason") == "suitability_below_floor":
-                    c["rejection_reason"] = None
-                    c["suitability_note"] = "rescued_by_apollo_confirmed"
-                    print(f"[SourcingAgent] Rescued (apollo_confirmed): "
-                          f"{c.get('vendor_name')} - cleared suitability_below_floor "
-                          f"(score={float(c.get('suitability_score') or 0):.0f}%)")
+                    apollo_name = c.get("apollo_org_name")
+                    if _names_plausibly_match(c.get("vendor_name"), apollo_name):
+                        c["rejection_reason"] = None
+                        c["suitability_note"] = "rescued_by_apollo_confirmed"
+                        print(f"[SourcingAgent] Rescued (apollo_confirmed): "
+                              f"{c.get('vendor_name')} - cleared suitability_below_floor "
+                              f"(score={float(c.get('suitability_score') or 0):.0f}%)")
+                    else:
+                        # Verdict belongs to a different (or unknown) org — withhold
+                        # the rescue, leave the floor reject in place, annotate why.
+                        c["suitability_note"] = "rescue_withheld_name_mismatch"
+                        c["apollo_flag"] = (
+                            f"apollo: rescue withheld - confirmed org "
+                            f"'{apollo_name or 'unknown'}' != candidate "
+                            f"'{c.get('vendor_name')}' (review)"
+                        )
+                        print(f"[SourcingAgent] Rescue withheld (name mismatch): "
+                              f"{c.get('vendor_name')!r} vs apollo org {apollo_name!r}")
 
             elif status == "rejected_unsuitable":
                 # FLAG ONLY — never drop, never set rejection_reason (a lone Apollo

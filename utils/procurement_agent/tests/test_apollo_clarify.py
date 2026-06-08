@@ -14,7 +14,7 @@ import pytest
 
 from utils import supplier_registry
 from utils.models import AssetSpecs, SourcingRun
-from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+from utils.procurement_agent.agents.sourcing_agent import SourcingAgent, _names_plausibly_match
 
 
 # ---------------------------------------------------------------------------
@@ -317,14 +317,31 @@ class TestReconcileSuitability:
 
     # --- RESCUE (confirmed clears ONLY the floor reject) ---
 
-    def test_confirmed_rescues_floor_reject(self):
+    def test_confirmed_rescues_floor_reject_when_names_match(self):
         c = {"vendor_name": "Warfield Electric", "suitability_status": "confirmed",
              "rejection_reason": "suitability_below_floor", "suitability_score": 25.0,
-             "is_us_confirmed": True}
+             "is_us_confirmed": True, "apollo_org_name": "Warfield Electric Products Inc"}
         out = self._agent()._reconcile_suitability([c])
         assert not c.get("rejection_reason")  # floor reject cleared
         assert c.get("suitability_note") == "rescued_by_apollo_confirmed"
         assert len(out) == 1
+
+    def test_confirmed_rescue_withheld_on_name_mismatch(self):
+        # J&D case: Apollo confirmed, but the verdict belongs to a different org.
+        c = {"vendor_name": "J&D Manufacturing", "suitability_status": "confirmed",
+             "rejection_reason": "suitability_below_floor", "apollo_org_name": "QC Supply"}
+        out = self._agent()._reconcile_suitability([c])
+        assert c["rejection_reason"] == "suitability_below_floor"  # NOT rescued
+        assert c.get("suitability_note") == "rescue_withheld_name_mismatch"
+        assert "QC Supply" in c.get("apollo_flag", "")
+        assert len(out) == 1  # not removed
+
+    def test_confirmed_rescue_withheld_when_apollo_name_missing(self):
+        c = {"vendor_name": "Warfield Electric", "suitability_status": "confirmed",
+             "rejection_reason": "suitability_below_floor"}  # no apollo_org_name -> fail safe
+        self._agent()._reconcile_suitability([c])
+        assert c["rejection_reason"] == "suitability_below_floor"  # withheld
+        assert c.get("suitability_note") == "rescue_withheld_name_mismatch"
 
     def test_confirmed_does_not_clear_other_rejection_types(self):
         for other in ("duplicate_in_higher_tier", "pn_mismatch", "in_warranty"):
@@ -390,7 +407,7 @@ class TestReconcileSuitability:
     def test_count_invariant_mixed_list(self):
         cands = [
             {"vendor_name": "rescue", "suitability_status": "confirmed",
-             "rejection_reason": "suitability_below_floor"},
+             "rejection_reason": "suitability_below_floor", "apollo_org_name": "rescue"},
             {"vendor_name": "flag", "suitability_status": "rejected_unsuitable", "is_us_confirmed": False},
             {"vendor_name": "unconf", "suitability_status": "unconfirmed_flag_human"},
             {"vendor_name": "seeded", "source_url": None},
@@ -402,3 +419,27 @@ class TestReconcileSuitability:
         # dedup reject preserved; floor reject on the confirmed one rescued
         assert cands[4]["rejection_reason"] == "duplicate_in_higher_tier"
         assert not cands[0].get("rejection_reason")
+
+
+# ---------------------------------------------------------------------------
+# Name-consistency check (gates the rescue)
+# ---------------------------------------------------------------------------
+
+class TestNamesPlausiblyMatch:
+    def test_legal_suffix_variants_match(self):
+        assert _names_plausibly_match("All Seals Inc", "All Seals Incorporated")
+        assert _names_plausibly_match("Bay Power", "Bay Power Inc")
+
+    def test_extra_words_subset_match(self):
+        assert _names_plausibly_match("Warfield Electric", "Warfield Electric Products Inc")
+        assert _names_plausibly_match("J&D", "J&D Manufacturing LLC")
+
+    def test_gross_mismatch(self):
+        assert not _names_plausibly_match("J&D Manufacturing", "QC Supply")
+        assert not _names_plausibly_match("IBT Industrial Solutions", "High Q Tower Training Institute")
+
+    def test_empty_or_none_is_no_match(self):
+        assert not _names_plausibly_match("", "All Seals")
+        assert not _names_plausibly_match("All Seals", "")
+        assert not _names_plausibly_match(None, "All Seals")
+        assert not _names_plausibly_match("All Seals", None)
