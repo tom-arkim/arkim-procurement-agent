@@ -681,12 +681,12 @@ class SourcingAgent:
                 # reject can be a wrong-org match, e.g. ibtinc.com -> Pakistan).
                 reason = "non-US" if c.get("is_us_confirmed") is False else "business mismatch"
                 c["apollo_flag"] = (
-                    f"apollo: {reason} — country={c.get('apollo_country') or 'unknown'}, "
+                    f"apollo: {reason} - country={c.get('apollo_country') or 'unknown'}, "
                     f"industry={c.get('apollo_industry') or 'unknown'} (review)"
                 )
 
             elif status == "unconfirmed_flag_human":
-                c["apollo_flag"] = "apollo: unconfirmed — flag for human review"
+                c["apollo_flag"] = "apollo: unconfirmed - flag for human review"
 
         return candidates
 
