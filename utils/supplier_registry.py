@@ -41,7 +41,7 @@ import os
 import re
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -404,6 +404,11 @@ def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_D
         dt = datetime.fromisoformat(enriched_at)
     except (ValueError, TypeError):
         return True
+    # Normalize a tz-aware timestamp to naive UTC so the subtraction below (against
+    # a naive utcnow()) never raises "can't subtract offset-naive and offset-aware".
+    # Writers use naive utcnow() today; this tolerates an aware value defensively.
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return (datetime.utcnow() - dt) > timedelta(days=ttl_days)
 
 

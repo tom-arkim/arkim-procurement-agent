@@ -8,7 +8,7 @@ test_price_db.py), so the real data/supplier_registry.sqlite is never touched.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -185,6 +185,17 @@ class TestStaleness:
 
     def test_unparseable_date_treated_stale(self):
         s = {"onboarding_status": "discovery_only", "apollo_enriched_at": "not-a-date"}
+        assert supplier_registry.needs_reenrichment(s) is True
+
+    def test_tz_aware_fresh_not_stale(self):
+        # tz-AWARE timestamp (+00:00) must not crash the naive subtraction.
+        s = {"onboarding_status": "discovery_only",
+             "apollo_enriched_at": datetime.now(timezone.utc).isoformat()}
+        assert supplier_registry.needs_reenrichment(s) is False
+
+    def test_tz_aware_stale_needs_reenrich(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+        s = {"onboarding_status": "discovery_only", "apollo_enriched_at": old}
         assert supplier_registry.needs_reenrichment(s) is True
 
     def test_falsy_supplier_false(self):
