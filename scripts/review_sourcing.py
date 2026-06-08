@@ -102,19 +102,23 @@ def _run_one(agent: SourcingAgent, label: str, specs: dict) -> None:
         block = res.get(tier) or {}
         rows = block.get("results") or []
         print(f"\n-- {tier}  ({block.get('count')} candidates, status={block.get('status')}) --")
-        hdr = (f"{'vendor':28} {'domain':22} {'suit_status':20} "
-               f"{'rank':7} {'sel':4} {'cnf':4} {'rejection_reason':20} {'suit%':>5}  note/flag")
+        hdr = (f"{'vendor':26} {'suit_status':18} {'rank':7} {'sel':4} {'cnf':4} "
+               f"{'contact (method:email)':34} {'rejection_reason':18} {'suit%':>5}  note/flag")
         print(hdr)
         print("-" * len(hdr))
         for c in rows:
             note = c.get("suitability_note") or c.get("apollo_flag") or "-"
-            print(f"{(c.get('vendor_name') or '')[:27]:28} "
-                  f"{_domain(c.get('source_url'))[:21]:22} "
-                  f"{str(c.get('suitability_status') or '-')[:20]:20} "
+            if c.get("contact_method"):
+                contact = f"{c['contact_method']}:{c.get('resolved_contact_email') or '-'}"
+            else:
+                contact = "-"
+            print(f"{(c.get('vendor_name') or '')[:25]:26} "
+                  f"{str(c.get('suitability_status') or '-')[:18]:18} "
                   f"{str(c.get('suitability_rank_tier') or '-'):7} "
                   f"{_yn(c.get('default_outreach_selected')):4} "
                   f"{_yn(c.get('requires_outreach_confirmation')):4} "
-                  f"{str(c.get('rejection_reason') or '-')[:19]:20} "
+                  f"{contact[:33]:34} "
+                  f"{str(c.get('rejection_reason') or '-')[:17]:18} "
                   f"{float(c.get('suitability_score') or 0):5.0f}  "
                   f"{note}")
     print("\nfilters_applied:", res.get("filters_applied"))

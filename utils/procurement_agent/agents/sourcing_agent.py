@@ -357,6 +357,10 @@ class SourcingAgent:
         # to the bottom, are not default-selected, and require outreach confirmation.
         self._rank_and_select_tier3(tier3.get("results", []))
 
+        # Contact resolution (free path) for the default-selected Tier 3 suppliers:
+        # store -> generic inbox -> human-flag. No Apollo, no send; annotates only.
+        self._resolve_contact(tier3.get("results", []))
+
         tier3_pivot = any(
             r.get("search_type") == "capability_pivot"
             for r in tier3.get("results", [])
@@ -758,6 +762,72 @@ class SourcingAgent:
         # Stable sort: intra-bucket order (TCA rank + dedup) is preserved.
         candidates.sort(key=lambda c: _TIER3_RANK_ORDER.get(c.get("suitability_rank_tier"), 1))
         return candidates
+
+    # ------------------------------------------------------------------
+    # Tier 3 contact resolution — free path (CLAUDE.md §9). Sub-step 1:
+    # store -> generic inbox -> human-flag. NO Apollo, NO send.
+    # ------------------------------------------------------------------
+
+    def _resolve_contact(self, candidates: list[dict]) -> list[dict]:
+        """Resolve HOW to contact each default-selected Tier 3 supplier (free path).
+
+        REMOVES NOTHING — annotates contact metadata only. ZERO Apollo calls (no
+        people-search / people-enrich — that's a later escalation). Does NOT send
+        (EMAIL_SEND_ENABLED stays False); the generic inbox is CONSTRUCTED, not
+        verified — a later bounce (mark_contact_bounced) clears + re-flags it.
+
+        Only default_outreach_selected candidates are resolved (deselected / BOTTOM
+        suppliers are left without a contact by design). Cascade per supplier:
+          1. STORE      — a cached non-bounced contact for this domain is reused.
+          2. GENERIC    — sales@{domain} (info@{domain} documented fallback),
+                          written back. The default path.
+          3. HUMAN-FLAG — no domain (e.g. seeded OEM, source_url=None).
+        """
+        from utils import supplier_registry
+
+        for c in candidates:
+            if not c.get("default_outreach_selected"):
+                continue  # tie resolution to the selection contract
+
+            url = c.get("source_url")
+            domain = ApolloClient._clean_domain(url) if url else ""
+
+            # 1. STORE — reuse a cached, non-bounced contact.
+            record = supplier_registry.lookup_by_domain(domain) if domain else None
+            if record and record.get("contact_email") and record.get("contact_status") != "bounced":
+                self._annotate_contact(c, record.get("contact_email"), "store", "resolved")
+                continue
+
+            # 2. GENERIC INBOX (default) — construct + write back. Not verified.
+            if domain:
+                email = f"sales@{domain}"
+                supplier_registry.upsert_contact(domain, {
+                    "contact_email":  email,
+                    "contact_method": "generic_inbox",
+                    "contact_status": "resolved",
+                })  # upsert_contact stamps contact_resolved_at
+                self._annotate_contact(c, email, "generic_inbox", "resolved",
+                                       fallback=f"info@{domain}")
+                continue
+
+            # 3. HUMAN-FLAG — no domain to construct an inbox from.
+            self._annotate_contact(c, None, "human_flag", "needs_human")
+
+        return candidates
+
+    @staticmethod
+    def _annotate_contact(
+        candidate: dict, email: Optional[str], method: str, status: str,
+        fallback: Optional[str] = None,
+    ) -> None:
+        """Attach resolved contact metadata to the candidate (distinct from the
+        discovery `contact_email` field, which is left untouched)."""
+        candidate["resolved_contact_email"] = email
+        candidate["contact_method"] = method
+        candidate["contact_status"] = status
+        candidate["contact_email_fallback"] = fallback
+        if method == "human_flag":
+            candidate["contact_note"] = "no domain — needs human contact resolution"
 
     # ------------------------------------------------------------------
     # Fix 5 — Capability search (Tier 3 pivot)

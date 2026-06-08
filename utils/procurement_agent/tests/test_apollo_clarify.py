@@ -526,3 +526,90 @@ class TestRankAndSelectTier3:
         # buckets ordered TOP->MIDDLE->BOTTOM; input order preserved within each bucket
         assert [c["vendor_name"] for c in out] == ["t1", "t2", "m1", "m2", "b1", "b2"]
         assert len(out) == 6  # removes nothing
+
+
+# ---------------------------------------------------------------------------
+# Contact resolution — free path (store -> generic inbox -> human-flag)
+# ---------------------------------------------------------------------------
+
+class TestResolveContact:
+    @staticmethod
+    def _agent():
+        a = SourcingAgent(apollo_api_key="")
+        a._apollo = MagicMock()  # so we can assert it is never called during resolution
+        return a
+
+    def test_generic_inbox_is_default(self, isolated_registry):
+        sr = isolated_registry
+        agent = self._agent()
+        c = {"vendor_name": "Mesco", "source_url": "https://www.mescocorp.com/x",
+             "default_outreach_selected": True}
+        out = agent._resolve_contact([c])
+        assert c["resolved_contact_email"] == "sales@mescocorp.com"
+        assert c["contact_method"] == "generic_inbox"
+        assert c["contact_status"] == "resolved"
+        assert c["contact_email_fallback"] == "info@mescocorp.com"
+        # written back to the store
+        rec = sr.lookup_by_domain("mescocorp.com")
+        assert rec["contact_email"] == "sales@mescocorp.com"
+        assert rec["contact_method"] == "generic_inbox"
+        assert rec["contact_resolved_at"]
+        # zero Apollo calls
+        agent._apollo.org_enrich.assert_not_called()
+        agent._apollo.people_search.assert_not_called()
+        assert len(out) == 1
+
+    def test_store_reuse(self, isolated_registry):
+        sr = isolated_registry
+        sr.upsert_contact("mescocorp.com", {"contact_email": "buyer@mescocorp.com",
+                                            "contact_method": "generic_inbox", "contact_status": "resolved"})
+        agent = self._agent()
+        c = {"vendor_name": "Mesco", "source_url": "https://mescocorp.com", "default_outreach_selected": True}
+        agent._resolve_contact([c])
+        assert c["resolved_contact_email"] == "buyer@mescocorp.com"
+        assert c["contact_method"] == "store"     # reused, not reconstructed
+        assert c["contact_status"] == "resolved"
+
+    def test_human_flag_when_no_domain(self, isolated_registry):
+        agent = self._agent()
+        c = {"vendor_name": "Phoenix Pumps", "source_url": None, "default_outreach_selected": True}
+        agent._resolve_contact([c])
+        assert c["resolved_contact_email"] is None
+        assert c["contact_method"] == "human_flag"
+        assert c["contact_status"] == "needs_human"
+
+    def test_not_selected_is_skipped(self, isolated_registry):
+        agent = self._agent()
+        c = {"vendor_name": "X", "source_url": "https://x.com", "default_outreach_selected": False}
+        agent._resolve_contact([c])
+        assert "resolved_contact_email" not in c
+        assert "contact_method" not in c
+
+    def test_bounce_clears_then_reresolves(self, isolated_registry):
+        sr = isolated_registry
+        sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                    "contact_method": "generic_inbox", "contact_status": "resolved"})
+        assert sr.mark_contact_bounced("x.com") is True
+        assert sr.lookup_by_domain("x.com")["contact_email"] is None
+
+        agent = self._agent()
+        c = {"vendor_name": "X", "source_url": "https://x.com", "default_outreach_selected": True}
+        agent._resolve_contact([c])
+        # did NOT reuse the bounced store entry — fell through to re-construct the inbox
+        assert c["contact_method"] == "generic_inbox"
+        assert c["resolved_contact_email"] == "sales@x.com"
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["contact_status"] == "resolved"
+        assert rec["contact_email"] == "sales@x.com"
+
+    def test_count_invariant_and_no_apollo(self, isolated_registry):
+        agent = self._agent()
+        cands = [
+            {"vendor_name": "a", "source_url": "https://a.com", "default_outreach_selected": True},
+            {"vendor_name": "b", "source_url": None, "default_outreach_selected": True},
+            {"vendor_name": "c", "source_url": "https://c.com", "default_outreach_selected": False},
+        ]
+        out = agent._resolve_contact(cands)
+        assert len(out) == 3 and len(cands) == 3
+        agent._apollo.org_enrich.assert_not_called()
+        agent._apollo.people_search.assert_not_called()
