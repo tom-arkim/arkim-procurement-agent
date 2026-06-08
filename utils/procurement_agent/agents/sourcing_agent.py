@@ -16,6 +16,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Optional
 
+from utils.apollo_client import ApolloClient
 from utils.models import SourcingRun, AssetSpecs, SourcingOption
 
 _TIER1_CATALOG_PATH = os.path.join(
@@ -148,6 +149,66 @@ def _apply_suitability_floor(options: list[dict], threshold: float) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Apollo Tier 3 suitability clarifier helpers (CLAUDE.md §9)
+# ---------------------------------------------------------------------------
+
+_APOLLO_SUITABILITY_SYSTEM = (
+    "You are a procurement sourcing analyst. Given a REQUIRED PART and a CANDIDATE "
+    "SUPPLIER profile, decide whether the supplier could plausibly supply that part.\n"
+    "Reply with exactly ONE word as the first token of your response:\n"
+    "  CONFIRMED - the supplier's industry/keywords/description clearly indicate they "
+    "sell or distribute this kind of part.\n"
+    "  REJECTED  - the supplier is clearly in an unrelated business (e.g. a software "
+    "company for a mechanical seal).\n"
+    "  UNSURE    - not enough signal to decide.\n"
+    "Output only that single word."
+)
+
+_US_COUNTRY_VALUES = {
+    "united states", "usa", "us", "u.s.", "u.s.a.", "united states of america",
+}
+
+
+def _is_us(org: dict) -> bool:
+    """US check from Apollo org country. Inconclusive (False) when country is absent."""
+    return (org.get("country") or "").strip().lower() in _US_COUNTRY_VALUES
+
+
+def _apollo_fields_from_org(org: dict) -> dict:
+    """Project Apollo org-enrich output onto the supplier_registry apollo_* columns."""
+    return {
+        "apollo_description": org.get("description"),
+        "apollo_industry":    org.get("industry"),
+        "apollo_keywords":    org.get("keywords") or [],
+        "apollo_country":     org.get("country"),
+        "apollo_state":       org.get("state"),
+        "apollo_raw_address": org.get("raw_address"),
+    }
+
+
+def _build_suitability_user(specs: AssetSpecs, org: dict) -> str:
+    """Compact requirement + supplier projection for the requirement-match prompt."""
+    required = {
+        "manufacturer":  specs.manufacturer,
+        "part_number":   specs.part_number,
+        "category":      specs.category,
+        "detected_type": getattr(specs, "detected_type", None),
+        "description":   getattr(specs, "description", None),
+        "material_spec": getattr(specs, "material_spec", None),
+    }
+    supplier = {
+        "name":        org.get("name"),
+        "industry":    org.get("industry"),
+        "keywords":    (org.get("keywords") or [])[:40],  # cap to bound tokens
+        "description": org.get("description"),
+    }
+    return (
+        "REQUIRED PART:\n" + json.dumps(required, default=str)
+        + "\n\nCANDIDATE SUPPLIER:\n" + json.dumps(supplier, default=str)
+    )
+
+
+# ---------------------------------------------------------------------------
 # SourcingAgent
 # ---------------------------------------------------------------------------
 
@@ -158,9 +219,15 @@ class SourcingAgent:
         self,
         tavily_api_key: Optional[str] = None,
         anthropic_api_key: Optional[str] = None,
+        apollo_api_key: Optional[str] = None,
     ):
         self._tavily_key    = tavily_api_key
         self._anthropic_key = anthropic_api_key
+        self._apollo_key    = apollo_api_key
+        # Apollo Tier 3 suitability clarifier. ApolloClient reads APOLLO_API_KEY
+        # from the env when apollo_api_key is None, and is disabled (no-op) when
+        # no key is configured — so the pipeline runs with or without Apollo.
+        self._apollo = ApolloClient(api_key=apollo_api_key)
 
     # ------------------------------------------------------------------
     # Public API
@@ -380,10 +447,122 @@ class SourcingAgent:
             ]
 
             combined = seeded + tavily_filtered
+            # Apollo suitability clarifier — annotates survivors in place
+            # (store-check-first, annotate-don't-remove); never changes the count.
+            self._apollo_clarify(combined, specs)
             return self._rank(combined, weights)
         except Exception as exc:
             print(f"[SourcingAgent] Tier 3 failed: {exc}")
             return []
+
+    # ------------------------------------------------------------------
+    # Apollo Tier 3 suitability clarifier (CLAUDE.md §9)
+    # ------------------------------------------------------------------
+
+    def _apollo_clarify(self, candidates: list[dict], specs: AssetSpecs) -> list[dict]:
+        """Annotate Tier 3 survivors with an Apollo suitability verdict, in place.
+
+        Store-check-first (never pay for a fresh/onboarded supplier) -> org_enrich
+        on miss/stale -> write back hit AND miss -> annotate-don't-remove. Fail-soft
+        per candidate and no-ops cleanly when Apollo is disabled (no key). NEVER
+        drops a candidate; downstream may use the annotation, the clarifier never
+        removes (no rejection_reason is set here).
+        """
+        from utils import supplier_registry
+
+        for c in candidates:
+            try:
+                url = c.get("source_url")
+                if not url:
+                    continue  # seeded OEM distributors etc. carry no domain to validate
+                domain = ApolloClient._clean_domain(url)
+                if not domain:
+                    continue
+
+                # STORE-CHECK-FIRST — fresh cache (or onboarded) => no Apollo call.
+                record = supplier_registry.lookup_by_domain(domain)
+                if record and not supplier_registry.needs_reenrichment(record):
+                    self._annotate_from_cache(c, record)
+                    continue
+
+                # MISS / STALE-not-onboarded => enrich. org_enrich is fail-soft:
+                # returns None when disabled, on a miss, or on any error.
+                org = self._apollo.org_enrich(domain)
+                if org:
+                    is_us   = _is_us(org)
+                    verdict = self._requirement_match(specs, org, is_us)
+                    supplier_registry.upsert_apollo_data(domain, {
+                        **_apollo_fields_from_org(org),
+                        "is_us_confirmed":    is_us,
+                        "suitability_status": verdict,
+                    })
+                    self._annotate(c, verdict, org=org, is_us=is_us)
+                else:
+                    # No coverage / disabled / error => flag for human, never drop.
+                    self._annotate(c, "unconfirmed_flag_human")
+                    if self._apollo.enabled:
+                        # We actually consulted Apollo (real miss): cache the flag so
+                        # we don't re-pay for this domain until it goes stale.
+                        supplier_registry.upsert_apollo_data(
+                            domain, {"suitability_status": "unconfirmed_flag_human"}
+                        )
+                    # If disabled, leave the store untouched so a later enrich fires.
+            except Exception as exc:
+                # Per-candidate fail-soft: a clarifier failure never blocks the run.
+                print(f"[SourcingAgent] Apollo clarify failed for "
+                      f"{c.get('vendor_name')!r}, flagging for human: {exc}")
+                c["suitability_status"] = "unconfirmed_flag_human"
+
+        return candidates
+
+    def _requirement_match(self, specs: AssetSpecs, org: dict, is_us: bool) -> str:
+        """Map (US check + LLM requirement match) to a suitability_status. Fail-soft.
+
+        Non-US -> rejected_unsuitable (annotate-only, still not removed). US + LLM
+        CONFIRMED -> confirmed; US + LLM REJECTED -> rejected_unsuitable; anything
+        ambiguous or any LLM failure -> unconfirmed_flag_human.
+        """
+        if not is_us:
+            return "rejected_unsuitable"
+        try:
+            from utils.sourcing_archieved.llm_parsing import _anthropic_complete
+            raw = _anthropic_complete(
+                _APOLLO_SUITABILITY_SYSTEM, _build_suitability_user(specs, org)
+            )
+            tokens = (raw or "").strip().upper().split()
+            first  = tokens[0] if tokens else ""
+            if first.startswith("CONFIRMED"):
+                return "confirmed"
+            if first.startswith("REJECTED"):
+                return "rejected_unsuitable"
+            return "unconfirmed_flag_human"
+        except Exception as exc:
+            print(f"[SourcingAgent] Apollo requirement-match LLM failed, "
+                  f"flagging for human: {exc}")
+            return "unconfirmed_flag_human"
+
+    @staticmethod
+    def _annotate(
+        candidate: dict, status: str, org: Optional[dict] = None,
+        is_us: Optional[bool] = None,
+    ) -> None:
+        """Attach the verdict (annotate-don't-remove; never sets rejection_reason)."""
+        candidate["suitability_status"] = status
+        if org:
+            candidate["apollo_industry"] = org.get("industry")
+            candidate["apollo_country"]  = org.get("country")
+        if is_us is not None:
+            candidate["is_us_confirmed"] = is_us
+
+    @staticmethod
+    def _annotate_from_cache(candidate: dict, record: dict) -> None:
+        """Reuse a fresh cached verdict without an Apollo call."""
+        candidate["suitability_status"] = (
+            record.get("suitability_status") or "unconfirmed_flag_human"
+        )
+        candidate["apollo_industry"] = record.get("apollo_industry")
+        candidate["apollo_country"]  = record.get("apollo_country")
+        candidate["is_us_confirmed"] = record.get("is_us_confirmed")
 
     # ------------------------------------------------------------------
     # Fix 5 — Capability search (Tier 3 pivot)
