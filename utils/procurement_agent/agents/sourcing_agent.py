@@ -248,6 +248,10 @@ def _names_plausibly_match(vendor_name: Optional[str], apollo_org_name: Optional
     return bool(overlap) and len(overlap) / min(len(a), len(b)) >= 0.5
 
 
+# Tier 3 suitability ordering buckets (lower sorts first).
+_TIER3_RANK_ORDER = {"top": 0, "middle": 1, "bottom": 2}
+
+
 # ---------------------------------------------------------------------------
 # SourcingAgent
 # ---------------------------------------------------------------------------
@@ -347,6 +351,11 @@ class SourcingAgent:
         deduped = _dedup_across_tiers(tier1, tier2, tier3)
         if deduped:
             filters.append(f"cross_tier_dedup:{deduped}")
+
+        # Suitability-driven down-ranking + outreach-selection metadata (Tier 3).
+        # Annotate + stable reorder only — removes nothing. Corroborated rejects sink
+        # to the bottom, are not default-selected, and require outreach confirmation.
+        self._rank_and_select_tier3(tier3.get("results", []))
 
         tier3_pivot = any(
             r.get("search_type") == "capability_pivot"
@@ -652,13 +661,18 @@ class SourcingAgent:
             if not status:
                 continue
 
+            # Persist the name-consistency result once (reused by the rescue gate
+            # below and by _rank_and_select_tier3) — don't recompute divergently.
+            name_match = _names_plausibly_match(c.get("vendor_name"), c.get("apollo_org_name"))
+            c["apollo_name_match"] = name_match
+
             if status == "confirmed":
                 # RESCUE — only override the crude floor score, and only when the
                 # candidate's identity corroborates Apollo's resolved org (Apollo can
                 # "confirm" a DIFFERENT org from a mis-attributed domain — §9 / J&D).
                 if c.get("rejection_reason") == "suitability_below_floor":
                     apollo_name = c.get("apollo_org_name")
-                    if _names_plausibly_match(c.get("vendor_name"), apollo_name):
+                    if name_match:
                         c["rejection_reason"] = None
                         c["suitability_note"] = "rescued_by_apollo_confirmed"
                         print(f"[SourcingAgent] Rescued (apollo_confirmed): "
@@ -688,6 +702,61 @@ class SourcingAgent:
             elif status == "unconfirmed_flag_human":
                 c["apollo_flag"] = "apollo: unconfirmed - flag for human review"
 
+        return candidates
+
+    # ------------------------------------------------------------------
+    # Suitability-driven down-ranking + outreach selection (Tier 3, CLAUDE.md §9)
+    # ------------------------------------------------------------------
+
+    def _rank_and_select_tier3(self, candidates: list[dict]) -> list[dict]:
+        """Order Tier 3 by suitability confidence and set outreach-selection metadata.
+
+        REMOVES NOTHING — annotate + STABLE reorder only (count out == count in).
+        Corroboration gates action in BOTH directions (mirrors the rescue gate): a
+        rejected_unsuitable candidate is down-ranked ONLY when the name-consistency
+        check passed (Apollo resolved the right org and still rejects). A
+        name-MISMATCHED reject stays neutral (MIDDLE, default-selectable) — its
+        verdict may be about a different org — but keeps its apollo_flag.
+
+        Per candidate sets:
+          - suitability_rank_tier: "top" | "middle" | "bottom"
+              TOP    = confirmed AND name-matched (trustworthy-suitable)
+              BOTTOM = rejected_unsuitable AND name-matched (corroborated-unsuitable)
+              MIDDLE = everything else (unconfirmed; no status / seeded OEM;
+                       confirmed-but-name-mismatch; reject-but-name-mismatch)
+          - default_outreach_selected: bucket is TOP/MIDDLE AND no active
+              rejection_reason (a floor/dup-rejected candidate is never pre-selected).
+          - requires_outreach_confirmation: True for BOTTOM only — the UI must demand
+              review-and-accept before outreach. (MIDDLE name-mismatch rejects are not
+              gated: the reject is untrusted; the flag remains for visibility.)
+          - outreach_confirmation_reason: human-readable WHY (BOTTOM only).
+
+        Then stable-sorts TOP -> MIDDLE -> BOTTOM, preserving existing intra-bucket
+        order (the _rank TCA ordering + dedup state).
+        """
+        for c in candidates:
+            status  = c.get("suitability_status")
+            matched = c.get("apollo_name_match") is True
+
+            if status == "confirmed" and matched:
+                tier = "top"
+            elif status == "rejected_unsuitable" and matched:
+                tier = "bottom"
+            else:
+                tier = "middle"
+
+            c["suitability_rank_tier"] = tier
+            c["default_outreach_selected"] = (tier != "bottom") and not c.get("rejection_reason")
+            c["requires_outreach_confirmation"] = (tier == "bottom")
+            if tier == "bottom":
+                if c.get("is_us_confirmed") is False:
+                    why = f"Flagged non-US (Apollo: {c.get('apollo_country') or 'unknown'})"
+                else:
+                    why = f"Flagged business mismatch (Apollo: {c.get('apollo_industry') or 'unknown'})"
+                c["outreach_confirmation_reason"] = why
+
+        # Stable sort: intra-bucket order (TCA rank + dedup) is preserved.
+        candidates.sort(key=lambda c: _TIER3_RANK_ORDER.get(c.get("suitability_rank_tier"), 1))
         return candidates
 
     # ------------------------------------------------------------------

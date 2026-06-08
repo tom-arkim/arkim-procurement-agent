@@ -324,6 +324,7 @@ class TestReconcileSuitability:
         out = self._agent()._reconcile_suitability([c])
         assert not c.get("rejection_reason")  # floor reject cleared
         assert c.get("suitability_note") == "rescued_by_apollo_confirmed"
+        assert c.get("apollo_name_match") is True  # persisted for reuse by ranking
         assert len(out) == 1
 
     def test_confirmed_rescue_withheld_on_name_mismatch(self):
@@ -333,6 +334,7 @@ class TestReconcileSuitability:
         out = self._agent()._reconcile_suitability([c])
         assert c["rejection_reason"] == "suitability_below_floor"  # NOT rescued
         assert c.get("suitability_note") == "rescue_withheld_name_mismatch"
+        assert c.get("apollo_name_match") is False  # persisted for reuse by ranking
         assert "QC Supply" in c.get("apollo_flag", "")
         assert len(out) == 1  # not removed
 
@@ -443,3 +445,84 @@ class TestNamesPlausiblyMatch:
         assert not _names_plausibly_match("All Seals", "")
         assert not _names_plausibly_match(None, "All Seals")
         assert not _names_plausibly_match("All Seals", None)
+
+
+# ---------------------------------------------------------------------------
+# Suitability-driven down-ranking + outreach selection (removes nothing)
+# ---------------------------------------------------------------------------
+
+class TestRankAndSelectTier3:
+    @staticmethod
+    def _agent():
+        return SourcingAgent(apollo_api_key="")
+
+    def test_bucket_assignment(self):
+        cands = [
+            {"vendor_name": "good", "suitability_status": "confirmed", "apollo_name_match": True},
+            {"vendor_name": "bad", "suitability_status": "rejected_unsuitable",
+             "apollo_name_match": True, "is_us_confirmed": False, "apollo_country": "China"},
+            {"vendor_name": "unconf", "suitability_status": "unconfirmed_flag_human"},
+            {"vendor_name": "seeded", "source_url": None},                       # no status
+            {"vendor_name": "conf_mismatch", "suitability_status": "confirmed", "apollo_name_match": False},
+            {"vendor_name": "rej_mismatch", "suitability_status": "rejected_unsuitable", "apollo_name_match": False},
+        ]
+        self._agent()._rank_and_select_tier3(cands)
+        b = {c["vendor_name"]: c["suitability_rank_tier"] for c in cands}
+        assert b["good"] == "top"
+        assert b["bad"] == "bottom"
+        assert b["unconf"] == "middle"
+        assert b["seeded"] == "middle"
+        assert b["conf_mismatch"] == "middle"   # confirmed but name-mismatch -> neutral, not top
+        assert b["rej_mismatch"] == "middle"     # reject but name-mismatch -> neutral, not bottom
+
+    def test_default_selection(self):
+        top = {"vendor_name": "t", "suitability_status": "confirmed", "apollo_name_match": True}
+        mid = {"vendor_name": "m", "suitability_status": "unconfirmed_flag_human"}
+        mid_rejected = {"vendor_name": "mr", "suitability_status": "unconfirmed_flag_human",
+                        "rejection_reason": "suitability_below_floor"}
+        bottom = {"vendor_name": "b", "suitability_status": "rejected_unsuitable",
+                  "apollo_name_match": True, "is_us_confirmed": False}
+        self._agent()._rank_and_select_tier3([top, mid, mid_rejected, bottom])
+        assert top["default_outreach_selected"] is True
+        assert mid["default_outreach_selected"] is True
+        assert mid_rejected["default_outreach_selected"] is False  # floor-rejected not pre-selected
+        assert bottom["default_outreach_selected"] is False
+
+    def test_requires_confirmation_bottom_only_with_reason(self):
+        bottom_cn = {"vendor_name": "cn", "suitability_status": "rejected_unsuitable",
+                     "apollo_name_match": True, "is_us_confirmed": False, "apollo_country": "China"}
+        bottom_biz = {"vendor_name": "pool", "suitability_status": "rejected_unsuitable",
+                      "apollo_name_match": True, "is_us_confirmed": True, "apollo_industry": "recreation"}
+        top = {"vendor_name": "t", "suitability_status": "confirmed", "apollo_name_match": True}
+        rej_mismatch = {"vendor_name": "mm", "suitability_status": "rejected_unsuitable", "apollo_name_match": False}
+        self._agent()._rank_and_select_tier3([bottom_cn, bottom_biz, top, rej_mismatch])
+        assert bottom_cn["requires_outreach_confirmation"] is True
+        assert "non-US" in bottom_cn["outreach_confirmation_reason"]
+        assert "China" in bottom_cn["outreach_confirmation_reason"]
+        assert bottom_biz["requires_outreach_confirmation"] is True
+        assert "business mismatch" in bottom_biz["outreach_confirmation_reason"]
+        assert top["requires_outreach_confirmation"] is False
+        assert rej_mismatch["requires_outreach_confirmation"] is False  # untrusted reject not gated
+
+    def test_name_mismatch_reject_neutral_not_penalized(self):
+        c = {"vendor_name": "x", "suitability_status": "rejected_unsuitable",
+             "apollo_name_match": False, "apollo_flag": "apollo: non-US ... (review)"}
+        self._agent()._rank_and_select_tier3([c])
+        assert c["suitability_rank_tier"] == "middle"
+        assert c["default_outreach_selected"] is True
+        assert c["requires_outreach_confirmation"] is False
+        assert c["apollo_flag"]  # flag preserved for visibility
+
+    def test_stable_sort_order_and_count_unchanged(self):
+        cands = [
+            {"vendor_name": "b1", "suitability_status": "rejected_unsuitable", "apollo_name_match": True, "is_us_confirmed": False},
+            {"vendor_name": "t1", "suitability_status": "confirmed", "apollo_name_match": True},
+            {"vendor_name": "m1", "suitability_status": "unconfirmed_flag_human"},
+            {"vendor_name": "t2", "suitability_status": "confirmed", "apollo_name_match": True},
+            {"vendor_name": "m2", "suitability_status": "unconfirmed_flag_human"},
+            {"vendor_name": "b2", "suitability_status": "rejected_unsuitable", "apollo_name_match": True, "is_us_confirmed": False},
+        ]
+        out = self._agent()._rank_and_select_tier3(cands)
+        # buckets ordered TOP->MIDDLE->BOTTOM; input order preserved within each bucket
+        assert [c["vendor_name"] for c in out] == ["t1", "t2", "m1", "m2", "b1", "b2"]
+        assert len(out) == 6  # removes nothing
