@@ -218,3 +218,39 @@ class TestStaleness:
         fresh = datetime.utcnow().isoformat()
         sr.upsert_apollo_data("fresh-co.com", {"suitability_status": "confirmed", "apollo_enriched_at": fresh})
         assert sr.needs_reenrichment(sr.lookup_by_domain("fresh-co.com")) is False
+
+
+# ---------------------------------------------------------------------------
+# Contact-resolution columns + upsert/bounce
+# ---------------------------------------------------------------------------
+
+class TestContactResolution:
+    def test_contact_columns_added(self, isolated_db):
+        cols = _table_columns(isolated_db)
+        for col in isolated_db._CONTACT_COLUMNS:
+            assert col in cols
+        assert "contact_email" in cols  # base column reused for the resolved email
+
+    def test_upsert_contact_roundtrip_and_autostamp(self, isolated_db):
+        sr = isolated_db
+        ok = sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                         "contact_method": "generic_inbox",
+                                         "contact_status": "resolved"})
+        assert ok is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["contact_email"] == "sales@x.com"
+        assert rec["contact_method"] == "generic_inbox"
+        assert rec["contact_status"] == "resolved"
+        assert rec["contact_resolved_at"]  # auto-stamped
+
+    def test_upsert_contact_empty_domain_returns_false(self, isolated_db):
+        assert isolated_db.upsert_contact("", {"contact_email": "x@y.com"}) is False
+
+    def test_mark_contact_bounced_clears_and_flags(self, isolated_db):
+        sr = isolated_db
+        sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                    "contact_method": "generic_inbox", "contact_status": "resolved"})
+        assert sr.mark_contact_bounced("x.com") is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["contact_email"] is None     # email cleared
+        assert rec["contact_status"] == "bounced"
