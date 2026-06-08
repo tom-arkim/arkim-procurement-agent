@@ -8,13 +8,19 @@ data/supplier_registry.sqlite (additive Apollo-cache migration on first run).
 Does NOT persist sourcing runs to the DB — it only prints.
 
 Usage:
-    uv run python scripts/review_sourcing.py          # all parts below
-    uv run python scripts/review_sourcing.py 0        # only PARTS[0]
-    uv run python scripts/review_sourcing.py 0 2      # PARTS[0] and PARTS[2]
+    uv run python scripts/review_sourcing.py            # all parts below
+    uv run python scripts/review_sourcing.py 0          # only PARTS[0]
+    uv run python scripts/review_sourcing.py 0 2        # PARTS[0] and PARTS[2]
+    uv run python scripts/review_sourcing.py 2 --refresh  # re-enrich (force fresh Apollo)
+
+--refresh expires the Apollo cache (backdates apollo_enriched_at on non-onboarded
+rows) so the clarifier re-fetches and re-persists fields (incl. apollo_org_name),
+exercising the live name-consistency rescue gate. Non-destructive; only the
+domains in this run actually re-enrich (spends ~ this run's Tier 3 in credits).
 """
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -127,13 +133,41 @@ def _dump_registry() -> None:
               f"{str(r.get('apollo_enriched_at', '-') or '-')[:19]:20}")
 
 
+def _expire_apollo_cache() -> None:
+    """--refresh: backdate apollo_enriched_at on non-onboarded enriched rows so
+    needs_reenrichment() returns True and the clarifier re-fetches (re-persisting
+    apollo_org_name etc.). Non-destructive; uses the existing staleness path. Only
+    the domains that appear in this run actually re-enrich."""
+    # Match the store's naive-UTC convention (upsert_apollo_data writes
+    # datetime.utcnow()); needs_reenrichment compares with a naive utcnow().
+    old = (datetime.utcnow() - timedelta(days=400)).isoformat()
+    conn = supplier_registry._get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE suppliers SET apollo_enriched_at = ? "
+            "WHERE apollo_enriched_at IS NOT NULL "
+            "AND onboarding_status != 'onboarded_arkim_supplier'",
+            (old,),
+        )
+        conn.commit()
+        print(f"[review] --refresh: expired {cur.rowcount} cached Apollo row(s) "
+              f"for re-enrichment (only this run's domains re-fetch)")
+    finally:
+        conn.close()
+
+
 def main() -> None:
     for k in ("ANTHROPIC_API_KEY", "TAVILY_API_KEY", "APOLLO_API_KEY"):
         print(f"{k}: {'set' if os.environ.get(k) else 'MISSING'}")
 
-    args = [int(a) for a in sys.argv[1:] if a.isdigit()]
-    selected = [PARTS[i] for i in args] if args else PARTS
-    print(f"Running {len(selected)} part(s): {[p['label'] for p in selected]}")
+    argv = sys.argv[1:]
+    refresh = "--refresh" in argv
+    idx = [int(a) for a in argv if a.isdigit()]
+    if refresh:
+        _expire_apollo_cache()
+    selected = [PARTS[i] for i in idx] if idx else PARTS
+    print(f"Running {len(selected)} part(s): {[p['label'] for p in selected]}"
+          + (" [--refresh]" if refresh else ""))
 
     agent = SourcingAgent(
         tavily_api_key=os.environ.get("TAVILY_API_KEY"),
