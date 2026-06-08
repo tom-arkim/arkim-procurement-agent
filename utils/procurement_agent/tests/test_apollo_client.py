@@ -214,6 +214,11 @@ class TestPeopleSearch:
 # ---------------------------------------------------------------------------
 
 class TestNoKeyNoOp:
+    def test_default_client_disabled_in_test_session(self):
+        """No per-test env handling: proves the autouse conftest neutralizer makes a
+        default ApolloClient() disabled, so no real key can leak into the suite."""
+        assert ApolloClient().enabled is False
+
     def test_disabled_when_no_key(self, monkeypatch):
         monkeypatch.delenv("APOLLO_API_KEY", raising=False)
         client = ApolloClient()
