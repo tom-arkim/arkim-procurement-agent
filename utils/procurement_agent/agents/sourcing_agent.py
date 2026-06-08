@@ -289,6 +289,20 @@ class SourcingAgent:
             _apply_suitability_floor(tier.get("results", []), TIER_SURFACE_MIN_SUITABILITY)
         filters.append(f"suitability_floor:{TIER_SURFACE_MIN_SUITABILITY:.0f}%")
 
+        # Reconcile Apollo suitability with the floor verdict (Tier 3 only), AFTER
+        # both clarifier annotation and the floor have run. Asymmetric, removes
+        # nothing: confirmed rescues a "suitability_below_floor" reject; rejected
+        # only flags (never drops — Apollo can resolve the wrong org, §9);
+        # unconfirmed surfaces a review flag. Runs before dedup so a rescued
+        # candidate participates correctly in cross-tier dedup.
+        self._reconcile_suitability(tier3.get("results", []))
+        rescued_n = sum(
+            1 for c in tier3.get("results", [])
+            if c.get("suitability_note") == "rescued_by_apollo_confirmed"
+        )
+        if rescued_n:
+            filters.append(f"apollo_rescued:{rescued_n}")
+
         # Item 6: cross-tier dedup — vendor in highest active tier wins
         deduped = _dedup_across_tiers(tier1, tier2, tier3)
         if deduped:
@@ -566,6 +580,55 @@ class SourcingAgent:
         candidate["apollo_industry"] = record.get("apollo_industry")
         candidate["apollo_country"]  = record.get("apollo_country")
         candidate["is_us_confirmed"] = record.get("is_us_confirmed")
+
+    # ------------------------------------------------------------------
+    # Apollo <-> suitability-floor reconciliation (CLAUDE.md §9)
+    # ------------------------------------------------------------------
+
+    def _reconcile_suitability(self, candidates: list[dict]) -> list[dict]:
+        """Reconcile Apollo suitability_status with the suitability_floor verdict.
+
+        ASYMMETRIC and REMOVES NOTHING (count out == count in):
+          - "confirmed"              -> RESCUE: clear ONLY a "suitability_below_floor"
+            rejection (Apollo resolved the org as US + right-business; it overrides
+            the crude floor score). Never clears any other rejection type.
+          - "rejected_unsuitable"    -> FLAG ONLY: attach a human-readable apollo_flag
+            from apollo_country/apollo_industry. Never sets rejection_reason, never
+            removes — Apollo can resolve the WRONG org from a domain (§9 / IBT).
+          - "unconfirmed_flag_human" -> surface a review flag; rejection_reason
+            untouched (unconfirmed does NOT rescue).
+          - no suitability_status    -> untouched (e.g. seeded OEM, never clarified).
+
+        Changes eligibility/flags, not list membership. Actual exclusion is a
+        separate future step (requires explicit go-ahead).
+        """
+        for c in candidates:
+            status = c.get("suitability_status")
+            if not status:
+                continue
+
+            if status == "confirmed":
+                # RESCUE — only override the crude floor score, nothing else.
+                if c.get("rejection_reason") == "suitability_below_floor":
+                    c["rejection_reason"] = None
+                    c["suitability_note"] = "rescued_by_apollo_confirmed"
+                    print(f"[SourcingAgent] Rescued (apollo_confirmed): "
+                          f"{c.get('vendor_name')} — cleared suitability_below_floor "
+                          f"(score={float(c.get('suitability_score') or 0):.0f}%)")
+
+            elif status == "rejected_unsuitable":
+                # FLAG ONLY — never drop, never set rejection_reason (a lone Apollo
+                # reject can be a wrong-org match, e.g. ibtinc.com -> Pakistan).
+                reason = "non-US" if c.get("is_us_confirmed") is False else "business mismatch"
+                c["apollo_flag"] = (
+                    f"apollo: {reason} — country={c.get('apollo_country') or 'unknown'}, "
+                    f"industry={c.get('apollo_industry') or 'unknown'} (review)"
+                )
+
+            elif status == "unconfirmed_flag_human":
+                c["apollo_flag"] = "apollo: unconfirmed — flag for human review"
+
+        return candidates
 
     # ------------------------------------------------------------------
     # Fix 5 — Capability search (Tier 3 pivot)

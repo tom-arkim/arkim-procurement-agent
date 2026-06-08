@@ -304,3 +304,101 @@ class TestRunTier3Wiring:
         # Clarifier ran in run() on the collected tier_3 results, which survive intact.
         assert seen.get("cands") is res["tier_3"]["results"]
         assert res["tier_3"]["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Suitability reconciliation (asymmetric; removes nothing)
+# ---------------------------------------------------------------------------
+
+class TestReconcileSuitability:
+    @staticmethod
+    def _agent():
+        return SourcingAgent(apollo_api_key="")
+
+    # --- RESCUE (confirmed clears ONLY the floor reject) ---
+
+    def test_confirmed_rescues_floor_reject(self):
+        c = {"vendor_name": "Warfield Electric", "suitability_status": "confirmed",
+             "rejection_reason": "suitability_below_floor", "suitability_score": 25.0,
+             "is_us_confirmed": True}
+        out = self._agent()._reconcile_suitability([c])
+        assert not c.get("rejection_reason")  # floor reject cleared
+        assert c.get("suitability_note") == "rescued_by_apollo_confirmed"
+        assert len(out) == 1
+
+    def test_confirmed_does_not_clear_other_rejection_types(self):
+        for other in ("duplicate_in_higher_tier", "pn_mismatch", "in_warranty"):
+            c = {"vendor_name": "X", "suitability_status": "confirmed", "rejection_reason": other}
+            self._agent()._reconcile_suitability([c])
+            assert c["rejection_reason"] == other  # untouched — only the floor reject is overridden
+            assert "suitability_note" not in c
+
+    def test_confirmed_without_floor_reject_is_noop(self):
+        c = {"vendor_name": "X", "suitability_status": "confirmed", "rejection_reason": None}
+        self._agent()._reconcile_suitability([c])
+        assert not c.get("rejection_reason")
+        assert "suitability_note" not in c
+
+    # --- FLAG ONLY (rejected never drops / never sets rejection_reason) ---
+
+    def test_rejected_flags_only_non_us(self):
+        c = {"vendor_name": "Victor Seals", "suitability_status": "rejected_unsuitable",
+             "is_us_confirmed": False, "apollo_country": "China", "apollo_industry": "machinery"}
+        out = self._agent()._reconcile_suitability([c])
+        assert not c.get("rejection_reason")  # this step did NOT reject it
+        assert "non-US" in c.get("apollo_flag", "")
+        assert "China" in c.get("apollo_flag", "")
+        assert len(out) == 1  # not removed
+
+    def test_rejected_flags_us_but_wrong_business(self):
+        c = {"vendor_name": "Water Works Pools", "suitability_status": "rejected_unsuitable",
+             "is_us_confirmed": True, "apollo_country": "United States", "apollo_industry": "recreation"}
+        self._agent()._reconcile_suitability([c])
+        assert "business mismatch" in c.get("apollo_flag", "")
+        assert not c.get("rejection_reason")
+
+    def test_rejected_does_not_clear_existing_floor_reject(self):
+        # IBT: floor-rejected AND apollo-rejected -> stays floor-rejected, gains a flag.
+        c = {"vendor_name": "IBT", "suitability_status": "rejected_unsuitable",
+             "rejection_reason": "suitability_below_floor", "is_us_confirmed": False,
+             "apollo_country": "Pakistan", "apollo_industry": "professional training & coaching"}
+        self._agent()._reconcile_suitability([c])
+        assert c["rejection_reason"] == "suitability_below_floor"  # not cleared (only confirmed rescues)
+        assert "apollo_flag" in c
+
+    # --- UNCONFIRMED (pass through; never rescues) ---
+
+    def test_unconfirmed_flags_and_does_not_rescue(self):
+        c = {"vendor_name": "Seal-It", "suitability_status": "unconfirmed_flag_human",
+             "rejection_reason": "suitability_below_floor"}
+        self._agent()._reconcile_suitability([c])
+        assert c["rejection_reason"] == "suitability_below_floor"  # unconfirmed does NOT rescue
+        assert "unconfirmed" in c.get("apollo_flag", "")
+
+    # --- NO STATUS (seeded OEM etc.) ---
+
+    def test_no_status_untouched(self):
+        c = {"vendor_name": "Phoenix Pumps", "source_url": None,
+             "rejection_reason": "duplicate_in_higher_tier"}
+        self._agent()._reconcile_suitability([c])
+        assert c["rejection_reason"] == "duplicate_in_higher_tier"
+        assert "apollo_flag" not in c
+        assert "suitability_note" not in c
+
+    # --- INVARIANT: removes nothing ---
+
+    def test_count_invariant_mixed_list(self):
+        cands = [
+            {"vendor_name": "rescue", "suitability_status": "confirmed",
+             "rejection_reason": "suitability_below_floor"},
+            {"vendor_name": "flag", "suitability_status": "rejected_unsuitable", "is_us_confirmed": False},
+            {"vendor_name": "unconf", "suitability_status": "unconfirmed_flag_human"},
+            {"vendor_name": "seeded", "source_url": None},
+            {"vendor_name": "dup", "suitability_status": "confirmed",
+             "rejection_reason": "duplicate_in_higher_tier"},
+        ]
+        out = self._agent()._reconcile_suitability(cands)
+        assert len(out) == 5 and len(cands) == 5  # nothing removed
+        # dedup reject preserved; floor reject on the confirmed one rescued
+        assert cands[4]["rejection_reason"] == "duplicate_in_higher_tier"
+        assert not cands[0].get("rejection_reason")
