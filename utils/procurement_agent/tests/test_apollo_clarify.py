@@ -7,13 +7,13 @@ is isolated to a tmp sqlite file. Proves the four guarantees: store-check-first
 (Apollo/LLM failure never blocks), and no-op-without-key.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
 from utils import supplier_registry
-from utils.models import AssetSpecs
+from utils.models import AssetSpecs, SourcingRun
 from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
 
 
@@ -250,28 +250,57 @@ class TestRequirementMatch:
 
 
 # ---------------------------------------------------------------------------
-# Wiring into _run_tier3 (count into _rank unchanged; clarifier invoked)
+# Wiring: clarifier runs in run() AFTER tier collection, NOT inside _run_tier3
+# (so its latency can't trip the per-tier timeout and drop all of Tier 3).
 # ---------------------------------------------------------------------------
 
 class TestRunTier3Wiring:
-    def test_run_tier3_invokes_clarifier_and_keeps_count(self, isolated_registry, monkeypatch):
+    def test_run_tier3_does_not_clarify_inline(self, isolated_registry, monkeypatch):
+        """_run_tier3 must NOT call the clarifier (it runs inside the 30s tier
+        timeout future; clarifier latency there can zero out Tier 3)."""
         from utils.sourcing_archieved import enterprise_search
 
-        agent = SourcingAgent(apollo_api_key="")  # disabled -> flags, drops nothing, no real call
+        agent = SourcingAgent(apollo_api_key="")
         monkeypatch.setattr(enterprise_search, "_discover_national_specialists", lambda specs, e: [])
         monkeypatch.setattr(enterprise_search, "_discover_aftermarket_specialists", lambda specs, n: [])
         monkeypatch.setattr(agent, "_seeded_tier3_candidates",
-                            lambda specs: [{"vendor_name": "Seeded", "source_url": None}])
+                            lambda specs: [{"vendor_name": "Seeded", "source_url": "https://seeded.com"}])
 
-        seen = {}
-        orig = agent._apollo_clarify
-        def spy(cands, specs):
-            seen["in"] = len(cands)
-            return orig(cands, specs)
-        monkeypatch.setattr(agent, "_apollo_clarify", spy)
+        calls = {"n": 0}
+        monkeypatch.setattr(agent, "_apollo_clarify",
+                            lambda cands, specs: calls.__setitem__("n", calls["n"] + 1) or cands)
 
         weights = {"price": 0.4, "speed": 0.35, "reliability": 0.25}
-        res = agent._run_tier3(_specs(), weights, "unknown", tier2_count=5)
+        out = agent._run_tier3(_specs(), weights, "unknown", tier2_count=5)
 
-        assert "in" in seen                 # clarifier was invoked in _run_tier3
-        assert len(res) == seen["in"]       # count into _rank unchanged (nothing dropped)
+        assert calls["n"] == 0          # clarifier NOT invoked inside the timeout-wrapped tier
+        assert len(out) == 1            # discovery result intact
+
+    def test_run_clarifies_collected_tier3_after_timeout(self, isolated_registry, monkeypatch):
+        """run() clarifies the COLLECTED tier_3 results (post-_collect), preserving them."""
+        agent = SourcingAgent(apollo_api_key="")
+        monkeypatch.setattr(agent, "_run_tier1", lambda specs, w: [])
+        monkeypatch.setattr(agent, "_run_tier2", lambda specs, w: [])
+        t3 = [{"vendor_name": "A", "source_url": "https://a.com"}]
+        monkeypatch.setattr(agent, "_run_tier3", lambda specs, w, warranty, t2c: t3)
+
+        seen = {}
+
+        def spy(cands, specs):
+            seen["cands"] = cands
+            return cands
+        monkeypatch.setattr(agent, "_apollo_clarify", spy)
+
+        run = SourcingRun(
+            id="wiring-test", facility_id="fac", initiated_by_user_id="t",
+            initiated_at=datetime.now(timezone.utc), current_phase="sourcing",
+            urgency_factor=0.5, warranty_status="unknown",
+            asset_specs_json={"manufacturer": "Gusher Pumps", "model": "Type 21",
+                              "part_number": "TYPE21", "voltage": "N/A",
+                              "category": "Part", "detected_type": "mechanical seal"},
+        )
+        res = agent.run(run)
+
+        # Clarifier ran in run() on the collected tier_3 results, which survive intact.
+        assert seen.get("cands") is res["tier_3"]["results"]
+        assert res["tier_3"]["count"] == 1

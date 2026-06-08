@@ -273,6 +273,12 @@ class SourcingAgent:
             f3 = executor.submit(self._run_tier3, specs, weights, warranty, tier2["count"])
             tier3 = self._collect(f3, "tier_3")
 
+        # Apollo suitability clarifier runs AFTER tier collection — outside the
+        # per-tier timeout future — so its (network/LLM) latency can never trip the
+        # timeout and discard Tier 3. Annotate-don't-remove; covers all Tier 3
+        # results incl. the capability-pivot path; fail-soft / no-op without a key.
+        self._apollo_clarify(tier3.get("results", []), specs)
+
         filters: list[str] = []
         if warranty == "in_warranty":
             filters.append("in_warranty: aftermarket excluded from tier_3")
@@ -447,9 +453,6 @@ class SourcingAgent:
             ]
 
             combined = seeded + tavily_filtered
-            # Apollo suitability clarifier — annotates survivors in place
-            # (store-check-first, annotate-don't-remove); never changes the count.
-            self._apollo_clarify(combined, specs)
             return self._rank(combined, weights)
         except Exception as exc:
             print(f"[SourcingAgent] Tier 3 failed: {exc}")
