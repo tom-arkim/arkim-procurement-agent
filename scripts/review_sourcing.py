@@ -75,6 +75,13 @@ def _domain(url: str) -> str:
         return ""
 
 
+def _yn(v) -> str:
+    """Compact bool for the table: Y / N, or '-' when absent (e.g. tier 1/2)."""
+    if v is None:
+        return "-"
+    return "Y" if v else "N"
+
+
 def _run_one(agent: SourcingAgent, label: str, specs: dict) -> None:
     print("\n" + "=" * 110)
     print(f"PART: {label}")
@@ -95,18 +102,19 @@ def _run_one(agent: SourcingAgent, label: str, specs: dict) -> None:
         block = res.get(tier) or {}
         rows = block.get("results") or []
         print(f"\n-- {tier}  ({block.get('count')} candidates, status={block.get('status')}) --")
-        hdr = (f"{'vendor':34} {'domain':26} {'suitability_status':22} "
-               f"{'is_us':5} {'rejection_reason':22} {'suit%':>5}  apollo note/flag")
+        hdr = (f"{'vendor':28} {'domain':22} {'suit_status':20} "
+               f"{'rank':7} {'sel':4} {'cnf':4} {'rejection_reason':20} {'suit%':>5}  note/flag")
         print(hdr)
         print("-" * len(hdr))
         for c in rows:
-            iv = c.get("is_us_confirmed")
             note = c.get("suitability_note") or c.get("apollo_flag") or "-"
-            print(f"{(c.get('vendor_name') or '')[:33]:34} "
-                  f"{_domain(c.get('source_url'))[:25]:26} "
-                  f"{str(c.get('suitability_status') or '-')[:22]:22} "
-                  f"{('-' if iv is None else str(iv)):5} "
-                  f"{str(c.get('rejection_reason') or '-')[:21]:22} "
+            print(f"{(c.get('vendor_name') or '')[:27]:28} "
+                  f"{_domain(c.get('source_url'))[:21]:22} "
+                  f"{str(c.get('suitability_status') or '-')[:20]:20} "
+                  f"{str(c.get('suitability_rank_tier') or '-'):7} "
+                  f"{_yn(c.get('default_outreach_selected')):4} "
+                  f"{_yn(c.get('requires_outreach_confirmation')):4} "
+                  f"{str(c.get('rejection_reason') or '-')[:19]:20} "
                   f"{float(c.get('suitability_score') or 0):5.0f}  "
                   f"{note}")
     print("\nfilters_applied:", res.get("filters_applied"))
