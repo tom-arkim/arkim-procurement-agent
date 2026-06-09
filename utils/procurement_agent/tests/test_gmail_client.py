@@ -6,12 +6,18 @@ Fail-soft + no-creds discipline: with no GMAIL_* env, build_gmail_service() retu
 not pull them in (the suite runs without them installed).
 """
 
+import os
+import subprocess
 import sys
 
 import pytest
 
 from utils import gmail_client
 from utils.gmail_client import build_gmail_service, gmail_sender_address, DEFAULT_SENDER
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)
+))))
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +48,18 @@ class TestBuildService:
 
 class TestLazyImport:
     def test_module_does_not_import_google_at_load(self):
-        # Importing gmail_client must not pull in the heavy google libs.
-        assert "googleapiclient" not in sys.modules
-        assert "google.oauth2" not in sys.modules
-        assert gmail_client.__name__ == "utils.gmail_client"
+        # Importing gmail_client must not pull in the heavy google libs (they are lazy,
+        # imported inside the builder functions). Checked in a FRESH interpreter: asserting
+        # on this process's sys.modules is order-dependent — another test that exercises the
+        # build path (e.g. the libs-missing fail-soft case) imports google first and would
+        # make this spuriously fail once the google libs are actually installed.
+        code = (
+            "import sys\n"
+            "import utils.gmail_client as m\n"
+            "assert m.__name__ == 'utils.gmail_client'\n"
+            "assert 'googleapiclient' not in sys.modules, 'googleapiclient eagerly imported'\n"
+            "assert 'google.oauth2' not in sys.modules, 'google.oauth2 eagerly imported'\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code], cwd=_ROOT,
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr or proc.stdout

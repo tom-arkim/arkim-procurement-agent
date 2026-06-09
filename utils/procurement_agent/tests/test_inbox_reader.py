@@ -8,6 +8,9 @@ a MOCKED Gmail service (no real Gmail call, no google libs, no network in the su
 """
 
 import base64
+import os
+import subprocess
+import sys
 
 import pytest
 from unittest.mock import MagicMock
@@ -15,6 +18,10 @@ from unittest.mock import MagicMock
 import utils.email_sender as email_sender
 from utils.inbox_reader import BounceNotice, ReplyNotice, GmailInboxReader
 from utils.procurement_agent.tests._dsn_fixtures import HARD_BOUNCE
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)
+))))
 
 
 @pytest.fixture(autouse=True)
@@ -115,6 +122,16 @@ class TestLiveReadMocked:
 
 class TestLazyImport:
     def test_google_libs_not_imported_at_load(self):
-        import sys
-        assert "googleapiclient" not in sys.modules
-        assert "google.oauth2" not in sys.modules
+        # Importing inbox_reader must not pull in the heavy google libs (lazy, via
+        # gmail_client). Checked in a FRESH interpreter so suite-order pollution (another
+        # test importing google to exercise the build path) can't make this spuriously
+        # fail now that the google libs are actually installed.
+        code = (
+            "import sys\n"
+            "import utils.inbox_reader  # noqa: F401\n"
+            "assert 'googleapiclient' not in sys.modules, 'googleapiclient eagerly imported'\n"
+            "assert 'google.oauth2' not in sys.modules, 'google.oauth2 eagerly imported'\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code], cwd=_ROOT,
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr or proc.stdout

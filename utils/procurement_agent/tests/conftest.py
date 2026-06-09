@@ -46,6 +46,14 @@ def _neutralize_external_api_keys(monkeypatch):
     """
     for var in ("APOLLO_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY"):
         monkeypatch.setenv(var, "")
+    # Gmail is an external call too: with the google libs now installed, a real
+    # GMAIL_SERVICE_ACCOUNT_FILE in .env would let a test build a live service and hit
+    # the network (observed: fetch_replies returning real inbox data). Empty these so
+    # the send/read path is uncredentialled by default — a test that needs creds injects
+    # a mock service or sets the var explicitly (its setenv runs after this and wins).
+    for var in ("GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE",
+                "GMAIL_OAUTH_TOKEN_FILE"):
+        monkeypatch.setenv(var, "")
 
 
 @pytest.fixture(scope="function")

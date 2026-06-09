@@ -29,6 +29,11 @@ class TestFetchRepliesStubbed:
         assert reader.fetch_replies() == []
 
     def test_flag_true_no_creds_empty(self, monkeypatch):
+        # "No creds" must mean no creds: clear env service-account vars so this does not
+        # fall back to a real .env credential, build a real client, and hit the network.
+        for var in ("GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE",
+                    "GMAIL_OAUTH_TOKEN_FILE"):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setattr(email_sender, "EMAIL_SEND_ENABLED", True)
         assert GmailInboxReader(credentials=None).fetch_replies() == []
 
