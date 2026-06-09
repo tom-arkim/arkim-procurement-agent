@@ -1413,3 +1413,91 @@ def require_admin(authorization: Optional[str] = Header(default=None)) -> str:
 def admin_ping(role: str = Depends(require_admin)):
     """Liveness probe proving the admin gate works (admin -> 200; else 401/403/503)."""
     return {"ok": True, "role": role}
+
+
+# ---------------------------------------------------------------------------
+# Admin/inspector READ-ONLY data endpoints (all require_admin).
+# Debug surface: return FULL records (verbosity is the goal — do not trim fields).
+# None of these mutate state; they call the stores' read accessors only.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/runs")
+def admin_runs(role: str = Depends(require_admin)):
+    """List sourcing runs (summary). Drill into one via /api/admin/runs/{id}."""
+    from utils.procurement_agent.state import persistence
+    runs = persistence.list_runs(limit=500)
+    out = []
+    for r in runs:
+        specs = r.get("asset_specs_json") or {}
+        part = " ".join(
+            str(specs.get(k)) for k in ("manufacturer", "model", "part_number") if specs.get(k)
+        ) or None
+        out.append({
+            "id": r["id"],
+            "part": part,
+            "phase": r.get("current_phase"),
+            "facility_id": r.get("facility_id"),
+            "created_at": r.get("created_at"),
+            "updated_at": r.get("updated_at"),
+        })
+    return {"count": len(out), "runs": out}
+
+
+@app.get("/api/admin/runs/{run_id}")
+def admin_run_detail(run_id: str, role: str = Depends(require_admin)):
+    """Full run record — every column incl. the sourcing_results candidates with all
+    suitability / contact / apollo annotations (verbatim, untrimmed)."""
+    from utils.procurement_agent.state import persistence
+    run = persistence.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run
+
+
+@app.get("/api/admin/suppliers")
+def admin_suppliers(role: str = Depends(require_admin)):
+    """supplier_registry rows — all apollo_* / suitability / contact / primary fields,
+    plus a computed needs_reenrichment staleness flag."""
+    from utils import supplier_registry
+    rows = supplier_registry.all_entries()
+    for r in rows:
+        r["needs_reenrichment"] = supplier_registry.needs_reenrichment(r)
+    return {"count": len(rows), "suppliers": rows}
+
+
+@app.get("/api/admin/sent-messages")
+def admin_sent_messages(role: str = Depends(require_admin)):
+    """sent_messages — recipients, status, thread/message ids, sent_at, approved_by."""
+    from utils import supplier_registry
+    rows = supplier_registry.get_sent_messages()
+    return {"count": len(rows), "sent_messages": rows}
+
+
+@app.get("/api/admin/review-queue")
+def admin_review_queue(role: str = Depends(require_admin)):
+    """review_items — extracted quotes/contacts, confidence, status (incl.
+    needs_human_review), raw source, the matched RFQ's run/domain/vendor."""
+    from utils import supplier_registry
+    rows = supplier_registry.get_review_items()
+    return {"count": len(rows), "review_items": rows}
+
+
+@app.get("/api/admin/orders")
+def admin_orders(role: str = Depends(require_admin)):
+    """orders — full lifecycle state + every captured field."""
+    from utils import orders
+    rows = orders.get_orders()
+    return {"count": len(rows), "orders": rows}
+
+
+@app.get("/api/admin/prices")
+def admin_prices(role: str = Depends(require_admin)):
+    """price_db entries flattened (key, vendor, price, source live|rfq, lead, ...),
+    plus the raw nested map."""
+    from utils import price_db
+    db = price_db.all_entries()
+    items = []
+    for key, vendors in (db or {}).items():
+        for vendor, data in (vendors or {}).items():
+            items.append({"key": key, "vendor": vendor, **(data or {})})
+    return {"count": len(items), "prices": items, "raw": db}
