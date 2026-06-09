@@ -139,12 +139,16 @@ class TestFlagTrueWithApproval:
         assert msg.to == ["sales@baypower.com"]
         assert msg.cc == []
 
-    def test_default_gmail_sender_with_flag_true_still_stubbed(self, isolated_stores, monkeypatch):
-        """Flag True but the default GmailSender has no creds => stubbed, no real send."""
+    def test_default_gmail_sender_with_flag_true_no_creds_fails_soft(self, isolated_stores, monkeypatch):
+        """Flag True but the default GmailSender has no creds => fail-soft 'error', no
+        real send (never a silent stub once sending is enabled)."""
+        for var in ("GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE",
+                    "GMAIL_OAUTH_TOKEN_FILE"):
+            monkeypatch.delenv(var, raising=False)
         _seed_generic(isolated_stores)
         monkeypatch.setattr(email_sender, "EMAIL_SEND_ENABLED", True)
         res = send_rfq(_candidate(), _DRAFT, Approval("Dir"), run_id="run1")
-        assert res["status"] == "stubbed" and res["sent"] is False
+        assert res["status"] == "error" and res["sent"] is False
 
 
 # ---------------------------------------------------------------------------

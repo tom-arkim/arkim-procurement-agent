@@ -2,15 +2,24 @@
 Tests for utils/email_sender.py — the provider-agnostic send interface + the
 STUBBED GmailSender.
 
-Safety focus: with EMAIL_SEND_ENABLED False (the default) or no credentials, send()
-returns a stubbed result and makes ZERO real calls; the live Gmail path is unwired
-and raises rather than faking a send. No network is ever touched here.
+Safety focus: with EMAIL_SEND_ENABLED False (the default), send() returns a stubbed
+result and makes ZERO real calls; flag True + no credentials fails soft (error, no
+crash); the real Gmail path is exercised only through a MOCKED service (no real send,
+no google libs, no network in the suite).
 """
 
 import pytest
+from unittest.mock import MagicMock
 
 import utils.email_sender as es
 from utils.email_sender import EmailMessage, SendResult, GmailSender, EMAIL_SEND_ENABLED
+
+
+@pytest.fixture(autouse=True)
+def _no_gmail_env(monkeypatch):
+    for var in ("GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE",
+                "GMAIL_OAUTH_TOKEN_FILE", "GMAIL_SENDER"):
+        monkeypatch.delenv(var, raising=False)
 
 
 class TestModuleGate:
@@ -53,28 +62,45 @@ class TestGmailSenderStubbed:
         assert res.message_id is None and res.thread_id is None
         assert sender.configured is False  # flag off => not configured
 
-    def test_flag_true_no_creds_returns_stubbed(self, monkeypatch):
+    def test_flag_true_no_creds_fails_soft(self, monkeypatch):
+        """Flag on but no usable credentials => fail-soft 'error' (clear, no crash,
+        no half-send) — NOT a silent stub."""
         monkeypatch.setattr(es, "EMAIL_SEND_ENABLED", True)
-        sender = GmailSender(credentials=None)
+        sender = GmailSender()           # no injected service, no env creds
         res = sender.send(self._msg())
-        assert res.status == "stubbed"
+        assert res.status == "error" and res.error
         assert sender.configured is False  # no creds => not configured
 
-    def test_live_path_is_unwired_and_raises(self, monkeypatch):
-        """Flag True + creds present => the live branch, which is intentionally not
-        wired: it raises rather than pretending to send. Proves no silent real send."""
+    def test_live_path_sends_via_mocked_client(self, monkeypatch):
+        """Flag True + an injected (MOCKED) Gmail service => one real-shaped send,
+        returning the RFC822 Message-ID + Gmail threadId. No real Gmail call."""
         monkeypatch.setattr(es, "EMAIL_SEND_ENABLED", True)
-        sender = GmailSender(credentials=object())
-        assert sender.configured is True
-        with pytest.raises(NotImplementedError):
-            sender.send(self._msg())
+        service = MagicMock()
+        send = service.users.return_value.messages.return_value.send
+        send.return_value.execute.return_value = {"id": "gmail-123", "threadId": "T-1"}
 
-    def test_no_network_dependency_imported(self):
-        """The send module imports no HTTP/SMTP client — structurally cannot do a
-        real send from the stub path."""
+        sender = GmailSender(service=service)
+        assert sender.configured is True
+        res = sender.send(self._msg())
+
+        assert res.status == "sent"
+        assert res.thread_id == "T-1"
+        assert res.message_id == "rfq1@arkim.ai"   # deterministic from metadata.rfq_id
+        send.assert_called_once()
+        assert send.call_args.kwargs["userId"] == "me"
+        assert "raw" in send.call_args.kwargs["body"]   # base64url MIME
+
+    def test_send_failure_is_failsoft(self, monkeypatch):
+        monkeypatch.setattr(es, "EMAIL_SEND_ENABLED", True)
+        service = MagicMock()
+        service.users.return_value.messages.return_value.send.return_value.execute.side_effect = \
+            RuntimeError("api down")
+        res = GmailSender(service=service).send(self._msg())
+        assert res.status == "error" and "api down" in (res.error or "")
+
+    def test_google_libs_lazy_not_imported_at_load(self):
+        """Importing the send module pulls in NO google libraries (they're lazy), so
+        the suite needs neither the libs nor credentials."""
         import sys
-        src = es.__file__
-        with open(src, "r", encoding="utf-8") as fh:
-            text = fh.read()
-        for banned in ("import requests", "import smtplib", "import http", "urllib.request"):
-            assert banned not in text
+        assert "googleapiclient" not in sys.modules
+        assert "google.oauth2" not in sys.modules

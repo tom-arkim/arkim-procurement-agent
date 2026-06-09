@@ -5,19 +5,22 @@ Provider-agnostic outbound email SEND interface (Layer 1, outbound only).
 This is the send seam for Tier 3 RFQs. It is deliberately split from drafting and
 from the send *flow* (utils/rfq_send.py): this module only knows how to hand a
 fully-formed message to a provider and report the result. The provider is Gmail
-(a designated Arkim sourcing address), but the actual Gmail API call is STUBBED
-here — the live wiring + first real send is a separate, deliberate next step.
+(sends as GMAIL_SENDER, default procurement@arkim.ai); the real Gmail API call is
+wired via utils.gmail_client (google libs imported lazily — the suite needs neither
+the libs nor credentials, and EMAIL_SEND_ENABLED stays False).
 
 Safety (this is the first layer that can take an external action):
   - EMAIL_SEND_ENABLED is the canonical send gate and stays False. This is a fresh
     constant owned by the send layer; the identically-named flag in
     utils/sourcing_archieved/tier3_outreach.py is DEAD code (see CLAUDE.md §6) and
     is intentionally NOT reused. (CLEANUP notes the duplication.)
-  - While EMAIL_SEND_ENABLED is False OR no provider credentials are configured, a
-    sender returns a STUBBED SendResult and makes ZERO network calls.
-  - The real Gmail send is unimplemented: the live branch (flag True + creds) raises
-    NotImplementedError so an accidental enable fails loud rather than silently
-    pretending to send. No code path here opens a socket.
+  - While EMAIL_SEND_ENABLED is False, a sender returns a STUBBED SendResult and makes
+    ZERO network calls. The double gate (this flag AND the per-draft approval in
+    rfq_send) is unchanged.
+  - Flag True + a usable Gmail service -> a real send, returning the RFC822 Message-ID
+    (we set it, so a bounce DSN matches) and Gmail threadId (so a reply matches).
+  - Flag True + NO credentials -> fail-soft "error" (clear, no crash, no half-send),
+    never a silent stub. Tests inject a mocked service, so no real Gmail call occurs.
 
 Conventions mirror utils/apollo_client.py (the sibling standalone provider client):
 bracket-prefixed print logging ("[EmailSender] ..."), explicit type annotations,
@@ -26,10 +29,16 @@ fail-soft by contract.
 
 from __future__ import annotations
 
+import base64
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.mime.text import MIMEText
+from email.utils import make_msgid
 from typing import Optional
+
+from utils import gmail_client
 
 # Canonical outbound send gate. MUST stay False until a deliberate, documented
 # enabling decision (legal review of templates + real provider wiring). Owned here.
@@ -93,31 +102,72 @@ class EmailSender(ABC):
 class GmailSender(EmailSender):
     """Gmail-backed sender. The real Gmail API call is STUBBED (not wired).
 
-    While EMAIL_SEND_ENABLED is False or no credentials are configured, send()
-    returns a stubbed result and touches no network. The live branch (flag True +
-    creds) is unimplemented and raises NotImplementedError — wiring it (and the
-    first real send, to ourselves) is the deliberate next step.
+    Behaviour:
+      - EMAIL_SEND_ENABLED False (repo/test default) -> "stubbed", zero network.
+      - flag True + a usable Gmail service -> real send as GMAIL_SENDER
+        (procurement@arkim.ai); returns the RFC822 Message-ID (set by us, for bounce
+        matching) + Gmail threadId (for reply matching).
+      - flag True + NO credentials -> fail-soft "error" (clear, no crash, no half-send).
+    The double gate (this flag AND the per-draft approval in rfq_send) is unchanged.
+    The Gmail service is built lazily from env creds (utils.gmail_client) or injected
+    (the `service` arg, used by tests — no real Gmail call in the suite).
     """
 
-    def __init__(self, credentials: Optional[object] = None):
-        # No credentials are wired in this layer; the parameter exists so the live
-        # provider can be injected later without changing the interface.
+    def __init__(self, credentials: Optional[object] = None,
+                 service: Optional[object] = None, sender: Optional[str] = None):
+        # `credentials` is retained for interface back-compat; the real path builds a
+        # service from env (gmail_client) or uses an injected `service` (tests).
         self._credentials = credentials
+        self._service = service
+        self._sender = sender
+
+    @staticmethod
+    def _env_creds_present() -> bool:
+        return any(os.environ.get(v) for v in (
+            "GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE", "GMAIL_OAUTH_TOKEN_FILE"))
 
     @property
     def configured(self) -> bool:
-        """True only when both the gate is on AND credentials are present."""
-        return bool(EMAIL_SEND_ENABLED and self._credentials)
+        """True only when the gate is on AND a sending path is available (an injected
+        service/credentials, or env-configured credentials)."""
+        return bool(EMAIL_SEND_ENABLED and (self._service or self._credentials
+                                            or self._env_creds_present()))
+
+    def _build_raw(self, message: EmailMessage) -> tuple:
+        """Build the base64url-encoded RFC822 message and its Message-ID (no brackets).
+
+        The Message-ID is deterministic from the rfq_id when present, so a later bounce
+        DSN (whose In-Reply-To references it) matches the sent_messages row.
+        """
+        mime = MIMEText(message.body or "")
+        mime["To"] = ", ".join(message.to)
+        if message.cc:
+            mime["Cc"] = ", ".join(message.cc)
+        mime["From"] = self._sender or gmail_client.gmail_sender_address()
+        mime["Subject"] = message.subject or ""
+        rfq_id = (message.metadata or {}).get("rfq_id")
+        header = f"<{rfq_id}@arkim.ai>" if rfq_id else make_msgid(domain="arkim.ai")
+        mime["Message-ID"] = header
+        raw = base64.urlsafe_b64encode(mime.as_bytes()).decode()
+        return raw, header.strip("<>")
 
     def send(self, message: EmailMessage) -> SendResult:
         if not EMAIL_SEND_ENABLED:
             print(f"[EmailSender] STUBBED (EMAIL_SEND_ENABLED=False) -> {message.all_recipients}")
             return SendResult(status="stubbed")
-        if not self._credentials:
-            print(f"[EmailSender] STUBBED (no Gmail credentials) -> {message.all_recipients}")
-            return SendResult(status="stubbed")
-        # Live path — intentionally not wired. Fail loud rather than fake a send.
-        raise NotImplementedError(
-            "GmailSender live send is not wired yet — live Gmail API integration and "
-            "the first real send are a deliberate separate step."
-        )
+        service = self._service or gmail_client.build_gmail_service()
+        if service is None:
+            # Flag on but no usable credentials: surface the misconfig (fail-soft),
+            # never a silent stub/half-send.
+            print(f"[EmailSender] ERROR: send enabled but no Gmail credentials -> {message.all_recipients}")
+            return SendResult(status="error", error="Gmail credentials not configured")
+        try:
+            raw, message_id = self._build_raw(message)
+            sent = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+            thread_id = sent.get("threadId")
+            print(f"[EmailSender] SENT -> {message.all_recipients} "
+                  f"(gmail_id={sent.get('id')} thread={thread_id} msgid={message_id})")
+            return SendResult(status="sent", message_id=message_id, thread_id=thread_id)
+        except Exception as exc:
+            print(f"[EmailSender] send failed: {type(exc).__name__}: {exc}")
+            return SendResult(status="error", error=str(exc))
