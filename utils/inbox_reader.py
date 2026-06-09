@@ -22,10 +22,34 @@ bracket-prefixed logging).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import utils.email_sender as email_sender
+
+
+@dataclass
+class ReplyNotice:
+    """One inbound REPLY to a sent RFQ (Layer 3), normalized for matching/extraction.
+
+    sender — the supplier address the reply came FROM.
+    message_id / thread_id / in_reply_to — identifiers used to match back to a
+      sent_messages row (in_reply_to/message_id preferred, then thread, then
+      sender domain).
+    body — the plain-text reply body (free-text quote / nominated contact).
+    attachments — list of {filename, content_type, data}; a PDF here is run through
+      the OCR seam before LLM extraction.
+    form — a structured quote-form submission, when the supplier used Arkim's form
+      link (clean fields, highest confidence). None otherwise.
+    """
+    sender: str
+    message_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    in_reply_to: Optional[str] = None
+    subject: Optional[str] = None
+    body: str = ""
+    attachments: list = field(default_factory=list)
+    form: Optional[dict] = None
 
 
 @dataclass
@@ -57,6 +81,11 @@ class InboxReader(ABC):
     def fetch_bounces(self) -> list[BounceNotice]:
         ...
 
+    def fetch_replies(self) -> list["ReplyNotice"]:
+        """Inbound REPLIES to sent RFQs (Layer 3). Concrete default returns [] so
+        existing bounce-only readers remain valid; reply-capable readers override."""
+        return []
+
 
 class GmailInboxReader(InboxReader):
     """Gmail-backed bounce reader. The real Gmail read is STUBBED (not wired).
@@ -87,4 +116,18 @@ class GmailInboxReader(InboxReader):
         raise NotImplementedError(
             "GmailInboxReader live read is not wired yet — live Gmail inbox access "
             "and DSN fetching are a deliberate separate step."
+        )
+
+    def fetch_replies(self) -> list[ReplyNotice]:
+        """Inbound replies to sent RFQs. STUBBED identically to fetch_bounces:
+        [] while gated/uncredentialled (zero network); live branch unwired."""
+        if not email_sender.EMAIL_SEND_ENABLED:
+            print("[InboxReader] STUBBED (EMAIL_SEND_ENABLED=False) -> 0 replies")
+            return []
+        if not self._credentials:
+            print("[InboxReader] STUBBED (no Gmail credentials) -> 0 replies")
+            return []
+        raise NotImplementedError(
+            "GmailInboxReader live reply read is not wired yet — live Gmail inbox "
+            "access and reply threading are a deliberate separate step."
         )
