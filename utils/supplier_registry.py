@@ -37,9 +37,19 @@ free default path):
   primary_contact_email          text
   primary_contact_name           text
   primary_contact_title          text
-  primary_contact_source         text        "apollo_enriched"
-  primary_contact_status         text        "resolved" | "no_response" | "bounced" | "none"
+  primary_contact_person_id      text        Apollo person_id (kept even on an enrich miss)
+  primary_contact_source         text        "apollo_enriched" (email) | "apollo_search" (found, no email)
+  primary_contact_status         text        "resolved" | "found_no_email" | "no_response" | "bounced" | "none"
   primary_contact_at             text        ISO 8601 UTC
+
+primary_contact_status values:
+  "resolved"       — a named primary WITH a usable email (escalation enrich hit).
+  "found_no_email" — search found a real sales person but no email is available
+                     (name/title/person_id kept; the generic inbox is still used).
+  "none"           — no sales person found at all.
+  "no_response" / "bounced" — had a primary; it didn't respond / bounced.
+Only "resolved" makes the primary the effective contact; the others fall back to
+the generic inbox (effective_contact / recipient_set unchanged).
 
 `suitability_status` is INDEPENDENT of `onboarding_status`: the former records Apollo's
 US+requirement verdict, the latter the onboarding lifecycle. A supplier can legitimately be
@@ -148,12 +158,13 @@ _CONTACT_WRITABLE = {"contact_email", "contact_method", "contact_status", "conta
 # PRIMARY (named) contact columns — the Apollo-enriched escalation contact, sitting
 # ABOVE the generic-inbox fallback (contact_email/contact_method). Added by _migrate.
 _PRIMARY_COLUMNS: dict[str, str] = {
-    "primary_contact_email":  "TEXT",
-    "primary_contact_name":   "TEXT",
-    "primary_contact_title":  "TEXT",
-    "primary_contact_source": "TEXT",   # "apollo_enriched"
-    "primary_contact_status": "TEXT",   # "resolved" | "no_response" | "bounced" | "none"
-    "primary_contact_at":     "TEXT",   # ISO 8601 UTC
+    "primary_contact_email":     "TEXT",
+    "primary_contact_name":      "TEXT",
+    "primary_contact_title":     "TEXT",
+    "primary_contact_person_id": "TEXT",   # Apollo person_id (kept even on enrich miss)
+    "primary_contact_source":    "TEXT",   # "apollo_enriched" | "apollo_search"
+    "primary_contact_status":    "TEXT",   # resolved | found_no_email | no_response | bounced | none
+    "primary_contact_at":        "TEXT",   # ISO 8601 UTC
 }
 _PRIMARY_WRITABLE = set(_PRIMARY_COLUMNS)
 

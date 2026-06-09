@@ -688,9 +688,11 @@ class TestEscalateContact:
         assert c["primary_contact_email"] == "dana@x.com"
         assert c["primary_contact_status"] == "resolved"
         assert c["primary_contact_source"] == "apollo_enriched"
+        assert c["primary_contact_person_id"] == "p2"
         rec = sr.lookup_by_domain("x.com")
         assert rec["primary_contact_email"] == "dana@x.com"
         assert rec["primary_contact_status"] == "resolved"
+        assert rec["primary_contact_person_id"] == "p2"
 
     def test_cache_hard_reuses_primary_zero_apollo(self, isolated_registry):
         sr = isolated_registry
@@ -725,15 +727,57 @@ class TestEscalateContact:
         apollo.people_match.assert_not_called()
         assert c["primary_contact_status"] == "none"
 
-    def test_enrich_miss_no_primary(self, isolated_registry):
+    def test_enrich_miss_persists_found_no_email(self, isolated_registry):
+        """Search-hit + enrich-miss: keep WHO we found (name/title/person_id) under a
+        distinct 'found_no_email' status — but no email, and the generic fallback is
+        unchanged (found_no_email is NOT resolved)."""
+        sr = isolated_registry
         apollo = MagicMock()
         apollo.people_search.return_value = self._sales_people()
         apollo.people_match.return_value = None
         agent = self._agent(apollo)
         c = {"vendor_name": "X", "source_url": "https://x.com"}
         agent._escalate_contact(c)
+
         apollo.people_match.assert_called_once()  # tried exactly once, then fail-soft
-        assert c["primary_contact_status"] == "none"
+        assert c["primary_contact_status"] == "found_no_email"
+        assert c["primary_contact_email"] is None
+        assert c["primary_contact_name"] == "Dana Dir"          # highest-seniority sales
+        assert c["primary_contact_title"] == "Director of Sales"
+        assert c["primary_contact_person_id"] == "p2"
+        assert c["primary_contact_source"] == "apollo_search"
+        # Persisted to the store, and still NOT the effective contact.
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["primary_contact_status"] == "found_no_email"
+        assert rec["primary_contact_name"] == "Dana Dir"
+        assert rec["primary_contact_person_id"] == "p2"
+        assert rec["primary_contact_email"] is None
+        assert sr.effective_contact(rec)["source"] != "primary"  # fallback unchanged
+
+    def test_three_states_are_distinct(self, isolated_registry):
+        """resolved (email) vs found_no_email (person, no email) vs none (no person)."""
+        # resolved
+        a1 = MagicMock()
+        a1.people_search.return_value = self._sales_people()
+        a1.people_match.return_value = {"name": "Dana Dir", "title": "Director of Sales",
+                                        "email": "dana@a.com", "person_id": "p2"}
+        c1 = {"vendor_name": "A", "source_url": "https://a.com"}
+        self._agent(a1)._escalate_contact(c1)
+        # found_no_email
+        a2 = MagicMock()
+        a2.people_search.return_value = self._sales_people()
+        a2.people_match.return_value = None
+        c2 = {"vendor_name": "B", "source_url": "https://b.com"}
+        self._agent(a2)._escalate_contact(c2)
+        # none
+        a3 = MagicMock()
+        a3.people_search.return_value = [{"title": "Operations Manager", "seniority": "manager"}]
+        c3 = {"vendor_name": "C", "source_url": "https://c.com"}
+        self._agent(a3)._escalate_contact(c3)
+
+        assert c1["primary_contact_status"] == "resolved"
+        assert c2["primary_contact_status"] == "found_no_email"
+        assert c3["primary_contact_status"] == "none"
 
     def test_no_domain_no_primary_no_calls(self, isolated_registry):
         apollo = MagicMock()

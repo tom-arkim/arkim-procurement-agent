@@ -881,6 +881,7 @@ class SourcingAgent:
                 candidate, record.get("primary_contact_email"),
                 name=record.get("primary_contact_name"),
                 title=record.get("primary_contact_title"),
+                person_id=record.get("primary_contact_person_id"),
                 source=record.get("primary_contact_source") or "store",
                 status="resolved",
             )
@@ -903,32 +904,53 @@ class SourcingAgent:
             domain=domain,
         )
         if not enriched or not enriched.get("email"):
-            self._annotate_primary(candidate, None, status="none")
+            # Search found a real sales person but no email is available. Persist WHO
+            # they are (name/title/person_id, status="found_no_email") so we don't
+            # pointlessly re-search and a human can see the contact. This does NOT make
+            # them the effective contact — the generic-inbox fallback is unchanged
+            # (found_no_email != resolved, see effective_contact / recipient_set).
+            name  = person.get("name")
+            title = person.get("title")
+            pid   = person.get("person_id")
+            supplier_registry.upsert_primary_contact(domain, {
+                "primary_contact_name":      name,
+                "primary_contact_title":     title,
+                "primary_contact_person_id": pid,
+                "primary_contact_source":    "apollo_search",
+                "primary_contact_status":    "found_no_email",
+            })
+            print(f"[SourcingAgent] Apollo: searched, person found, no email - "
+                  f"{name} ({title}) @ {domain} -> found_no_email")
+            self._annotate_primary(candidate, None, name=name, title=title, person_id=pid,
+                                   source="apollo_search", status="found_no_email")
             return candidate
 
         name  = enriched.get("name") or person.get("name")
         title = enriched.get("title") or person.get("title")
+        pid   = enriched.get("person_id") or person.get("person_id")
         supplier_registry.upsert_primary_contact(domain, {
-            "primary_contact_email":  enriched["email"],
-            "primary_contact_name":   name,
-            "primary_contact_title":  title,
-            "primary_contact_source": "apollo_enriched",
-            "primary_contact_status": "resolved",
+            "primary_contact_email":     enriched["email"],
+            "primary_contact_name":      name,
+            "primary_contact_title":     title,
+            "primary_contact_person_id": pid,
+            "primary_contact_source":    "apollo_enriched",
+            "primary_contact_status":    "resolved",
         })
         self._annotate_primary(candidate, enriched["email"], name=name, title=title,
-                               source="apollo_enriched", status="resolved")
+                               person_id=pid, source="apollo_enriched", status="resolved")
         return candidate
 
     @staticmethod
     def _annotate_primary(
         candidate: dict, email: Optional[str], name: Optional[str] = None,
-        title: Optional[str] = None, source: Optional[str] = None,
-        status: str = "none",
+        title: Optional[str] = None, person_id: Optional[str] = None,
+        source: Optional[str] = None, status: str = "none",
     ) -> None:
         """Attach the named PRIMARY contact (the generic-inbox fallback is untouched)."""
         candidate["primary_contact_email"] = email
         candidate["primary_contact_name"] = name
         candidate["primary_contact_title"] = title
+        candidate["primary_contact_person_id"] = person_id
         candidate["primary_contact_source"] = source
         candidate["primary_contact_status"] = status
 
