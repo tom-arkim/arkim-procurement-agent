@@ -9,14 +9,39 @@ from __future__ import annotations
 
 from utils.audit_log import write_audit_log
 
+# Appended to an RFQ ONLY when it falls back to a generic inbox (no resolved named
+# primary). Asks the supplier to nominate the right procurement contact. Capturing
+# the reply is Layer 3 (inbound) — out of scope here; this is outbound text only.
+CONTACT_NOMINATION_ASK = (
+    "We'd like to keep sending procurement requests for parts like this to the right "
+    "person. If there's a specific contact these should go to, please reply with their "
+    "name, position, and email."
+)
 
-def _make_draft(vendor_name: str, specs: dict | None) -> str:
-    """Generate a simple RFQ draft for one vendor."""
+
+def should_request_contact(vendor: dict | None) -> bool:
+    """Whether the RFQ should ask the supplier to nominate a procurement contact.
+
+    True unless we already have a RESOLVED named primary contact. So a generic-inbox
+    fallback, or a primary in {found_no_email, none, bounced}, gets the ask; a
+    primary_contact_status == "resolved" does NOT (we already have the person).
+    """
+    if not vendor:
+        return True
+    return vendor.get("primary_contact_status") != "resolved"
+
+
+def _make_draft(vendor_name: str, specs: dict | None, request_contact: bool = False) -> str:
+    """Generate a simple RFQ draft for one vendor.
+
+    When request_contact is True (generic-inbox fallback), a polite contact-nomination
+    ask is appended — a template addition, not a rewrite.
+    """
     mfg  = (specs or {}).get("manufacturer") or ""
     mdl  = (specs or {}).get("model") or ""
     pn   = (specs or {}).get("part_number") or ""
     subj_part = " ".join(p for p in [mfg, mdl, pn] if p) or "the requested part"
-    return (
+    body = (
         f"Subject: Quote Request — {subj_part}\n\n"
         f"Hello {vendor_name},\n\n"
         f"We are seeking pricing and availability for the following:\n\n"
@@ -26,6 +51,9 @@ def _make_draft(vendor_name: str, specs: dict | None) -> str:
         f"Please reply with unit price, lead time, and stock availability.\n\n"
         f"Regards,\nArkim Procurement\nprocurement@arkim.ai"
     )
+    if request_contact:
+        body += f"\n\n{CONTACT_NOMINATION_ASK}"
+    return body
 
 
 def initiate_outreach_campaign(
@@ -41,7 +69,13 @@ def initiate_outreach_campaign(
       email_send_enabled  bool       — always False in prototype
     """
     vendor_names = [v.get("vendor_name") or "Unknown" for v in selected_vendors]
-    drafts       = {name: _make_draft(name, specs) for name in vendor_names}
+    drafts       = {
+        (v.get("vendor_name") or "Unknown"): _make_draft(
+            v.get("vendor_name") or "Unknown", specs,
+            request_contact=should_request_contact(v),
+        )
+        for v in selected_vendors
+    }
 
     write_audit_log({
         "sourcing_run_id": run_id,

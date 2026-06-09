@@ -6,10 +6,15 @@ vendors in the audit log and returns well-formed draft emails.
 """
 
 import pytest
-from utils.procurement_agent.outreach import initiate_outreach_campaign
+from utils.procurement_agent.outreach import (
+    initiate_outreach_campaign, _make_draft, should_request_contact,
+    CONTACT_NOMINATION_ASK,
+)
 from utils.audit_log import recent_entries
 
 import uuid
+
+_ASK_MARKER = "name, position, and email"  # distinctive phrase from the nomination ask
 
 
 def _run_id() -> str:
@@ -112,3 +117,39 @@ class TestOutreachCampaignReturn:
         assert len(run_entries) == 1
         assert campaign["vendors"] == []
         assert campaign["drafts"] == {}
+
+
+class TestContactNominationAsk:
+    def test_make_draft_includes_ask_when_requested(self):
+        draft = _make_draft("Bay Power", {"manufacturer": "Baldor"}, request_contact=True)
+        assert _ASK_MARKER in draft
+        assert CONTACT_NOMINATION_ASK in draft
+
+    def test_make_draft_omits_ask_by_default(self):
+        draft = _make_draft("Bay Power", {"manufacturer": "Baldor"})
+        assert _ASK_MARKER not in draft
+
+    def test_should_request_contact_predicate(self):
+        # Resolved named primary => do NOT ask (we have the person).
+        assert should_request_contact({"primary_contact_status": "resolved"}) is False
+        # Everything else => ask.
+        for status in ("found_no_email", "none", "bounced", None):
+            assert should_request_contact({"primary_contact_status": status}) is True
+        assert should_request_contact({}) is True       # generic inbox, no primary
+        assert should_request_contact(None) is True
+
+    def test_resolved_primary_draft_has_no_ask(self):
+        vendors = [{"vendor_name": "Bay Power", "primary_contact_status": "resolved"}]
+        campaign = initiate_outreach_campaign(_run_id(), vendors)
+        assert _ASK_MARKER not in campaign["drafts"]["Bay Power"]
+
+    def test_found_no_email_draft_includes_ask(self):
+        vendors = [{"vendor_name": "EMW", "primary_contact_status": "found_no_email"}]
+        campaign = initiate_outreach_campaign(_run_id(), vendors)
+        assert _ASK_MARKER in campaign["drafts"]["EMW"]
+
+    def test_generic_inbox_fallback_draft_includes_ask(self):
+        # No primary contact at all -> generic-inbox fallback -> ask.
+        vendors = [{"vendor_name": "Standard Electric"}]
+        campaign = initiate_outreach_campaign(_run_id(), vendors)
+        assert _ASK_MARKER in campaign["drafts"]["Standard Electric"]
