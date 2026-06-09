@@ -42,11 +42,11 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 
 | Field | Detail |
 |---|---|
-| **File** | `utils/procurement_agent/outreach.py`, `utils/sourcing_archieved/tier3_outreach.py` |
+| **File** | `utils/email_sender.py` (canonical), `utils/sourcing_archieved/tier3_outreach.py` (DEAD), `utils/procurement_agent/outreach.py` (returns `email_send_enabled=False` literal) |
 | **Kind** | Hard-coded prototype guard; email send is permanently suppressed at module level |
 | **Why it exists** | Prevents accidental emails to real vendors during prototyping and demos |
-| **Risk / impact** | The Tier 3 "Confirm outreach" UI flow completes and marks vendors as "Awaiting" without any real communication occurring. Silent to the end user. |
-| **Recommended action** | Post-seed: replace the flag with an environment variable (`ARKIM_EMAIL_ENABLED`); add an integration test that stubs SMTP and asserts send is called when the flag is true. |
+| **Risk / impact** | The Tier 3 outreach flow completes and marks vendors "Awaiting" without any real communication. **Flag is now defined in THREE places** (the new clean send layer owns the canonical one; the archived copy is dead-but-imported per §1.1 and was intentionally NOT reused; `outreach.py` returns its own literal). New-clean-abuts-old boundary. |
+| **Recommended action** | Consolidate to the single canonical `utils/email_sender.EMAIL_SEND_ENABLED` (delete the archived copy when `sourcing_archieved/` is retired; have `outreach.py` import the canonical flag). Post-seed: back it with an env var (`ARKIM_EMAIL_ENABLED`) and add an integration test that stubs the provider and asserts `EmailSender.send` is called when the flag is true. Layer 1 (outbound send via `utils/rfq_send.py` + `utils/email_sender.py`) is built behind this flag with Gmail stubbed; the live Gmail wiring is the deliberate next step. |
 
 ---
 
