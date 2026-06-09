@@ -80,6 +80,9 @@ def _migrate_schema() -> None:
                 log.info("_migrate_schema: %s", stmt)
             except Exception:
                 pass  # column already exists
+    # Phase B0 — run-state foundation (document_status). Idempotent/additive.
+    from utils.procurement_agent.state import persistence as _persistence
+    _persistence.migrate_run_state(_engine)
 
 
 _migrate_schema()

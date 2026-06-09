@@ -19,7 +19,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Column, DateTime, Float, ForeignKey, Index, Integer,
-    String, Text, create_engine, event,
+    String, Text, create_engine, event, text,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
@@ -73,6 +73,10 @@ class SourcingRunORM(Base):
     current_phase = Column(String(40), nullable=False, default=Phase.INTAKE.value, index=True)
     urgency_factor = Column(Float, nullable=False, default=0.3)
     warranty_status = Column(String(20), nullable=False, default="unknown")
+    # Phase B0 — the run's document knowledge (state only). "none" = today's default
+    # (document-less direct sourcing). Per-candidate match_basis/match_wave live in
+    # sourcing_results_json (no column needed — it's a JSON blob).
+    document_status = Column(String(20), nullable=False, default="none", server_default="none")
 
     asset_specs_json = Column(Text, nullable=True)       # JSON blob
     inventory_result_json = Column(Text, nullable=True)
@@ -137,6 +141,21 @@ class ApprovalRuleORM(Base):
     )
 
 
+def migrate_run_state(engine) -> None:
+    """Phase B0 additive migration: ensure the document_status column exists on
+    sourcing_runs for pre-B0 databases. Idempotent (guarded ALTER) and additive —
+    existing rows read 'none' (today's behavior). Per-candidate match_basis/match_wave
+    live in the sourcing_results_json blob and need no schema change.
+    """
+    with engine.connect() as conn:
+        try:
+            conn.execute(text(
+                "ALTER TABLE sourcing_runs ADD COLUMN document_status TEXT DEFAULT 'none'"))
+            conn.commit()
+        except Exception:
+            pass  # column already exists — idempotent no-op
+
+
 # Create tables on first import.
 Base.metadata.create_all(_engine)
 
@@ -171,6 +190,7 @@ def _orm_to_dict(row: SourcingRunORM) -> dict:
         "current_phase": row.current_phase,
         "urgency_factor": row.urgency_factor,
         "warranty_status": row.warranty_status,
+        "document_status": getattr(row, "document_status", None) or "none",
         "asset_specs_json": _pj(row.asset_specs_json),
         "inventory_result_json": _pj(row.inventory_result_json),
         "sourcing_results_json": _pj(row.sourcing_results_json),

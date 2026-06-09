@@ -11,6 +11,44 @@ from datetime import datetime
 import uuid
 
 
+# ---------------------------------------------------------------------------
+# Phase B0 — run-state foundation for document-sourcing interleaving (state only).
+# These name the run-state semantics that B3 (mid-run enrichment) and B4 (aftermarket
+# engine) build on. No behavior here — just the vocabulary + defaults that preserve
+# today's semantics.
+# ---------------------------------------------------------------------------
+
+# match_basis (per-candidate): how a result was matched to the requested part.
+MATCH_BASIS_DIRECT = "direct"            # part-number / description match, no datasheet
+MATCH_BASIS_SPEC_MATCHED = "spec_matched"  # matched against an ingested datasheet/spec
+MATCH_BASES = {MATCH_BASIS_DIRECT, MATCH_BASIS_SPEC_MATCHED}
+
+# document_status (per-run): the run's knowledge of the part's document.
+DOCUMENT_STATUS_NONE = "none"            # no document known (today's default)
+DOCUMENT_STATUS_PENDING = "pending"      # a document is being sourced/ingested
+DOCUMENT_STATUS_INGESTED = "ingested"    # a document is available and ingested
+DOCUMENT_STATUSES = {DOCUMENT_STATUS_NONE, DOCUMENT_STATUS_PENDING, DOCUMENT_STATUS_INGESTED}
+
+# Match waves (per-candidate): wave 1 is the initial direct sourcing; a later
+# spec-matched wave (2+) is APPENDED mid-run without discarding wave 1. The append
+# BEHAVIOR is B3; B0 only makes results carry the wave/basis labels.
+MATCH_WAVE_DIRECT = 1                     # the initial direct wave
+
+
+def tag_match_wave(candidates: list, *, match_basis: str = MATCH_BASIS_DIRECT,
+                   wave: int = MATCH_WAVE_DIRECT) -> list:
+    """Structure helper (NOT the append behavior): stamp match_basis/match_wave onto a
+    list of candidate result dicts, returning the same list. Pure — no sourcing, no
+    matching, no run mutation. B3 uses this to label a wave before appending it to a
+    run's results; B0 only guarantees the results structure can carry the labels.
+    """
+    for c in candidates or []:
+        if isinstance(c, dict):
+            c.setdefault("match_basis", match_basis)
+            c.setdefault("match_wave", wave)
+    return candidates
+
+
 @dataclass
 class AssetSpecs:
     manufacturer: str
@@ -117,6 +155,10 @@ class SourcingOption:
     # PN match status from Tier 2 LLM extraction (mirrors Tier 1's found_part_number logic)
     # Values: "exact_match" | "partial_match" | "no_match" | "not_visible" | None (Tier 1)
     pn_match_status: Optional[str] = None
+    # Phase B0 — document-sourcing foundation (state only; defaults preserve today's
+    # behavior — every result today is a direct, wave-1 match).
+    match_basis: str = MATCH_BASIS_DIRECT       # "direct" | "spec_matched"
+    match_wave: int = MATCH_WAVE_DIRECT         # 1 = initial direct wave; 2+ appended later
 
 
 @dataclass
@@ -183,6 +225,10 @@ class SourcingRun:
     current_phase: str = "intake"
     urgency_factor: float = 0.3
     warranty_status: str = "unknown"
+
+    # Phase B0 — the run's knowledge of the part's document (state only; default
+    # "none" = today's behavior, document-less direct sourcing).
+    document_status: str = DOCUMENT_STATUS_NONE
 
     # Phase outputs (populated as the run progresses)
     asset_specs_json: Optional[dict] = None
