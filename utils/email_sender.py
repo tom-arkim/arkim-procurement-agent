@@ -7,13 +7,14 @@ from the send *flow* (utils/rfq_send.py): this module only knows how to hand a
 fully-formed message to a provider and report the result. The provider is Gmail
 (sends as GMAIL_SENDER, default procurement@arkim.ai); the real Gmail API call is
 wired via utils.gmail_client (google libs imported lazily — the suite needs neither
-the libs nor credentials, and EMAIL_SEND_ENABLED stays False).
+the libs nor credentials, and EMAIL_SEND_ENABLED defaults OFF).
 
 Safety (this is the first layer that can take an external action):
-  - EMAIL_SEND_ENABLED is the canonical send gate and stays False. This is a fresh
-    constant owned by the send layer; the identically-named flag in
-    utils/sourcing_archieved/tier3_outreach.py is DEAD code (see CLAUDE.md §6) and
-    is intentionally NOT reused. (CLEANUP notes the duplication.)
+  - EMAIL_SEND_ENABLED is the canonical send gate. It defaults OFF and is opt-in via
+    the environment (set EMAIL_SEND_ENABLED to a truthy value in .env) — a deliberate,
+    documented enabling decision. This is a fresh constant owned by the send layer; the
+    identically-named flag in utils/sourcing_archieved/tier3_outreach.py is DEAD code
+    (see CLAUDE.md §6) and is intentionally NOT reused. (CLEANUP notes the duplication.)
   - While EMAIL_SEND_ENABLED is False, a sender returns a STUBBED SendResult and makes
     ZERO network calls. The double gate (this flag AND the per-draft approval in
     rfq_send) is unchanged.
@@ -44,9 +45,17 @@ from typing import Optional
 
 from utils import gmail_client
 
-# Canonical outbound send gate. MUST stay False until a deliberate, documented
-# enabling decision (legal review of templates + real provider wiring). Owned here.
-EMAIL_SEND_ENABLED: bool = False
+def _env_truthy(value: Optional[str]) -> bool:
+    """Strict opt-in parse: only an explicit truthy token enables. Anything else
+    (None, "", "0", "false", "no", junk) -> False, so the gate fails safe."""
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Canonical outbound send gate. Default OFF; opt-in by setting EMAIL_SEND_ENABLED to a
+# truthy value (1/true/yes/on) in the environment (.env) — a deliberate, documented
+# enabling decision (legal review of templates + real provider wiring). Read once at
+# import; tests force it off via the conftest safety net so no test can send by accident.
+EMAIL_SEND_ENABLED: bool = _env_truthy(os.environ.get("EMAIL_SEND_ENABLED"))
 
 
 @dataclass

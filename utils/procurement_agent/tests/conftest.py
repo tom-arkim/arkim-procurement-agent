@@ -54,6 +54,13 @@ def _neutralize_external_api_keys(monkeypatch):
     for var in ("GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE",
                 "GMAIL_OAUTH_TOKEN_FILE"):
         monkeypatch.setenv(var, "")
+    # The send gate now reads EMAIL_SEND_ENABLED from the env (default off, opt-in). A
+    # real .env can set it True, and pytest loads .env — so force the gate OFF for every
+    # test, deterministically and regardless of import order. No test can send by
+    # accident; a test that needs the live path sets it True explicitly (runs after this
+    # autouse setup and wins).
+    import utils.email_sender as _email_sender
+    monkeypatch.setattr(_email_sender, "EMAIL_SEND_ENABLED", False)
 
 
 @pytest.fixture(scope="function")

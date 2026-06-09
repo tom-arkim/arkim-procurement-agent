@@ -20,7 +20,6 @@ from utils.email_sender import (
     EmailMessage,
     SendResult,
     GmailSender,
-    EMAIL_SEND_ENABLED,
 )
 
 
@@ -32,9 +31,18 @@ def _no_gmail_env(monkeypatch):
 
 
 class TestModuleGate:
-    def test_send_disabled_by_default(self):
-        """The canonical gate ships False — nothing sends without a deliberate flip."""
-        assert EMAIL_SEND_ENABLED is False
+    def test_default_off_opt_in_via_env(self):
+        """The gate is opt-in: only an explicit truthy env value enables it; anything
+        else fails safe (off). This is the source default — nothing sends unless the
+        environment deliberately turns it on."""
+        for off in (None, "", "0", "false", "False", "no", "off", "garbage"):
+            assert es._env_truthy(off) is False, off
+        for on in ("1", "true", "TRUE", "yes", "On"):
+            assert es._env_truthy(on) is True, on
+
+    def test_gate_off_in_tests(self):
+        """The suite is hermetic: the autouse safety net forces the gate off regardless
+        of a real EMAIL_SEND_ENABLED=True in .env, so no test sends by accident."""
         assert es.EMAIL_SEND_ENABLED is False
 
 
