@@ -95,6 +95,7 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **Why it exists** | Prototype uses fixed roles from the request payload; no auth middleware exists yet |
 | **Risk / impact** | Any caller can supply any `approver_role` value. Approval rules are enforced by logic but not by identity verification. Acceptable for prototype demos; not for production. |
 | **Recommended action** | Post-seed: integrate with identity provider; validate `approver_role` against authenticated user claims rather than the request body. |
+| **Interim** | The internal admin/inspector endpoints (`/api/admin/*`) DO have real enforcement: `require_admin` checks an admin bearer token against the server secret `ARKIM_ADMIN_TOKEN` (401 no header / 403 mismatch / 503 fail-closed when unset; constant-time compare). Since there's no login/session yet, possession of the token == admin. This is the smallest real server-side gate; replace with proper auth claims when the identity provider lands. The admin endpoints are read-only; human-review CONFIRM mutations (apply a queued quote/contact) are the obvious next admin-gated addition. |
 
 ### 4.2 Cache suitability defaults hardcoded — `70.0` (rfq) / `50.0` (live)
 

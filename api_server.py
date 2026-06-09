@@ -22,7 +22,9 @@ load_dotenv()
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
 from utils.models import SourcingRun
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile, File
+import secrets
+
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1374,3 +1376,40 @@ def dev_reseed_handoffs():
 
     _seed_demo_maintenance_run()
     return {"ok": True, "deleted": deleted, "reseeded": len(seed_ids)}
+
+
+# ---------------------------------------------------------------------------
+# Internal INSPECTOR / ADMIN surface (read-only, role-gated)
+#
+# REAL enforcement (not a UI toggle): every /api/admin/* endpoint depends on
+# require_admin, which checks an admin bearer token against the server-side secret
+# ARKIM_ADMIN_TOKEN. There is no login/session in this prototype yet (CLEANUP §6:
+# RBAC unenforced), so possession of the admin token IS the admin role — the smallest
+# real server-side gate. A non-admin caller cannot reach admin data even by calling
+# the API directly. Fail-closed: if the server secret is unset, admin is DISABLED.
+# Interim mechanism until real auth lands (noted in CLEANUP).
+# ---------------------------------------------------------------------------
+
+def require_admin(authorization: Optional[str] = Header(default=None)) -> str:
+    """FastAPI dependency enforcing the admin bearer token.
+
+      - server secret ARKIM_ADMIN_TOKEN unset            -> 503 (admin disabled, fail-closed)
+      - no/!bearer Authorization header                  -> 401
+      - token present but != the secret (non-admin)      -> 403
+    Returns the role label on success. Constant-time compare to avoid token leakage.
+    """
+    server_token = os.environ.get("ARKIM_ADMIN_TOKEN") or ""
+    if not server_token:
+        raise HTTPException(status_code=503, detail="Admin surface disabled (ARKIM_ADMIN_TOKEN unset)")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing admin bearer token")
+    presented = authorization[len("Bearer "):].strip()
+    if not secrets.compare_digest(presented, server_token):
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return "admin"
+
+
+@app.get("/api/admin/ping")
+def admin_ping(role: str = Depends(require_admin)):
+    """Liveness probe proving the admin gate works (admin -> 200; else 401/403/503)."""
+    return {"ok": True, "role": role}
