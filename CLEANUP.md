@@ -46,7 +46,15 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **Kind** | Hard-coded prototype guard; email send is permanently suppressed at module level |
 | **Why it exists** | Prevents accidental emails to real vendors during prototyping and demos |
 | **Risk / impact** | The Tier 3 outreach flow completes and marks vendors "Awaiting" without any real communication. **Flag is now defined in THREE places** (the new clean send layer owns the canonical one; the archived copy is dead-but-imported per §1.1 and was intentionally NOT reused; `outreach.py` returns its own literal). New-clean-abuts-old boundary. |
-| **Recommended action** | Consolidate to the single canonical `utils/email_sender.EMAIL_SEND_ENABLED` (delete the archived copy when `sourcing_archieved/` is retired; have `outreach.py` import the canonical flag). Post-seed: back it with an env var (`ARKIM_EMAIL_ENABLED`) and add an integration test that stubs the provider and asserts `EmailSender.send` is called when the flag is true. Layer 1 (outbound send via `utils/rfq_send.py` + `utils/email_sender.py`) is built behind this flag with Gmail stubbed; the live Gmail wiring is the deliberate next step. |
+| **Recommended action** | Consolidate to the single canonical `utils/email_sender.EMAIL_SEND_ENABLED` (delete the archived copy when `sourcing_archieved/` is retired; have `outreach.py` import the canonical flag). Post-seed: back it with an env var and add an integration test that stubs the provider and asserts `EmailSender.send` is called when the flag is true. |
+| **Status** | The REAL Gmail API is now wired behind `GmailSender` (send) and `GmailInboxReader` (bounces/replies) via `utils/gmail_client.py` (google libs lazy-imported; creds from env; fail-soft). The flag stays **False** and the suite makes **no** real Gmail call (service mocked, no creds). The double gate (`EMAIL_SEND_ENABLED` AND the per-draft approval in `rfq_send`) is unchanged. |
+
+#### Go-live checklist (NOT executed in the repo — Tom runs this on his machine)
+1. `uv add google-api-python-client google-auth` (the libs are lazy-imported; not yet in `pyproject`).
+2. Provision creds for **procurement@arkim.ai** (Workspace, warmed-up): a service account with domain-wide delegation (scopes `gmail.send`, `gmail.readonly`) → set `GMAIL_SERVICE_ACCOUNT_FILE` (or `_JSON`) and `GMAIL_SENDER=procurement@arkim.ai`. (Or an authorized-user token via `GMAIL_OAUTH_TOKEN_FILE`.) **Never commit creds.**
+3. Flip `EMAIL_SEND_ENABLED = True`.
+4. **First real send is to SELF** — procurement@arkim.ai → Tom's own inboxes across providers (Gmail/Outlook/etc.) — to verify auth + deliverability (SPF/DKIM/DMARC land **in-inbox, not spam**), and that `message_id`/`thread_id` populate so a self-reply matches via `fetch_replies`.
+5. Only after the self-send checks out: send to a real supplier.
 
 ---
 

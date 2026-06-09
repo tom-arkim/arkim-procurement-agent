@@ -32,10 +32,13 @@ class TestFetchRepliesStubbed:
         monkeypatch.setattr(email_sender, "EMAIL_SEND_ENABLED", True)
         assert GmailInboxReader(credentials=None).fetch_replies() == []
 
-    def test_live_path_unwired_raises(self, monkeypatch):
+    def test_live_path_no_creds_returns_empty(self, monkeypatch):
+        # Wired now: flag True but no Gmail service available -> [] (no crash, no raise).
+        for var in ("GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE",
+                    "GMAIL_OAUTH_TOKEN_FILE"):
+            monkeypatch.delenv(var, raising=False)
         monkeypatch.setattr(email_sender, "EMAIL_SEND_ENABLED", True)
-        with pytest.raises(NotImplementedError):
-            GmailInboxReader(credentials=object()).fetch_replies()
+        assert GmailInboxReader().fetch_replies() == []
 
     def test_base_reader_default_is_empty(self):
         # A bounce-only reader (implements just fetch_bounces) still instantiates and

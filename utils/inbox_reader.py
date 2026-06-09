@@ -2,16 +2,16 @@
 utils/inbox_reader.py
 Inbound mail READ interface (Layer 2, inbound-bounce only) — provider-agnostic.
 
-The read-side mirror of utils/email_sender.py: it knows how to pull bounce
-notifications (DSNs) out of the Arkim sourcing inbox and hand them to the bounce
-processor. The provider is Gmail, but the actual Gmail read is STUBBED here — no
-live wiring, no network, no real inbox access in this layer (same discipline as
-GmailSender).
+The read-side mirror of utils/email_sender.py: it pulls bounce DSNs (Layer 2) and RFQ
+replies (Layer 3) out of the Arkim sourcing inbox and feeds them to the existing
+parser/processor pipeline (unchanged). The provider is Gmail, wired via
+utils.gmail_client (google libs lazy-imported; the suite needs neither the libs nor
+credentials and makes no real Gmail call — the service is injected/mocked in tests).
 
-Gating mirrors send exactly: the live read path is reachable only when the canonical
-email_sender.EMAIL_SEND_ENABLED is True AND credentials are present. While gated or
-uncredentialled, fetch_bounces() returns [] and touches ZERO network; the live
-branch raises NotImplementedError rather than faking a read.
+Gating mirrors send: a live read is reachable only when email_sender.EMAIL_SEND_ENABLED
+is True AND a Gmail service is available (env creds or injected). While gated or
+uncredentialled, fetch_bounces()/fetch_replies() return [] and touch ZERO network.
+Fail-soft: any Gmail error returns what was gathered so far, never raises.
 
 BounceNotice is the shared parsed-bounce shape (the DSN parser in
 utils/bounce_parser.py produces these; the processor in utils/bounce_processor.py
@@ -21,11 +21,16 @@ bracket-prefixed logging).
 
 from __future__ import annotations
 
+import base64
+import email as _email
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from email.utils import parseaddr
 from typing import Optional
 
 import utils.email_sender as email_sender
+from utils import gmail_client
 
 
 @dataclass
@@ -97,37 +102,134 @@ class GmailInboxReader(InboxReader):
     deliberate next step.
     """
 
-    def __init__(self, credentials: Optional[object] = None):
+    def __init__(self, credentials: Optional[object] = None,
+                 service: Optional[object] = None):
+        # `credentials` retained for interface back-compat; the real path builds a
+        # service from env (gmail_client) or uses an injected `service` (tests).
         self._credentials = credentials
+        self._service = service
 
     @property
     def configured(self) -> bool:
-        """True only when the canonical gate is on AND credentials are present."""
-        return bool(email_sender.EMAIL_SEND_ENABLED and self._credentials)
+        """True only when the gate is on AND a read path is available (injected
+        service/credentials, or env-configured credentials)."""
+        env = any(os.environ.get(v) for v in (
+            "GMAIL_SERVICE_ACCOUNT_JSON", "GMAIL_SERVICE_ACCOUNT_FILE", "GMAIL_OAUTH_TOKEN_FILE"))
+        return bool(email_sender.EMAIL_SEND_ENABLED and (self._service or self._credentials or env))
+
+    # ------------------------------------------------------------------
+    # Live Gmail reads. Gated like send (flag off / no creds -> [], zero network).
+    # The parsing/matching/extraction logic (Layers 2/3) is UNCHANGED — these only
+    # feed real inbox messages into it. Fail-soft: any error returns what we have.
+    # ------------------------------------------------------------------
+
+    def _service_or_none(self, kind: str):
+        if not email_sender.EMAIL_SEND_ENABLED:
+            print(f"[InboxReader] STUBBED (EMAIL_SEND_ENABLED=False) -> 0 {kind}")
+            return None
+        service = self._service or gmail_client.build_gmail_service()
+        if service is None:
+            print(f"[InboxReader] no Gmail credentials -> 0 {kind}")
+        return service
+
+    @staticmethod
+    def _get_raw(service, msg_id: str) -> tuple:
+        """Fetch a message as raw RFC822 text + its Gmail threadId. (None, None) on error."""
+        try:
+            resp = service.users().messages().get(
+                userId="me", id=msg_id, format="raw").execute()
+            raw_b64 = resp.get("raw")
+            if not raw_b64:
+                return None, None
+            text = base64.urlsafe_b64decode(raw_b64).decode("utf-8", errors="replace")
+            return text, resp.get("threadId")
+        except Exception as exc:
+            print(f"[InboxReader] get message {msg_id} failed: {type(exc).__name__}: {exc}")
+            return None, None
 
     def fetch_bounces(self) -> list[BounceNotice]:
-        if not email_sender.EMAIL_SEND_ENABLED:
-            print("[InboxReader] STUBBED (EMAIL_SEND_ENABLED=False) -> 0 bounces")
+        from utils.bounce_parser import parse_bounce  # lazy (parser imports BounceNotice)
+        service = self._service_or_none("bounces")
+        if service is None:
             return []
-        if not self._credentials:
-            print("[InboxReader] STUBBED (no Gmail credentials) -> 0 bounces")
-            return []
-        # Live path — intentionally not wired. Fail loud rather than fake a read.
-        raise NotImplementedError(
-            "GmailInboxReader live read is not wired yet — live Gmail inbox access "
-            "and DSN fetching are a deliberate separate step."
+        notices: list[BounceNotice] = []
+        try:
+            q = 'from:mailer-daemon OR from:postmaster subject:"Delivery Status Notification"'
+            listed = service.users().messages().list(userId="me", q=q).execute()
+            for m in listed.get("messages", []) or []:
+                raw, _thread = self._get_raw(service, m.get("id"))
+                if not raw:
+                    continue
+                notice = parse_bounce(raw)
+                if notice:
+                    notices.append(notice)
+        except Exception as exc:
+            print(f"[InboxReader] fetch_bounces failed: {type(exc).__name__}: {exc}")
+        return notices
+
+    @staticmethod
+    def _parse_reply(raw: str, thread_id: Optional[str]) -> Optional[ReplyNotice]:
+        """Parse a raw RFC822 reply into a ReplyNotice (sender, ids, body, attachments).
+        Pure/testable. None on a malformed/sender-less message."""
+        try:
+            msg = _email.message_from_string(raw)
+        except Exception:
+            return None
+        sender = parseaddr(msg.get("From") or "")[1]
+        if not sender:
+            return None
+
+        def _strip(v):
+            return (v or "").strip().strip("<>").strip() or None
+
+        body = ""
+        attachments: list = []
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_maintype() == "multipart":
+                    continue
+                ctype = part.get_content_type()
+                disp = (part.get("Content-Disposition") or "").lower()
+                filename = part.get_filename()
+                if filename or "attachment" in disp:
+                    attachments.append({"filename": filename, "content_type": ctype,
+                                        "data": part.get_payload(decode=True)})
+                elif ctype == "text/plain" and not body:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        body = payload.decode(part.get_content_charset() or "utf-8",
+                                              errors="replace")
+        else:
+            payload = msg.get_payload(decode=True)
+            body = (payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+                    if payload else (msg.get_payload() or ""))
+
+        return ReplyNotice(
+            sender=sender,
+            message_id=_strip(msg.get("Message-ID")),
+            thread_id=thread_id,
+            in_reply_to=_strip(msg.get("In-Reply-To")),
+            subject=msg.get("Subject"),
+            body=body,
+            attachments=attachments,
         )
 
     def fetch_replies(self) -> list[ReplyNotice]:
-        """Inbound replies to sent RFQs. STUBBED identically to fetch_bounces:
-        [] while gated/uncredentialled (zero network); live branch unwired."""
-        if not email_sender.EMAIL_SEND_ENABLED:
-            print("[InboxReader] STUBBED (EMAIL_SEND_ENABLED=False) -> 0 replies")
+        service = self._service_or_none("replies")
+        if service is None:
             return []
-        if not self._credentials:
-            print("[InboxReader] STUBBED (no Gmail credentials) -> 0 replies")
-            return []
-        raise NotImplementedError(
-            "GmailInboxReader live reply read is not wired yet — live Gmail inbox "
-            "access and reply threading are a deliberate separate step."
-        )
+        notices: list[ReplyNotice] = []
+        try:
+            # Inbox messages that aren't bounces (DSNs are handled by fetch_bounces).
+            q = "in:inbox -from:mailer-daemon -from:postmaster"
+            listed = service.users().messages().list(userId="me", q=q).execute()
+            for m in listed.get("messages", []) or []:
+                raw, thread_id = self._get_raw(service, m.get("id"))
+                if not raw:
+                    continue
+                notice = self._parse_reply(raw, thread_id)
+                if notice:
+                    notices.append(notice)
+        except Exception as exc:
+            print(f"[InboxReader] fetch_replies failed: {type(exc).__name__}: {exc}")
+        return notices
