@@ -1501,3 +1501,112 @@ def admin_prices(role: str = Depends(require_admin)):
         for vendor, data in (vendors or {}).items():
             items.append({"key": key, "vendor": vendor, **(data or {})})
     return {"count": len(items), "prices": items, "raw": db}
+
+
+# ---------------------------------------------------------------------------
+# Order lifecycle endpoints (wires utils/orders.py via ProcurementAgent).
+#
+# Buyer/run-scoped actions (execute, mark-delivered, list) follow the existing
+# ungated run-endpoint convention (no user auth yet — CLEANUP §4.1). The ops-only
+# mutations (arbitrary status transition, cancel) are admin-gated (require_admin) so
+# they aren't open. No external actions (no payment/PO/email/Apollo).
+# ---------------------------------------------------------------------------
+
+class OrderStatusRequest(BaseModel):
+    status: str
+
+
+class OrderCancelRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+def _run_model_for(run_id: str):
+    """Build a SourcingRun dataclass from the persisted run, or None if absent."""
+    import dataclasses
+    from utils.procurement_agent.state import persistence
+    d = persistence.get_run(run_id)
+    if d is None:
+        return None
+    fields = {f.name for f in dataclasses.fields(SourcingRun)}
+    return SourcingRun(**{k: v for k, v in d.items() if k in fields})
+
+
+def _persist_order_on_run(run_id: str, order: Optional[dict]) -> None:
+    """Persist the captured order's id/status back onto the run (vendor_order_id /
+    fulfillment_status — the existing placeholder columns)."""
+    if not order:
+        return
+    with _SessionFactory() as session:
+        row = session.get(SourcingRunORM, run_id)
+        if row:
+            row.vendor_order_id = order.get("id")
+            row.fulfillment_status = order.get("status")
+            row.updated_at = datetime.now(timezone.utc)
+            session.commit()
+
+
+@app.post("/api/runs/{run_id}/execute")
+def execute_order(run_id: str):
+    """Confirmed commit (post-approval): capture + place a durable order from the
+    approved selection. Run-scoped (matches approve/select). No external actions."""
+    from utils.procurement_agent.agents.procurement_agent import ProcurementAgent
+    run_model = _run_model_for(run_id)
+    if run_model is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    result = ProcurementAgent().run(run_model, "execute")
+    _persist_order_on_run(run_id, result.get("order"))
+    return result
+
+
+@app.post("/api/runs/{run_id}/mark-delivered")
+def mark_delivered(run_id: str):
+    """Confirm receipt — advances the run's order to received via the state machine."""
+    from utils.procurement_agent.agents.procurement_agent import ProcurementAgent
+    run_model = _run_model_for(run_id)
+    if run_model is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    result = ProcurementAgent().run(run_model, "mark_delivered")
+    _persist_order_on_run(run_id, result.get("order"))
+    return result
+
+
+@app.get("/api/runs/{run_id}/orders")
+def list_run_orders(run_id: str):
+    """Orders captured for this run (run-scoped view)."""
+    from utils import orders
+    rows = orders.get_orders(run_id=run_id)
+    return {"run_id": run_id, "count": len(rows), "orders": rows}
+
+
+@app.post("/api/admin/orders/{order_id}/status")
+def admin_update_order_status(order_id: str, body: OrderStatusRequest,
+                              role: str = Depends(require_admin)):
+    """Ops lifecycle transition (confirmed/shipped/received), state-machine enforced.
+    Placement and cancellation have dedicated paths (execute / cancel) -> rejected here."""
+    from utils import orders
+    updated = orders.update_order_status(order_id, body.status)
+    if updated is None:
+        existing = orders.get_order(order_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Order not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"Illegal transition to '{body.status}' from '{existing.get('status')}' "
+                   f"(use /execute to place, /cancel to cancel)",
+        )
+    return updated
+
+
+@app.post("/api/admin/orders/{order_id}/cancel")
+def admin_cancel_order(order_id: str, body: OrderCancelRequest,
+                       role: str = Depends(require_admin)):
+    """Ops off-ramp — cancel from any pre-received state (state-machine enforced)."""
+    from utils import orders
+    cancelled = orders.cancel_order(order_id, reason=body.reason)
+    if cancelled is None:
+        existing = orders.get_order(order_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Order not found")
+        raise HTTPException(status_code=409,
+                            detail=f"Cannot cancel from '{existing.get('status')}'")
+    return cancelled

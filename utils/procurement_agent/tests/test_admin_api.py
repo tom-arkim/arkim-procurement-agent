@@ -158,3 +158,90 @@ class TestAdminDataEndpoints:
         after = (len(orders.get_orders()), len(sr.get_sent_messages()),
                  len(sr.get_review_items()), len(sr.all_entries()), len(price_db.all_entries()))
         assert before == after   # GETs mutated nothing
+
+
+# ---------------------------------------------------------------------------
+# Order lifecycle endpoints (execute / mark-delivered / list ; admin status/cancel)
+# ---------------------------------------------------------------------------
+
+_SPECS = {"manufacturer": "Baldor", "part_number": "EM3770T", "model": "EM3770T"}
+_BUY_SELECTION = {"vendor_name": "Global Industrial", "base_price": 1799.0,
+                  "source_url": "https://www.globalindustrial.com/p/x", "lead_time_days": 3}
+
+
+def _make_approved_run(selection: dict) -> str:
+    from utils.procurement_agent.state import persistence
+    run = persistence.create_run(asset_specs=_SPECS)
+    persistence.update_run(run["id"], {
+        "selected_candidate_json": selection,
+        "approval_history_json": [{"action": "approved", "approver_name": "Maintenance Director"}],
+        "current_phase": "approved",
+    })
+    return run["id"]
+
+
+class TestOrderEndpoints:
+    def test_buyer_loop_end_to_end_execute_places_order(self, admin_api):
+        """select -> approve -> execute -> a durable PLACED order (not a stub)."""
+        run_id = _make_approved_run(_BUY_SELECTION)
+        r = admin_api.post(f"/api/runs/{run_id}/execute")   # run-scoped, ungated
+        assert r.status_code == 200
+        body = r.json()
+        assert "stub" not in body and body["placed"] is True
+        assert body["order"]["status"] == "placed"
+        assert body["order"]["unit_price"] == 1799.0
+        assert body["order"]["placed_by"] == "Maintenance Director"
+
+        # Persisted onto the run + retrievable via the run-scoped list.
+        listed = admin_api.get(f"/api/runs/{run_id}/orders").json()
+        assert listed["count"] == 1 and listed["orders"][0]["status"] == "placed"
+
+    def test_execute_without_price_stays_draft(self, admin_api):
+        run_id = _make_approved_run({"vendor_name": "Nobody", "price_tbd": True})
+        body = admin_api.post(f"/api/runs/{run_id}/execute").json()
+        assert body["placed"] is False and body["order"]["status"] == "draft"
+
+    def test_execute_unknown_run_404(self, admin_api):
+        assert admin_api.post("/api/runs/nope/execute").status_code == 404
+
+    def test_admin_status_update_enforces_machine(self, admin_api):
+        run_id = _make_approved_run(_BUY_SELECTION)
+        oid = admin_api.post(f"/api/runs/{run_id}/execute").json()["order"]["id"]
+
+        # legal placed -> confirmed
+        r = admin_api.post(f"/api/admin/orders/{oid}/status",
+                           json={"status": "confirmed"}, headers=_auth(_TOKEN))
+        assert r.status_code == 200 and r.json()["status"] == "confirmed"
+        # illegal confirmed -> received (skip shipped)
+        r = admin_api.post(f"/api/admin/orders/{oid}/status",
+                           json={"status": "received"}, headers=_auth(_TOKEN))
+        assert r.status_code == 409
+
+    def test_admin_status_and_cancel_are_gated(self, admin_api):
+        run_id = _make_approved_run(_BUY_SELECTION)
+        oid = admin_api.post(f"/api/runs/{run_id}/execute").json()["order"]["id"]
+        # no token / wrong token rejected at the API
+        assert admin_api.post(f"/api/admin/orders/{oid}/status",
+                              json={"status": "confirmed"}).status_code == 401
+        assert admin_api.post(f"/api/admin/orders/{oid}/cancel", json={},
+                              headers=_auth("nope")).status_code == 403
+
+    def test_admin_cancel_then_blocks_recancel(self, admin_api):
+        run_id = _make_approved_run(_BUY_SELECTION)
+        oid = admin_api.post(f"/api/runs/{run_id}/execute").json()["order"]["id"]
+        r = admin_api.post(f"/api/admin/orders/{oid}/cancel",
+                           json={"reason": "supplier backordered"}, headers=_auth(_TOKEN))
+        assert r.status_code == 200 and r.json()["status"] == "cancelled"
+        # cancelled is terminal -> further transition rejected
+        r2 = admin_api.post(f"/api/admin/orders/{oid}/status",
+                            json={"status": "confirmed"}, headers=_auth(_TOKEN))
+        assert r2.status_code == 409
+
+    def test_mark_delivered_through_machine(self, admin_api):
+        run_id = _make_approved_run(_BUY_SELECTION)
+        oid = admin_api.post(f"/api/runs/{run_id}/execute").json()["order"]["id"]
+        for s in ("confirmed", "shipped"):
+            admin_api.post(f"/api/admin/orders/{oid}/status",
+                           json={"status": s}, headers=_auth(_TOKEN))
+        r = admin_api.post(f"/api/runs/{run_id}/mark-delivered")
+        assert r.status_code == 200 and r.json()["order"]["status"] == "received"
