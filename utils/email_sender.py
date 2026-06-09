@@ -30,10 +30,14 @@ fail-soft by contract.
 from __future__ import annotations
 
 import base64
+import mimetypes
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import make_msgid
 from typing import Optional
@@ -46,18 +50,44 @@ EMAIL_SEND_ENABLED: bool = False
 
 
 @dataclass
+class EmailAttachment:
+    """One file part for an outbound message (e.g. a quote/RFQ PDF).
+
+    Held in memory as bytes so the build/encode path is pure and unit-testable
+    without disk I/O. `mime_type` is split into maintype/subtype for the MIME part;
+    it defaults to a generic binary type when unknown.
+    """
+    filename: str
+    content: bytes
+    mime_type: str = "application/octet-stream"
+
+    @classmethod
+    def from_path(cls, path: str, filename: Optional[str] = None) -> "EmailAttachment":
+        """Read a file from disk into an attachment, guessing the MIME type from its
+        extension. `filename` overrides the displayed name (defaults to the basename)."""
+        with open(path, "rb") as fh:
+            content = fh.read()
+        guessed, _ = mimetypes.guess_type(path)
+        return cls(filename=filename or os.path.basename(path), content=content,
+                   mime_type=guessed or "application/octet-stream")
+
+
+@dataclass
 class EmailMessage:
     """One outbound message addressed to a supplier's recipient set.
 
     `metadata` carries the keys later inbound matching (bounce/quote ingestion)
     keys on: run_id, supplier_domain, rfq_id. `to`/`cc` are the assembled recipient
     set (named primary in `to`, generic inbox in `cc`, per the recipient-set rule).
+    `attachments`, when non-empty, makes the built message multipart/mixed (the body
+    text part first, then each file part); empty keeps the single text/plain message.
     """
     to: list[str]
     subject: str
     body: str
     cc: list[str] = field(default_factory=list)
     metadata: dict = field(default_factory=dict)
+    attachments: list[EmailAttachment] = field(default_factory=list)
 
     @property
     def all_recipients(self) -> list[str]:
@@ -138,8 +168,24 @@ class GmailSender(EmailSender):
 
         The Message-ID is deterministic from the rfq_id when present, so a later bounce
         DSN (whose In-Reply-To references it) matches the sent_messages row.
+
+        With no attachments the message is a single text/plain part (unchanged). With
+        attachments it becomes multipart/mixed: the body text first, then one base64-
+        encoded file part per attachment.
         """
-        mime = MIMEText(message.body or "")
+        body_part = MIMEText(message.body or "")
+        if message.attachments:
+            mime: MIMEText | MIMEMultipart = MIMEMultipart("mixed")
+            mime.attach(body_part)
+            for att in message.attachments:
+                maintype, _, subtype = (att.mime_type or "application/octet-stream").partition("/")
+                part = MIMEBase(maintype, subtype or "octet-stream")
+                part.set_payload(att.content)
+                encoders.encode_base64(part)
+                part.add_header("Content-Disposition", "attachment", filename=att.filename)
+                mime.attach(part)
+        else:
+            mime = body_part
         mime["To"] = ", ".join(message.to)
         if message.cc:
             mime["Cc"] = ", ".join(message.cc)

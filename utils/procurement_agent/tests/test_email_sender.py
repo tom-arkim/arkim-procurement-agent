@@ -8,11 +8,20 @@ crash); the real Gmail path is exercised only through a MOCKED service (no real 
 no google libs, no network in the suite).
 """
 
+import base64
+import email
+
 import pytest
 from unittest.mock import MagicMock
 
 import utils.email_sender as es
-from utils.email_sender import EmailMessage, SendResult, GmailSender, EMAIL_SEND_ENABLED
+from utils.email_sender import (
+    EmailAttachment,
+    EmailMessage,
+    SendResult,
+    GmailSender,
+    EMAIL_SEND_ENABLED,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -104,3 +113,72 @@ class TestGmailSenderStubbed:
         import sys
         assert "googleapiclient" not in sys.modules
         assert "google.oauth2" not in sys.modules
+
+
+def _decode_sent_mime(send_mock) -> email.message.Message:
+    """Pull the base64url `raw` body off the mocked Gmail send call and parse it back
+    into an email.message.Message so the wire MIME can be asserted on."""
+    raw = send_mock.call_args.kwargs["body"]["raw"]
+    return email.message_from_bytes(base64.urlsafe_b64decode(raw))
+
+
+class TestAttachments:
+    def test_attachments_default_empty(self):
+        msg = EmailMessage(to=["a@x.com"], subject="s", body="b")
+        assert msg.attachments == []
+
+    def test_from_path_reads_bytes_and_guesses_mime(self, tmp_path):
+        pdf = tmp_path / "quote.pdf"
+        pdf.write_bytes(b"%PDF-1.4 fake pdf bytes")
+        att = EmailAttachment.from_path(str(pdf))
+        assert att.filename == "quote.pdf"
+        assert att.content == b"%PDF-1.4 fake pdf bytes"
+        assert att.mime_type == "application/pdf"
+
+    def test_from_path_unknown_extension_is_octet_stream(self, tmp_path):
+        blob = tmp_path / "part.bin"
+        blob.write_bytes(b"\x00\x01\x02")
+        assert EmailAttachment.from_path(str(blob)).mime_type == "application/octet-stream"
+
+    def test_no_attachment_is_single_text_part(self, monkeypatch):
+        """Regression: without attachments the wire message stays single text/plain."""
+        monkeypatch.setattr(es, "EMAIL_SEND_ENABLED", True)
+        service = MagicMock()
+        send = service.users.return_value.messages.return_value.send
+        send.return_value.execute.return_value = {"id": "g1", "threadId": "T1"}
+        GmailSender(service=service).send(
+            EmailMessage(to=["jane@x.com"], subject="s", body="hello")
+        )
+        parsed = _decode_sent_mime(send)
+        assert not parsed.is_multipart()
+        assert parsed.get_content_type() == "text/plain"
+
+    def test_live_path_sends_pdf_attachment_via_mocked_client(self, monkeypatch):
+        """Flag True + injected MOCKED service => multipart/mixed send carrying the PDF.
+        The body text is preserved and the file part is base64 with the right filename.
+        No real Gmail call."""
+        monkeypatch.setattr(es, "EMAIL_SEND_ENABLED", True)
+        service = MagicMock()
+        send = service.users.return_value.messages.return_value.send
+        send.return_value.execute.return_value = {"id": "g1", "threadId": "T1"}
+
+        msg = EmailMessage(
+            to=["jane@x.com"], subject="Arkim RFQ", body="Please quote.",
+            attachments=[EmailAttachment("quote.pdf", b"%PDF-1.4 body", "application/pdf")],
+            metadata={"rfq_id": "rfq1"},
+        )
+        res = GmailSender(service=service).send(msg)
+
+        assert res.status == "sent"
+        parsed = _decode_sent_mime(send)
+        assert parsed.is_multipart()
+
+        body_parts = [p for p in parsed.walk() if p.get_content_type() == "text/plain"]
+        assert any("Please quote." in p.get_payload(decode=True).decode() for p in body_parts)
+
+        pdf_parts = [p for p in parsed.walk() if p.get_filename() == "quote.pdf"]
+        assert len(pdf_parts) == 1
+        part = pdf_parts[0]
+        assert part.get_content_type() == "application/pdf"
+        assert part.get("Content-Transfer-Encoding") == "base64"
+        assert part.get_payload(decode=True) == b"%PDF-1.4 body"
