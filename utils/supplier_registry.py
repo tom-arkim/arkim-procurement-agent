@@ -110,6 +110,30 @@ CREATE TABLE IF NOT EXISTS sent_messages (
 );
 """
 
+# Human-review queue for inbound-extracted data (Layer 3). Extraction NEVER updates
+# the platform directly — it lands here as a "pending" (or "needs_human_review") row;
+# a human confirm applies it (price_db for quotes, primary contact for contacts) and a
+# reject discards it. kind = "quote" | "contact". payload_json holds the extracted
+# Quote / NominatedContact dict. manufacturer/part_number are captured so a confirmed
+# quote can key price_db.
+_REVIEW_ITEMS_DDL = """
+CREATE TABLE IF NOT EXISTS review_items (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    run_id          TEXT,
+    supplier_domain TEXT,
+    vendor_name     TEXT,
+    manufacturer    TEXT,
+    part_number     TEXT,
+    payload_json    TEXT,
+    confidence      REAL,
+    raw_source      TEXT,
+    created_at      TEXT NOT NULL,
+    resolved_at     TEXT
+);
+"""
+
 # Apollo enrichment columns added by _migrate(). All nullable so the migration is
 # a safe ALTER TABLE ADD COLUMN on existing rows (no default backfill needed).
 # Column -> SQLite type. JSON-valued columns are stored as TEXT.
@@ -220,6 +244,7 @@ def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(_DB_PATH)
     conn.execute(_DDL)
     conn.execute(_SENT_MESSAGES_DDL)
+    conn.execute(_REVIEW_ITEMS_DDL)
     conn.commit()
     _migrate(conn)
     _maybe_seed(conn)
@@ -741,6 +766,109 @@ def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_D
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
     return (datetime.utcnow() - dt) > timedelta(days=ttl_days)
+
+
+def record_review_item(
+    kind: str,
+    payload: dict,
+    *,
+    status: str = "pending",
+    run_id: Optional[str] = None,
+    supplier_domain: Optional[str] = None,
+    vendor_name: Optional[str] = None,
+    manufacturer: Optional[str] = None,
+    part_number: Optional[str] = None,
+    confidence: Optional[float] = None,
+    raw_source: Optional[str] = None,
+) -> Optional[str]:
+    """Queue one inbound-extracted item (kind="quote"|"contact") for human review.
+
+    NOTHING is applied to the platform here — this only records the extracted payload
+    so a human can confirm/reject later. Returns the new row id, or None on failure
+    (fail-soft)."""
+    domain = _normalize_domain(supplier_domain) if supplier_domain else None
+    now = datetime.utcnow().isoformat()
+    row = (
+        str(uuid.uuid4()), kind, status, run_id, domain, vendor_name,
+        manufacturer, part_number, json.dumps(payload or {}),
+        confidence, raw_source, now, None,
+    )
+    try:
+        conn = _get_conn()
+        conn.execute(
+            """INSERT INTO review_items
+               (id, kind, status, run_id, supplier_domain, vendor_name, manufacturer,
+                part_number, payload_json, confidence, raw_source, created_at, resolved_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            row,
+        )
+        conn.commit()
+        print(f"[SupplierRegistry] Review item queued: {kind} status={status} "
+              f"({vendor_name} / {domain})")
+        return row[0]
+    except Exception as exc:
+        print(f"[SupplierRegistry] record_review_item failed: {exc}")
+        return None
+
+
+def _row_to_review_item(r: sqlite3.Row) -> dict:
+    d = dict(r)
+    try:
+        d["payload"] = json.loads(d.get("payload_json") or "{}")
+    except (ValueError, TypeError):
+        d["payload"] = {}
+    return d
+
+
+def get_review_items(
+    status: Optional[str] = None, kind: Optional[str] = None,
+    run_id: Optional[str] = None,
+) -> list[dict]:
+    """Return review-queue rows (newest first), optionally filtered. payload_json is
+    decoded into `payload`. Fail-soft: [] on error."""
+    clauses: list[str] = []
+    params: list = []
+    for col, val in (("status", status), ("kind", kind), ("run_id", run_id)):
+        if val is not None:
+            clauses.append(f"{col} = ?")
+            params.append(val)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    try:
+        conn = _get_conn()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM review_items{where} ORDER BY created_at DESC", params
+        ).fetchall()
+        return [_row_to_review_item(r) for r in rows]
+    except Exception as exc:
+        print(f"[SupplierRegistry] get_review_items failed: {exc}")
+        return []
+
+
+def get_review_item(item_id: str) -> Optional[dict]:
+    """Return one review item by id (payload decoded), or None."""
+    try:
+        conn = _get_conn()
+        conn.row_factory = sqlite3.Row
+        r = conn.execute("SELECT * FROM review_items WHERE id = ?", (item_id,)).fetchone()
+        return _row_to_review_item(r) if r else None
+    except Exception:
+        return None
+
+
+def set_review_item_status(item_id: str, status: str) -> bool:
+    """Set a review item's status (e.g. confirmed/rejected) + stamp resolved_at."""
+    try:
+        conn = _get_conn()
+        cur = conn.execute(
+            "UPDATE review_items SET status = ?, resolved_at = ? WHERE id = ?",
+            (status, datetime.utcnow().isoformat(), item_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as exc:
+        print(f"[SupplierRegistry] set_review_item_status failed: {exc}")
+        return False
 
 
 def all_entries() -> list[dict]:
