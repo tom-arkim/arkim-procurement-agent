@@ -76,6 +76,30 @@ CREATE TABLE IF NOT EXISTS suppliers (
 );
 """
 
+# Sent-message log (one row per outbound RFQ send attempt — many per supplier).
+# Lives alongside the contact data so later inbound matching (bounce/quote
+# ingestion) can join on supplier_domain / thread_id. status is "sent" (live, not
+# reachable yet) or "stubbed" (gated/no-creds). message_id/thread_id are provider
+# placeholders (NULL) until the live provider returns real ids.
+_SENT_MESSAGES_DDL = """
+CREATE TABLE IF NOT EXISTS sent_messages (
+    id                 TEXT PRIMARY KEY,
+    run_id             TEXT,
+    supplier_domain    TEXT,
+    vendor_name        TEXT,
+    recipients_to_json TEXT,
+    recipients_cc_json TEXT,
+    subject            TEXT,
+    body               TEXT,
+    message_id         TEXT,
+    thread_id          TEXT,
+    status             TEXT NOT NULL,
+    approved_by        TEXT,
+    sent_at            TEXT NOT NULL,
+    created_at         TEXT NOT NULL
+);
+"""
+
 # Apollo enrichment columns added by _migrate(). All nullable so the migration is
 # a safe ALTER TABLE ADD COLUMN on existing rows (no default backfill needed).
 # Column -> SQLite type. JSON-valued columns are stored as TEXT.
@@ -184,6 +208,7 @@ def _get_conn() -> sqlite3.Connection:
     os.makedirs(_DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)
     conn.execute(_DDL)
+    conn.execute(_SENT_MESSAGES_DDL)
     conn.commit()
     _migrate(conn)
     _maybe_seed(conn)
@@ -554,6 +579,127 @@ def effective_contact(record: Optional[dict]) -> dict:
     if record.get("contact_email") and record.get("contact_status") != "bounced":
         return {"email": record["contact_email"], "source": "fallback"}
     return {"email": None, "source": "none"}
+
+
+def recipient_set(record: Optional[dict]) -> dict:
+    """Assemble the To/CC recipient set for one outbound message (data-model only).
+
+    Same precedence as effective_contact, but returns BOTH addresses on one message
+    (the send layer addresses a single email to the set, not two emails):
+      - resolved PRIMARY present -> To: [primary]; CC: [generic] when not bounced.
+      - no usable primary        -> To: [generic] when not bounced.
+      - both bounced / absent     -> empty (caller must NOT send; human-flag).
+    A bounced address (contact_status / primary_contact_status == "bounced") is
+    excluded, reusing the bounce model.
+
+    Returns {"to": list[str], "cc": list[str]}.
+    """
+    to: list[str] = []
+    cc: list[str] = []
+    if not record:
+        return {"to": to, "cc": cc}
+
+    primary = record.get("primary_contact_email")
+    primary_ok = bool(primary) and record.get("primary_contact_status") == "resolved"
+    generic = record.get("contact_email")
+    generic_ok = bool(generic) and record.get("contact_status") != "bounced"
+
+    if primary_ok:
+        to.append(primary)
+        if generic_ok:
+            cc.append(generic)
+    elif generic_ok:
+        to.append(generic)
+    return {"to": to, "cc": cc}
+
+
+def record_sent_message(
+    run_id: Optional[str],
+    supplier_domain: Optional[str],
+    vendor_name: Optional[str],
+    to: list[str],
+    cc: Optional[list[str]] = None,
+    subject: Optional[str] = None,
+    body: Optional[str] = None,
+    status: str = "stubbed",
+    message_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    approved_by: Optional[str] = None,
+    sent_at: Optional[str] = None,
+) -> Optional[str]:
+    """Persist one outbound-send record (the key inbound matching will later join on).
+
+    status is "sent" (live) or "stubbed" (gated/no-creds). message_id/thread_id are
+    provider placeholders (None) until the live provider returns real ids. Returns
+    the new row id, or None on failure (fail-soft — never raises into the flow).
+    """
+    domain = _normalize_domain(supplier_domain) if supplier_domain else None
+    now = datetime.utcnow().isoformat()
+    row = (
+        str(uuid.uuid4()),
+        run_id,
+        domain,
+        vendor_name,
+        json.dumps(to or []),
+        json.dumps(cc or []),
+        subject,
+        body,
+        message_id,
+        thread_id,
+        status,
+        approved_by,
+        sent_at or now,
+        now,
+    )
+    try:
+        conn = _get_conn()
+        conn.execute(
+            """INSERT INTO sent_messages
+               (id, run_id, supplier_domain, vendor_name, recipients_to_json,
+                recipients_cc_json, subject, body, message_id, thread_id, status,
+                approved_by, sent_at, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            row,
+        )
+        conn.commit()
+        print(f"[SupplierRegistry] Sent-message recorded: {vendor_name} ({domain}) status={status}")
+        return row[0]
+    except Exception as exc:
+        print(f"[SupplierRegistry] record_sent_message failed for {domain!r}: {exc}")
+        return None
+
+
+def get_sent_messages(
+    run_id: Optional[str] = None, domain: Optional[str] = None
+) -> list[dict]:
+    """Return sent-message rows, optionally filtered by run_id and/or domain
+    (newest first). JSON recipient columns are decoded into `recipients_to` /
+    `recipients_cc` lists. Fail-soft: returns [] on error."""
+    clauses: list[str] = []
+    params: list = []
+    if run_id is not None:
+        clauses.append("run_id = ?")
+        params.append(run_id)
+    if domain is not None:
+        clauses.append("supplier_domain = ?")
+        params.append(_normalize_domain(domain))
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    try:
+        conn = _get_conn()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM sent_messages{where} ORDER BY created_at DESC", params
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["recipients_to"] = json.loads(d.get("recipients_to_json") or "[]")
+            d["recipients_cc"] = json.loads(d.get("recipients_cc_json") or "[]")
+            out.append(d)
+        return out
+    except Exception as exc:
+        print(f"[SupplierRegistry] get_sent_messages failed: {exc}")
+        return []
 
 
 def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_DAYS) -> bool:

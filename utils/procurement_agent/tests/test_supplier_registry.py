@@ -325,3 +325,84 @@ class TestEffectiveContact:
 
     def test_empty_record(self):
         assert supplier_registry.effective_contact(None) == {"email": None, "source": "none"}
+
+
+# ---------------------------------------------------------------------------
+# recipient_set — To/CC assembly for one outbound message
+# ---------------------------------------------------------------------------
+
+class TestRecipientSet:
+    def test_named_present_to_named_cc_generic(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "resolved",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["jane@x.com"], "cc": ["sales@x.com"]}
+
+    def test_named_absent_generic_only_to(self):
+        rec = {"primary_contact_status": "none",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["sales@x.com"], "cc": []}
+
+    def test_primary_resolved_but_generic_bounced_excludes_generic(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "resolved",
+               "contact_email": None, "contact_status": "bounced"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["jane@x.com"], "cc": []}
+
+    def test_primary_bounced_falls_back_to_generic_to(self):
+        rec = {"primary_contact_email": None, "primary_contact_status": "bounced",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["sales@x.com"], "cc": []}
+
+    def test_both_bounced_empty(self):
+        rec = {"primary_contact_status": "bounced", "contact_email": None, "contact_status": "bounced"}
+        assert supplier_registry.recipient_set(rec) == {"to": [], "cc": []}
+
+    def test_none_record_empty(self):
+        assert supplier_registry.recipient_set(None) == {"to": [], "cc": []}
+
+
+# ---------------------------------------------------------------------------
+# sent_messages — outbound send log (inbound-matching key)
+# ---------------------------------------------------------------------------
+
+class TestSentMessages:
+    def test_table_created(self, isolated_db):
+        conn = isolated_db._get_conn()
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        finally:
+            conn.close()
+        assert "sent_messages" in names
+
+    def test_record_and_fetch_roundtrip(self, isolated_db):
+        sr = isolated_db
+        mid = sr.record_sent_message(
+            run_id="run1", supplier_domain="www.BayPower.com", vendor_name="Bay Power",
+            to=["jane@baypower.com"], cc=["sales@baypower.com"],
+            subject="Quote request", body="hello", status="stubbed",
+            thread_id=None, approved_by="Maintenance Director",
+        )
+        assert mid
+        rows = sr.get_sent_messages(run_id="run1")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["supplier_domain"] == "baypower.com"      # normalized
+        assert row["vendor_name"] == "Bay Power"
+        assert row["recipients_to"] == ["jane@baypower.com"]  # JSON decoded
+        assert row["recipients_cc"] == ["sales@baypower.com"]
+        assert row["status"] == "stubbed"
+        assert row["approved_by"] == "Maintenance Director"
+        assert row["sent_at"]                                 # auto-stamped
+        assert row["message_id"] is None and row["thread_id"] is None  # placeholders
+
+    def test_filter_by_domain(self, isolated_db):
+        sr = isolated_db
+        sr.record_sent_message("run1", "baypower.com", "Bay Power", to=["a@baypower.com"])
+        sr.record_sent_message("run1", "standardelectricsupply.com", "Standard Electric",
+                               to=["b@standardelectricsupply.com"])
+        assert len(sr.get_sent_messages(run_id="run1")) == 2
+        only = sr.get_sent_messages(domain="baypower.com")
+        assert len(only) == 1 and only[0]["vendor_name"] == "Bay Power"
+
+    def test_empty_when_none(self, isolated_db):
+        assert isolated_db.get_sent_messages(run_id="no-such-run") == []
