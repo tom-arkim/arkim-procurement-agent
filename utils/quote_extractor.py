@@ -87,11 +87,30 @@ def _default_complete(system: str, user: str) -> str:
 
 
 def _default_ocr(attachment: dict) -> str:
-    """OCR seam — live PDF->text is not wired (reuse target = the vision pipeline).
-    Tests inject a mock. Fail loud if reached live, rather than fake text."""
-    raise NotImplementedError(
-        "Live PDF OCR is not wired yet — inject ocr_text (it is mocked in tests)."
-    )
+    """Default PDF->text seam: extract the TEXT LAYER of a digitally-generated PDF
+    (pypdf). Covers the common case — supplier quotes on letterhead from reportlab/Word
+    are digital, so the text is present and exact, no true OCR needed.
+
+    Fail-soft by contract: returns "" (never raises) when there is no extractable text
+    — a scanned/image-only PDF, missing/corrupt bytes, or pypdf unavailable. The caller
+    then abstains via _llm_quote (empty text -> None): no crash, no fabricated quote.
+    Scanned-PDF true OCR (an image pipeline) is a deliberate follow-on that slots in
+    here behind the same seam. The seam stays injectable; this is just the real default
+    in place of the old raising stub (tests still pass a mock ocr_text)."""
+    data = (attachment or {}).get("data")
+    if not data:
+        return ""
+    try:
+        import io
+
+        from pypdf import PdfReader  # lazy: keep import cost off the module load path
+
+        reader = PdfReader(io.BytesIO(data))
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        return text.strip()
+    except Exception as exc:
+        print(f"[QuoteExtractor] PDF text-extraction failed: {type(exc).__name__}: {exc}")
+        return ""
 
 
 def _to_float(v) -> Optional[float]:
