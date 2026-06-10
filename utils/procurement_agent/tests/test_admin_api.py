@@ -245,3 +245,115 @@ class TestOrderEndpoints:
                            json={"status": s}, headers=_auth(_TOKEN))
         r = admin_api.post(f"/api/runs/{run_id}/mark-delivered")
         assert r.status_code == 200 and r.json()["order"]["status"] == "received"
+
+
+# ---------------------------------------------------------------------------
+# Buyer-loop endpoints (customer-facing, UNGATED like execute/select): run-scoped
+# review-items read, confirm/reject (the ONLY UI path that writes price_db), and
+# process-replies (a live Gmail READ, fail-soft without creds; never a send).
+# ---------------------------------------------------------------------------
+
+def _seed_quote_item(stores, *, status="pending"):
+    sr, _o, _p, persistence = stores
+    run = persistence.create_run(asset_specs=_SPECS)
+    sr.record_sent_message(run_id=run["id"], supplier_domain="acme.com",
+                           vendor_name="Acme Motor Supply", to=["sales@acme.com"], status="sent")
+    item_id = sr.record_review_item(
+        "quote",
+        {"unit_price": 1210.0, "currency": "USD", "quantity": 1,
+         "lead_time": "5 business days", "terms": "Net 30"},
+        status=status, run_id=run["id"], supplier_domain="acme.com",
+        vendor_name="Acme Motor Supply", manufacturer="Baldor", part_number="EM3770T",
+        confidence=0.9,
+    )
+    return run["id"], item_id
+
+
+class TestBuyerLoopEndpoints:
+    def test_review_items_run_scoped_read(self, admin_api, stores):
+        run_id, item_id = _seed_quote_item(stores)
+        r = admin_api.get(f"/api/runs/{run_id}/review-items")   # ungated
+        assert r.status_code == 200
+        body = r.json()
+        assert body["run_id"] == run_id
+        assert body["sent_count"] == 1 and body["quote_count"] == 1
+        assert len(body["review_items"]) == 1
+        item = body["review_items"][0]
+        assert item["id"] == item_id and item["kind"] == "quote"
+        assert item["payload"]["unit_price"] == 1210.0
+        assert item["vendor_name"] == "Acme Motor Supply"
+
+    def test_review_items_unknown_run_empty(self, admin_api):
+        body = admin_api.get("/api/runs/nope/review-items").json()
+        assert body["review_items"] == [] and body["sent_count"] == 0
+
+    def test_confirm_quote_writes_price_db(self, admin_api, stores):
+        sr, _o, price_db, _p = stores
+        run_id, item_id = _seed_quote_item(stores)
+        assert price_db.all_entries() == {}                     # nothing applied yet
+
+        r = admin_api.post(f"/api/review-items/{item_id}/confirm")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["confirmed"] is True and body["kind"] == "quote"
+        assert body["item"]["status"] == "confirmed"
+        # confirm is the ONLY UI path that writes price_db.
+        cached = price_db.get_cached_prices("Baldor", "EM3770T")
+        assert cached["Acme Motor Supply"]["price"] == 1210.0
+        assert cached["Acme Motor Supply"]["source"] == "rfq"
+
+    def test_confirm_contact_upserts_primary(self, admin_api, stores):
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        item_id = sr.record_review_item(
+            "contact", {"email": "jane.smith@acme.com", "name": "Jane Smith",
+                        "position": "Purchasing Manager"},
+            run_id=run["id"], supplier_domain="acme.com", vendor_name="Acme Motor Supply",
+        )
+        r = admin_api.post(f"/api/review-items/{item_id}/confirm")
+        assert r.status_code == 200 and r.json()["confirmed"] is True
+        rec = sr.lookup_by_domain("acme.com")
+        assert rec["primary_contact_email"] == "jane.smith@acme.com"
+        assert rec["primary_contact_status"] == "resolved"
+
+    def test_reject_discards_without_price_write(self, admin_api, stores):
+        sr, _o, price_db, _p = stores
+        run_id, item_id = _seed_quote_item(stores)
+        r = admin_api.post(f"/api/review-items/{item_id}/reject")
+        assert r.status_code == 200 and r.json()["rejected"] is True
+        assert sr.get_review_item(item_id)["status"] == "rejected"
+        assert price_db.all_entries() == {}                     # reject writes nothing
+
+    def test_confirm_unknown_item_404(self, admin_api):
+        assert admin_api.post("/api/review-items/nope/confirm").status_code == 404
+        assert admin_api.post("/api/review-items/nope/reject").status_code == 404
+
+    def test_process_replies_unavailable_without_creds(self, admin_api, stores):
+        # Conftest forces EMAIL_SEND_ENABLED off + clears GMAIL_* -> reader not configured
+        # -> fail-soft "unavailable", ZERO live calls (no reader.fetch ever runs).
+        run = stores[3].create_run(asset_specs=_SPECS)
+        r = admin_api.post(f"/api/runs/{run['id']}/process-replies")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is False and body["summary"] is None
+
+    def test_process_replies_happy_path_reader_mocked(self, admin_api, stores, monkeypatch):
+        # Configured path, but process_replies is STUBBED so no real Gmail call happens.
+        import utils.email_sender as es
+        from utils import reply_processor
+        run_id, _item = _seed_quote_item(stores)
+        monkeypatch.setattr(es, "EMAIL_SEND_ENABLED", True)
+        monkeypatch.setenv("GMAIL_SERVICE_ACCOUNT_FILE", "/fake/key.json")  # -> reader.configured
+        canned = {"processed": 2, "queued_quotes": 1, "queued_contacts": 0,
+                  "needs_review": 0, "unmatched": ["x@y.com"]}
+        monkeypatch.setattr(reply_processor, "process_replies", lambda reader=None, **k: canned)
+
+        r = admin_api.post(f"/api/runs/{run_id}/process-replies")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["available"] is True
+        assert body["summary"] == canned
+        assert body["queued_for_run"] == 1          # the seeded pending quote
+
+    def test_process_replies_unknown_run_404(self, admin_api):
+        assert admin_api.post("/api/runs/nope/process-replies").status_code == 404

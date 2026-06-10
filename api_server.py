@@ -1581,6 +1581,82 @@ def list_run_orders(run_id: str):
     return {"run_id": run_id, "count": len(rows), "orders": rows}
 
 
+# ---------------------------------------------------------------------------
+# Buyer-loop endpoints — inbound quote review (the comparison table) + confirm/reject.
+#
+# Run-scoped reads/triggers follow the ungated run-endpoint convention (no user auth
+# yet — CLEANUP §4.1). confirm writes price_db, so it is CONSEQUENTIAL: it binds to the
+# buyer role when real auth lands (flagged in CLEANUP). process-replies performs a live
+# Gmail READ when configured; it is fail-soft (clear "unavailable" result, no call) and
+# NEVER sends (gmail.readonly).
+# ---------------------------------------------------------------------------
+
+@app.get("/api/runs/{run_id}/review-items")
+def list_run_review_items(run_id: str):
+    """Run-scoped inbound quotes/contacts queued for review (the comparison-table feed).
+    Includes sent_count (RFQs sent for this run) and quote_count so the UI can show
+    partial state ("2 of 3 suppliers responded"). Unknown run -> empty (it's a read)."""
+    from utils import supplier_registry
+    items = supplier_registry.get_review_items(run_id=run_id)
+    sent = supplier_registry.get_sent_messages(run_id=run_id)
+    quote_count = sum(1 for i in items if i.get("kind") == "quote")
+    return {"run_id": run_id, "review_items": items,
+            "sent_count": len(sent), "quote_count": quote_count}
+
+
+@app.post("/api/runs/{run_id}/process-replies")
+def process_run_replies(run_id: str):
+    """Trigger inbound reply ingestion: live-read the Arkim inbox, match replies to sent
+    RFQs, extract quotes/contacts, and QUEUE them for review. The Gmail read is
+    inbox-global (it cannot be scoped to one run); the response reports this run's queued
+    count. Fail-soft: returns available=False with NO live call when Gmail isn't
+    configured or sending is disabled. Read-only — never sends."""
+    if _run_model_for(run_id) is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    from utils import reply_processor, supplier_registry
+    from utils.inbox_reader import GmailInboxReader
+    reader = GmailInboxReader()
+    if not reader.configured:
+        return {"run_id": run_id, "available": False, "summary": None,
+                "message": "Inbox read unavailable — Gmail not configured or sending disabled."}
+    summary = reply_processor.process_replies(reader=reader)
+    items = supplier_registry.get_review_items(run_id=run_id)
+    queued = sum(1 for i in items if i.get("status") in ("pending", "needs_human_review"))
+    return {"run_id": run_id, "available": True, "summary": summary, "queued_for_run": queued}
+
+
+@app.post("/api/review-items/{item_id}/confirm")
+def confirm_review_item(item_id: str):
+    """Human-confirm a queued quote/contact. quote -> price_db (source="rfq"); contact ->
+    supplier primary contact. The ONLY UI path that writes price_db — consequential, so
+    it binds to the buyer role when real auth lands (CLEANUP §4.1)."""
+    from utils import reply_processor, supplier_registry
+    item = supplier_registry.get_review_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    kind = item.get("kind")
+    if kind == "quote":
+        confirmed = reply_processor.confirm_quote(item_id)
+    elif kind == "contact":
+        confirmed = reply_processor.confirm_contact(item_id)
+    else:
+        raise HTTPException(status_code=422, detail=f"Cannot confirm item of kind {kind!r}")
+    return {"item_id": item_id, "kind": kind, "confirmed": confirmed,
+            "item": supplier_registry.get_review_item(item_id)}
+
+
+@app.post("/api/review-items/{item_id}/reject")
+def reject_review_item(item_id: str):
+    """Human-reject a queued item -> discard (no platform change, no price write)."""
+    from utils import reply_processor, supplier_registry
+    item = supplier_registry.get_review_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    rejected = reply_processor.reject(item_id)
+    return {"item_id": item_id, "rejected": rejected,
+            "item": supplier_registry.get_review_item(item_id)}
+
+
 @app.post("/api/admin/orders/{order_id}/status")
 def admin_update_order_status(order_id: str, body: OrderStatusRequest,
                               role: str = Depends(require_admin)):
