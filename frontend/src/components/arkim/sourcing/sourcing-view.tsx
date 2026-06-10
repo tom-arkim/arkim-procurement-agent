@@ -7,6 +7,7 @@ import { VendorCard } from "@/components/arkim/sourcing/vendor-card";
 import { OutreachCard } from "@/components/arkim/sourcing/outreach-card";
 import { StickyActionBar } from "@/components/arkim/sourcing/sticky-action-bar";
 import { QuotesComparison } from "@/components/arkim/comparison/quotes-comparison";
+import { OrderPanel } from "@/components/arkim/orders/order-panel";
 import { Dot } from "@/components/ui/pill";
 import { Warn } from "@/components/ui/icons";
 import { useArkimStore } from "@/store";
@@ -132,6 +133,9 @@ export function SourcingView({ run, className }: SourcingViewProps) {
 
         {/* Supplier quotes — inbound RFQ replies (self-hides until outreach happens) */}
         <QuotesComparison runId={run.id} />
+
+        {/* Order — place + track (self-hides until approved / an order exists) */}
+        <OrderPanel run={run} />
       </div>
 
       {tier3.length > 0 && <StickyActionBar runId={run.id} />}
