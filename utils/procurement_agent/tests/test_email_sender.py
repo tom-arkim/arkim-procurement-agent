@@ -10,6 +10,9 @@ no google libs, no network in the suite).
 
 import base64
 import email
+import os
+import subprocess
+import sys
 
 import pytest
 from unittest.mock import MagicMock
@@ -21,6 +24,10 @@ from utils.email_sender import (
     SendResult,
     GmailSender,
 )
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)
+))))
 
 
 @pytest.fixture(autouse=True)
@@ -116,11 +123,19 @@ class TestGmailSenderStubbed:
         assert res.status == "error" and "api down" in (res.error or "")
 
     def test_google_libs_lazy_not_imported_at_load(self):
-        """Importing the send module pulls in NO google libraries (they're lazy), so
-        the suite needs neither the libs nor credentials."""
-        import sys
-        assert "googleapiclient" not in sys.modules
-        assert "google.oauth2" not in sys.modules
+        """Importing the send module pulls in NO google libraries (they're lazy). Checked
+        in a FRESH interpreter so suite-order pollution (another test importing google to
+        exercise the build path) can't make this spuriously pass/fail now that the google
+        libs are actually installed."""
+        code = (
+            "import sys\n"
+            "import utils.email_sender  # noqa: F401\n"
+            "assert 'googleapiclient' not in sys.modules, 'googleapiclient eagerly imported'\n"
+            "assert 'google.oauth2' not in sys.modules, 'google.oauth2 eagerly imported'\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code], cwd=_ROOT,
+                              capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr or proc.stdout
 
 
 def _decode_sent_mime(send_mock) -> email.message.Message:
