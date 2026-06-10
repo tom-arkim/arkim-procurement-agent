@@ -32,6 +32,13 @@ import {
   upsertApprovalRule,
   openFromPending,
   rejectSubmission,
+  getReviewItems,
+  processReplies,
+  confirmReviewItem,
+  rejectReviewItem,
+  executeOrder,
+  markDelivered,
+  getOrders,
 } from "./api";
 import { queryKeys } from "./query-client";
 import type {
@@ -218,6 +225,84 @@ export function useInitiateOutreach(runId: string) {
 export function useSaveOutreach(runId: string) {
   return useMutation({
     mutationFn: (candidateIds: string[]) => saveOutreachSelection(runId, candidateIds),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Buyer loop — inbound quote review (comparison table)
+// ---------------------------------------------------------------------------
+
+export function useReviewItems(runId: string) {
+  return useQuery({
+    queryKey: queryKeys.reviewItems.byRun(runId),
+    queryFn: () => getReviewItems(runId),
+    enabled: Boolean(runId),
+  });
+}
+
+/** "Check for new replies" — triggers a live inbox read + ingest, then refreshes. */
+export function useProcessReplies(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => processReplies(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.reviewItems.byRun(runId) });
+    },
+  });
+}
+
+export function useConfirmReviewItem(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: string) => confirmReviewItem(itemId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.reviewItems.byRun(runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+    },
+  });
+}
+
+export function useRejectReviewItem(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: string) => rejectReviewItem(itemId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.reviewItems.byRun(runId) });
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Buyer loop — order placement + tracking
+// ---------------------------------------------------------------------------
+
+export function useOrders(runId: string) {
+  return useQuery({
+    queryKey: queryKeys.orders.byRun(runId),
+    queryFn: () => getOrders(runId),
+    enabled: Boolean(runId),
+  });
+}
+
+export function useExecuteOrder(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => executeOrder(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.orders.byRun(runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+    },
+  });
+}
+
+export function useMarkDelivered(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => markDelivered(runId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.orders.byRun(runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+    },
   });
 }
 

@@ -6,6 +6,7 @@ import { TierHeader } from "@/components/arkim/tier-header";
 import { VendorCard } from "@/components/arkim/sourcing/vendor-card";
 import { OutreachCard } from "@/components/arkim/sourcing/outreach-card";
 import { StickyActionBar } from "@/components/arkim/sourcing/sticky-action-bar";
+import { QuotesComparison } from "@/components/arkim/comparison/quotes-comparison";
 import { Dot } from "@/components/ui/pill";
 import { Warn } from "@/components/ui/icons";
 import { useArkimStore } from "@/store";
@@ -128,6 +129,9 @@ export function SourcingView({ run, className }: SourcingViewProps) {
             <EmptyTier message="No outreach candidates identified." />
           )}
         </section>
+
+        {/* Supplier quotes — inbound RFQ replies (self-hides until outreach happens) */}
+        <QuotesComparison runId={run.id} />
       </div>
 
       {tier3.length > 0 && <StickyActionBar runId={run.id} />}

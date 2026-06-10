@@ -54,6 +54,12 @@ export const queryKeys = {
   approvalRules: {
     byFacility: (facilityId: string) => ["approval-rules", facilityId] as const,
   },
+  reviewItems: {
+    byRun: (runId: string) => ["review-items", runId] as const,
+  },
+  orders: {
+    byRun: (runId: string) => ["orders", runId] as const,
+  },
 } as const;
 
 // ---------------------------------------------------------------------------

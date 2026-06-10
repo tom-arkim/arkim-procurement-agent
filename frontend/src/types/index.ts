@@ -296,6 +296,112 @@ export interface OutreachRequest {
 }
 
 // ---------------------------------------------------------------------------
+// Buyer loop — inbound quote review (comparison table) + order placement
+// ---------------------------------------------------------------------------
+
+export type ReviewItemKind = "quote" | "contact";
+export type ReviewItemStatus = "pending" | "needs_human_review" | "confirmed" | "rejected";
+
+export interface ReviewItem {
+  id: string;
+  kind: ReviewItemKind;
+  status: ReviewItemStatus;
+  run_id?: string | null;
+  supplier_domain?: string | null;
+  vendor_name?: string | null;
+  manufacturer?: string | null;
+  part_number?: string | null;
+  /** 0–1 from the extractor; multiply by 100 for the ConfidenceIndicator. */
+  confidence?: number | null;
+  raw_source?: string | null;
+  created_at?: string;
+  /** quote: unit_price/currency/quantity/lead_time/min_order/terms; contact: name/email/position. */
+  payload: {
+    unit_price?: number | null;
+    currency?: string;
+    quantity?: number | null;
+    lead_time?: string | null;
+    min_order?: number | null;
+    terms?: string | null;
+    name?: string | null;
+    email?: string | null;
+    position?: string | null;
+  };
+}
+
+export interface ReviewItemsResponse {
+  run_id: string;
+  review_items: ReviewItem[];
+  /** RFQs sent for this run — drives partial state ("2 of 3 suppliers responded"). */
+  sent_count: number;
+  quote_count: number;
+}
+
+export interface ProcessRepliesResponse {
+  run_id: string;
+  available: boolean;
+  summary: {
+    processed: number;
+    queued_quotes: number;
+    queued_contacts: number;
+    needs_review: number;
+    unmatched: string[];
+  } | null;
+  queued_for_run?: number;
+  message?: string;
+}
+
+export interface ConfirmReviewItemResponse {
+  item_id: string;
+  kind: ReviewItemKind;
+  confirmed: boolean;
+  item: ReviewItem | null;
+}
+
+export interface RejectReviewItemResponse {
+  item_id: string;
+  rejected: boolean;
+  item: ReviewItem | null;
+}
+
+export type OrderStatus =
+  | "draft" | "placed" | "confirmed" | "shipped" | "received" | "cancelled";
+
+export interface Order {
+  id: string;
+  run_id?: string | null;
+  manufacturer?: string | null;
+  part_number?: string | null;
+  vendor_name?: string | null;
+  supplier_domain?: string | null;
+  unit_price?: number | null;
+  currency?: string | null;
+  quantity?: number | null;
+  lead_time?: string | null;
+  source?: "buy" | "rfq" | null;
+  status: OrderStatus;
+  created_at?: string;
+  updated_at?: string;
+  placed_by?: string | null;
+}
+
+/** Result of execute / mark-delivered (ProcurementAgent action result). */
+export interface OrderActionResult {
+  success: boolean;
+  action: string;
+  order: Order | null;
+  placed?: boolean;
+  message?: string;
+  next_phase?: string | null;
+}
+
+export interface OrdersResponse {
+  run_id: string;
+  count: number;
+  orders: Order[];
+}
+
+// ---------------------------------------------------------------------------
 // UI-layer helpers
 // ---------------------------------------------------------------------------
 

@@ -17,12 +17,18 @@ const API_BASE =
 
 import type {
   ApproveRequest,
+  ConfirmReviewItemResponse,
   CreateRunRequest,
   CreateRunResponse,
   Facility,
   ApprovalRule,
+  OrderActionResult,
+  OrdersResponse,
   OutreachRequest,
+  ProcessRepliesResponse,
   RejectRequest,
+  RejectReviewItemResponse,
+  ReviewItemsResponse,
   SelectCandidateRequest,
   SendMessageRequest,
   SendMessageResponse,
@@ -188,6 +194,42 @@ export async function saveOutreachSelection(
     method: "POST",
     body: JSON.stringify({ candidate_ids: candidateIds }),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Buyer loop — inbound quote review (comparison table)
+// ---------------------------------------------------------------------------
+
+export async function getReviewItems(runId: string): Promise<ReviewItemsResponse> {
+  return request(`/runs/${runId}/review-items`);
+}
+
+export async function processReplies(runId: string): Promise<ProcessRepliesResponse> {
+  return request(`/runs/${runId}/process-replies`, { method: "POST" });
+}
+
+export async function confirmReviewItem(itemId: string): Promise<ConfirmReviewItemResponse> {
+  return request(`/review-items/${itemId}/confirm`, { method: "POST" });
+}
+
+export async function rejectReviewItem(itemId: string): Promise<RejectReviewItemResponse> {
+  return request(`/review-items/${itemId}/reject`, { method: "POST" });
+}
+
+// ---------------------------------------------------------------------------
+// Buyer loop — order placement + tracking
+// ---------------------------------------------------------------------------
+
+export async function executeOrder(runId: string): Promise<OrderActionResult> {
+  return request(`/runs/${runId}/execute`, { method: "POST" });
+}
+
+export async function markDelivered(runId: string): Promise<OrderActionResult> {
+  return request(`/runs/${runId}/mark-delivered`, { method: "POST" });
+}
+
+export async function getOrders(runId: string): Promise<OrdersResponse> {
+  return request(`/runs/${runId}/orders`);
 }
 
 // ---------------------------------------------------------------------------
