@@ -26,7 +26,7 @@ type NavItem = { key: string; label: string; icon: ProcIconName; href?: string; 
 
 const NAV: NavItem[] = [
   { key: "home", label: "What needs me", icon: "box", href: "/" },
-  { key: "request", label: "New request", icon: "plus", href: "/runs/new" }, // interim: real intake until the customer Request screen is ported
+  { key: "request", label: "New request", icon: "plus", href: "/request" },
   { key: "history", label: "History & prices", icon: "receipt", soon: true },
   { key: "settings", label: "Delivery settings", icon: "building", soon: true },
 ];
@@ -84,7 +84,7 @@ export function ProcShell({ children }: { children: ReactNode }) {
 
             <div className="proc-navlist">
               {NAV.map((item) => {
-                const active = item.href === "/" ? pathname === "/" : false;
+                const active = item.href === "/" ? pathname === "/" : Boolean(item.href) && pathname.startsWith(item.href!);
                 return (
                   <button
                     key={item.key}

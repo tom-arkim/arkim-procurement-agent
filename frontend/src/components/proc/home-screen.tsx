@@ -62,7 +62,7 @@ export function HomeScreen() {
   const { data: runs, isLoading, isError } = useRuns();
 
   const needPart = (
-    <button className="proc-btnprimary" onClick={() => router.push("/runs/new")}>
+    <button className="proc-btnprimary" onClick={() => router.push("/request")}>
       <ProcIcon name="plus" size={15} />I need a part
     </button>
   );
@@ -105,7 +105,7 @@ export function HomeScreen() {
             Describe the part in plain words — or snap a photo of the nameplate — and we&apos;ll
             find your best options, collect quotes, and track the order to your dock.
           </div>
-          <button className="proc-btnprimary" onClick={() => router.push("/runs/new")}>
+          <button className="proc-btnprimary" onClick={() => router.push("/request")}>
             <ProcIcon name="plus" size={15} />I need a part
           </button>
         </div>
