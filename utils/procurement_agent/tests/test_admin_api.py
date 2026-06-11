@@ -358,6 +358,20 @@ class TestBuyerLoopEndpoints:
     def test_process_replies_unknown_run_404(self, admin_api):
         assert admin_api.post("/api/runs/nope/process-replies").status_code == 404
 
+    def test_list_all_orders_ungated(self, admin_api, stores):
+        # Customer History needs a cross-run orders read. Ungated like the other
+        # buyer-loop run endpoints (CLEANUP §4.1) — distinct from gated /api/admin/orders.
+        _sr, orders, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        orders.create_order({"run_id": run["id"], "manufacturer": "Baldor",
+                             "part_number": "EM3770T", "vendor_name": "Bay Power",
+                             "unit_price": 1650.0})
+        r = admin_api.get("/api/orders")  # no token
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] >= 1
+        assert any(o["vendor_name"] == "Bay Power" for o in body["orders"])
+
 
 # ---------------------------------------------------------------------------
 # "Your Arkim impact" endpoints — exposes utils.impact over the isolated stores.

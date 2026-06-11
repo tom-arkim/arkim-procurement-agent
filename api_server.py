@@ -1581,6 +1581,17 @@ def list_run_orders(run_id: str):
     return {"run_id": run_id, "count": len(rows), "orders": rows}
 
 
+@app.get("/api/orders")
+def list_all_orders():
+    """All captured orders — the customer History feed (orders table, spend, supplier
+    reliability, price intelligence). Ungated like the run-scoped buyer-loop endpoints
+    (CLEANUP §4.1); binds to the tenant/buyer when real auth lands. Distinct from the
+    admin-gated /api/admin/orders."""
+    from utils import orders
+    rows = orders.get_orders()
+    return {"count": len(rows), "orders": rows}
+
+
 # ---------------------------------------------------------------------------
 # Buyer-loop endpoints — inbound quote review (the comparison table) + confirm/reject.
 #
