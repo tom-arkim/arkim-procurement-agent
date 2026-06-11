@@ -127,12 +127,12 @@ export function HomeScreen() {
           <SecHead t="Needs you" c={needsCount} />
           <div className="proc-actions">
             {handoffs.map((r) => (
-              <HandoffCard key={r.id} run={r} onOpen={() => router.push(`/runs/${r.id}`)} />
+              <HandoffCard key={r.id} run={r} onOpen={() => router.push(`/parts/${r.id}`)} />
             ))}
             {decisions.map((r) => {
               const c = decisionCard(r.phase as Phase);
               return (
-                <button key={r.id} className="proc-act" data-tone={c.tone} onClick={() => router.push(`/runs/${r.id}`)}>
+                <button key={r.id} className="proc-act" data-tone={c.tone} onClick={() => router.push(`/parts/${r.id}`)}>
                   <span className="pa-ic"><ProcIcon name={c.icon} size={18} /></span>
                   <span className="pa-tt">
                     <span className="pa-title" style={{ display: "block" }}>{c.title}</span>
@@ -156,7 +156,7 @@ export function HomeScreen() {
             {inFlight.map((r) => {
               const p = phasePill(r.phase as Phase);
               return (
-                <button key={r.id} className="proc-fl" onClick={() => router.push(`/runs/${r.id}`)}>
+                <button key={r.id} className="proc-fl" onClick={() => router.push(`/parts/${r.id}`)}>
                   <ProcPill tone={p.tone}>{p.label}</ProcPill>
                   <span className="fl-tt">
                     <span className="fl-title" style={{ display: "block" }}>
