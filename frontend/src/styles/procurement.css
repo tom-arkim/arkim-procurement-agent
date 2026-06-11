@@ -358,6 +358,27 @@
 .proc-id .id-reply { padding: 0 18px 14px; font-size: 13px; color: var(--muted); line-height: 1.55; }
 .proc-idinput { width: 100%; font-family: var(--font-sans); font-size: 14px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--r); background: var(--bg); color: var(--text); outline: none; box-shadow: 0 0 0 3px var(--accent-fill); }
 
+/* ---- settings ---- */
+.proc-sitetabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
+.proc-sitetab { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-sans); font-size: 13px; font-weight: 600; padding: 9px 15px; border-radius: var(--r); border: 1px solid var(--border); background: var(--surface); color: var(--muted); cursor: pointer; transition: border-color 0.14s, color 0.14s, background-color 0.14s; }
+.proc-sitetab:hover { border-color: var(--accent-line); }
+.proc-sitetab[data-on="true"] { background: var(--accent-fill); border-color: var(--accent-line); color: var(--accent-text); }
+.proc-sitetab .d { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: 0.7; }
+.proc-form { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); padding: 20px; }
+.proc-form .pf-h { font-size: 14.5px; font-weight: 600; color: var(--text-strong); margin-bottom: 4px; }
+.proc-form .pf-s { font-size: 12.5px; color: var(--muted); margin-bottom: 18px; line-height: 1.55; }
+.proc-field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
+.proc-field label { font-size: 12.5px; font-weight: 600; color: var(--text); }
+.proc-field label .hint { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.proc-field input, .proc-field textarea { width: 100%; font-family: var(--font-sans); font-size: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); color: var(--text); outline: none; transition: border-color 0.14s, box-shadow 0.14s; }
+.proc-field input:focus, .proc-field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill); }
+.proc-field textarea { resize: vertical; min-height: 72px; }
+
+/* order review ship-to */
+.proc-review .rv-l .edit { margin-left: auto; background: none; border: none; font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--accent-text); cursor: pointer; letter-spacing: 0; text-transform: none; }
+.proc-review .rv-ship { font-size: 13px; color: var(--text); line-height: 1.65; }
+.proc-review .rv-ship .dim { color: var(--muted); }
+
 /* ---- chevron loader ---- */
 .proc-chevstack { display: flex; flex-direction: column; gap: 2.5px; flex: none; }
 .proc-chevstack i { display: block; height: 5px; clip-path: polygon(0 0, 50% 100%, 100% 0); background: var(--accent); animation: proc-chev 1.2s ease-in-out infinite; }

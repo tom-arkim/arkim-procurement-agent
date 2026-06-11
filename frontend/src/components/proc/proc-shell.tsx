@@ -4,12 +4,11 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { useRouter, usePathname } from "next/navigation";
 import { ProcIcon, type ProcIconName } from "./proc-icon";
 import { ProcToast } from "./proc-ui";
+import { PROC_TENANT, PRIMARY_SITE } from "@/lib/proc-config";
 
-// Tenant / site framing. Mockup-fixture for now (the internal facilities endpoint
-// returns different demo sites); wire the switcher to GET /api/facilities + a real
-// tenant claim when customer auth lands. Flagged in the build report.
-const PROC_TENANT = { name: "CAPTEK", sub: "Softgel" };
-const PROC_SITE = { name: "La Mirada", sub: "Plant · West" };
+// Tenant / site framing comes from proc-config (fixture until customer auth + a real
+// facilities/ship-to wire). Flagged in the build report.
+const PROC_SITE = PRIMARY_SITE;
 
 // ---------------------------------------------------------------------------
 // Toast context — children call fire() for "coming soon" + confirmations.
@@ -28,7 +27,7 @@ const NAV: NavItem[] = [
   { key: "home", label: "What needs me", icon: "box", href: "/" },
   { key: "request", label: "New request", icon: "plus", href: "/request" },
   { key: "history", label: "History & prices", icon: "receipt", soon: true },
-  { key: "settings", label: "Delivery settings", icon: "building", soon: true },
+  { key: "settings", label: "Delivery settings", icon: "building", href: "/settings" },
 ];
 
 export function ProcShell({ children }: { children: ReactNode }) {

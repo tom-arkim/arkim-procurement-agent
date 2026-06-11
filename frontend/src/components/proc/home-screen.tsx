@@ -192,7 +192,7 @@ export function HomeScreen() {
           </span>
           <ProcIcon name="chevR" size={15} color="var(--muted-2)" />
         </button>
-        <button className="proc-fl" onClick={() => fire("Delivery settings — coming in the next build")}>
+        <button className="proc-fl" onClick={() => router.push("/settings")}>
           <span style={{ width: 32, height: 32, flexShrink: 0, borderRadius: "var(--r)", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <ProcIcon name="building" size={16} />
           </span>

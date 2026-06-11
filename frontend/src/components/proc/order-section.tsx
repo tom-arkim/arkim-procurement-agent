@@ -12,9 +12,11 @@
  */
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { useOrders, useExecuteOrder, useMarkDelivered, useRunLive } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { procMoney } from "./proc-ui";
+import { getShipTo, PRIMARY_SITE } from "@/lib/proc-config";
 import type { Order, OrderStatus, Phase } from "@/types";
 
 const FLOW = ["placed", "confirmed", "shipped", "received"] as const;
@@ -80,6 +82,8 @@ function PlaceOrderCard({
   pending: boolean; errored: boolean; onPlace: () => void;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const router = useRouter();
+  const shipTo = getShipTo(PRIMARY_SITE.id);
 
   if (noPrice) {
     return (
@@ -109,6 +113,22 @@ function PlaceOrderCard({
       <div className="rv-sec">
         <div className="rv-l">Supplier</div>
         <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{supplier}</div>
+      </div>
+      <div className="rv-sec">
+        <div className="rv-l">
+          Ship to
+          <button className="edit" onClick={() => router.push("/settings")}>Edit</button>
+        </div>
+        <div className="rv-ship">
+          <div><b style={{ fontWeight: 600, color: "var(--text)" }}>{shipTo.company}</b></div>
+          <div>{shipTo.address}</div>
+          <div>{shipTo.city}</div>
+          <div><span className="dim">Attention:</span> {shipTo.attention}</div>
+          <div><span className="dim">Receiving hours:</span> {shipTo.hours}</div>
+          {shipTo.instructions && (
+            <div style={{ marginTop: 6, fontSize: 12, color: "var(--muted-2)" }}>{shipTo.instructions}</div>
+          )}
+        </div>
       </div>
       <div className="proc-confirmbar" style={{ padding: "16px 18px", marginTop: 0 }}>
         {errored && <span className="note" style={{ color: "var(--st-overdue)" }}>Couldn&apos;t place the order — please try again.</span>}
