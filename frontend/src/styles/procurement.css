@@ -443,6 +443,41 @@
 .imp-low-data .ild-sub { font-size: 13px; color: var(--muted-2); margin-top: 10px; max-width: 380px; margin-left: auto; margin-right: auto; line-height: 1.65; }
 @media (max-width: 900px) { .imp-hero-grid { grid-template-columns: 1fr; } .imp-work-body { grid-template-columns: 1fr; } .imp-steps { border-right: none; border-bottom: 1px solid var(--border-soft); } }
 
+/* ---- history & prices ---- */
+.proc-intel { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 18px; }
+.pi-card { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); padding: 16px 18px; }
+.pi-card .pi-l { font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: var(--muted-2); display: flex; align-items: center; gap: 7px; }
+.pi-card .pi-part { font-size: 14.5px; font-weight: 600; color: var(--text-strong); margin-top: 10px; }
+.pi-card .pi-line { font-size: 12.5px; color: var(--muted); margin-top: 4px; line-height: 1.55; }
+.pi-card .pi-line b { color: var(--text); font-weight: 600; }
+.pi-card .pi-read { display: flex; align-items: baseline; gap: 8px; margin-top: 12px; }
+.pi-card .pi-num { font-size: 26px; font-weight: 300; letter-spacing: -0.8px; color: var(--text-strong); font-variant-numeric: tabular-nums; }
+.pi-card .pi-unit { font-size: 12px; color: var(--muted); }
+.pi-card .pi-delta { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px; }
+.pi-card .pi-delta[data-good="true"] { color: var(--st-done); background: var(--st-done-fill); }
+.pi-card .pi-delta[data-good="false"] { color: var(--st-open); background: var(--st-open-fill); }
+
+.proc-tblcard { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); overflow: hidden; margin-bottom: 16px; }
+.proc-tblcard .tc-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--border-soft); flex-wrap: wrap; }
+.proc-tblcard .tc-title { display: flex; align-items: center; gap: 9px; font-size: 14.5px; font-weight: 600; color: var(--text-strong); }
+.proc-tblcard .tc-note { font-size: 11.5px; color: var(--muted-2); }
+.proc-tblcard .tc-search { display: flex; align-items: center; gap: 8px; width: 220px; padding: 7px 11px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); }
+.proc-tblcard .tc-search input { flex: 1; min-width: 0; border: none; background: transparent; outline: none; font-family: var(--font-sans); font-size: 13px; color: var(--text); }
+.proc-tbl { width: 100%; border-collapse: collapse; }
+.proc-tbl thead th { text-align: left; font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--muted-2); padding: 10px 16px; border-bottom: 1px solid var(--border); white-space: nowrap; background: var(--surface-2); }
+.proc-tbl tbody td { padding: 11px 16px; border-bottom: 1px solid var(--border-soft); font-size: 13px; color: var(--text); vertical-align: middle; }
+.proc-tbl tbody tr:last-child td { border-bottom: none; }
+.proc-tbl .t-r { text-align: right; font-variant-numeric: tabular-nums; }
+.proc-tbl .t-strong { font-weight: 600; color: var(--text-strong); }
+.proc-tbl .t-muted { color: var(--muted); }
+.proc-tblfoot { padding: 12px 18px; font-size: 11.5px; color: var(--muted-2); border-top: 1px solid var(--border-soft); }
+.proc-tblempty { padding: 40px 20px; text-align: center; }
+.proc-tblempty .te-s { font-family: var(--font-serif); font-style: italic; font-size: 18px; color: var(--muted); }
+.proc-tblempty .te-sub { font-size: 13px; color: var(--muted-2); margin-top: 8px; }
+.spendbar { height: 6px; border-radius: 3px; background: var(--surface-hi); overflow: hidden; }
+.spendbar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+@media (max-width: 900px) { .proc-intel { grid-template-columns: 1fr; } }
+
 /* ---- chevron loader ---- */
 .proc-chevstack { display: flex; flex-direction: column; gap: 2.5px; flex: none; }
 .proc-chevstack i { display: block; height: 5px; clip-path: polygon(0 0, 50% 100%, 100% 0); background: var(--accent); animation: proc-chev 1.2s ease-in-out infinite; }

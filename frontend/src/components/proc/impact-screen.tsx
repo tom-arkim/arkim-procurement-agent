@@ -57,12 +57,12 @@ export function ImpactScreen() {
 
       {isLoading && <p style={{ fontSize: 13, color: "var(--muted)" }}>Loading…</p>}
       {isError && <p style={{ fontSize: 13, color: "var(--st-overdue)" }}>Couldn&apos;t load impact — is the backend running?</p>}
-      {data && <Panel d={data} />}
+      {data && <ImpactPanelBody d={data} />}
     </div>
   );
 }
 
-function Panel({ d }: { d: CumulativeImpact }) {
+export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
   const time = fmtTime(d.time_estimate_minutes);
   const steps = workSteps(d.counts);
   const months = d.savings_by_month;

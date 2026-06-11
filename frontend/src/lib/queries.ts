@@ -39,6 +39,7 @@ import {
   executeOrder,
   markDelivered,
   getOrders,
+  getAllOrders,
   getImpact,
 } from "./api";
 import { queryKeys } from "./query-client";
@@ -282,6 +283,13 @@ export function useOrders(runId: string) {
     queryKey: queryKeys.orders.byRun(runId),
     queryFn: () => getOrders(runId),
     enabled: Boolean(runId),
+  });
+}
+
+export function useAllOrders() {
+  return useQuery({
+    queryKey: queryKeys.orders.all(),
+    queryFn: getAllOrders,
   });
 }
 

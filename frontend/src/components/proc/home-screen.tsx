@@ -178,7 +178,7 @@ export function HomeScreen() {
       {/* ---- More ---- */}
       <SecHead t="More" />
       <div className="proc-flight">
-        <button className="proc-fl" onClick={() => router.push("/impact")}>
+        <button className="proc-fl" onClick={() => router.push("/history")}>
           <span style={{ width: 32, height: 32, flexShrink: 0, borderRadius: "var(--r)", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <ProcIcon name="clock" size={16} />
           </span>

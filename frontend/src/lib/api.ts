@@ -233,6 +233,11 @@ export async function getOrders(runId: string): Promise<OrdersResponse> {
   return request(`/runs/${runId}/orders`);
 }
 
+/** All captured orders — the customer History feed. */
+export async function getAllOrders(): Promise<{ count: number; orders: OrdersResponse["orders"] }> {
+  return request("/orders");
+}
+
 // ---------------------------------------------------------------------------
 // Your Arkim impact (cumulative)
 // ---------------------------------------------------------------------------
