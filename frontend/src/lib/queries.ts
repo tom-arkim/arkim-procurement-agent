@@ -39,6 +39,7 @@ import {
   executeOrder,
   markDelivered,
   getOrders,
+  getImpact,
 } from "./api";
 import { queryKeys } from "./query-client";
 import type {
@@ -303,6 +304,17 @@ export function useMarkDelivered(runId: string) {
       qc.invalidateQueries({ queryKey: queryKeys.orders.byRun(runId) });
       qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
     },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Your Arkim impact (cumulative)
+// ---------------------------------------------------------------------------
+
+export function useImpact() {
+  return useQuery({
+    queryKey: queryKeys.impact.cumulative(),
+    queryFn: getImpact,
   });
 }
 

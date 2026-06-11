@@ -60,6 +60,9 @@ export const queryKeys = {
   orders: {
     byRun: (runId: string) => ["orders", runId] as const,
   },
+  impact: {
+    cumulative: () => ["impact", "cumulative"] as const,
+  },
 } as const;
 
 // ---------------------------------------------------------------------------

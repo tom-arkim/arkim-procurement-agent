@@ -402,6 +402,36 @@ export interface OrdersResponse {
 }
 
 // ---------------------------------------------------------------------------
+// "Your Arkim impact" — output of utils/impact.py (GET /api/impact).
+// Savings are MEASURED, counts are COUNTED, time is an ESTIMATE (labelled with its
+// model version). The UI renders these; it never recomputes the arithmetic.
+// ---------------------------------------------------------------------------
+
+export interface ImpactCounts {
+  parts_identified: number;
+  suppliers_contacted: number;
+  quotes_read: number;
+  comparisons_made: number;
+  replies_chased: number;
+}
+
+export interface ImpactMonth {
+  month: string; // "YYYY-MM" — real order months only, never interpolated
+  savings: number; // a real 0 stays 0 (no comparable purchase that month)
+  order_ids: string[];
+  note: string;
+}
+
+export interface CumulativeImpact {
+  total_savings: number;
+  savings_by_month: ImpactMonth[];
+  counts: ImpactCounts;
+  time_estimate_minutes: number;
+  estimate_model_version: string;
+  contributing_order_ids: string[];
+}
+
+// ---------------------------------------------------------------------------
 // UI-layer helpers
 // ---------------------------------------------------------------------------
 

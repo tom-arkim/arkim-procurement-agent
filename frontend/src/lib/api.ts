@@ -20,6 +20,7 @@ import type {
   ConfirmReviewItemResponse,
   CreateRunRequest,
   CreateRunResponse,
+  CumulativeImpact,
   Facility,
   ApprovalRule,
   OrderActionResult,
@@ -230,6 +231,14 @@ export async function markDelivered(runId: string): Promise<OrderActionResult> {
 
 export async function getOrders(runId: string): Promise<OrdersResponse> {
   return request(`/runs/${runId}/orders`);
+}
+
+// ---------------------------------------------------------------------------
+// Your Arkim impact (cumulative)
+// ---------------------------------------------------------------------------
+
+export async function getImpact(): Promise<CumulativeImpact> {
+  return request("/impact");
 }
 
 // ---------------------------------------------------------------------------
