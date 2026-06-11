@@ -1657,6 +1657,30 @@ def reject_review_item(item_id: str):
             "item": supplier_registry.get_review_item(item_id)}
 
 
+# ---------------------------------------------------------------------------
+# "Your Arkim impact" — all arithmetic lives in utils.impact (one versioned module).
+# These endpoints only expose its output; the frontend renders, never re-computes.
+# Savings are MEASURED from the customer's own transactions (no external baseline);
+# action counts are COUNTED; time saved is an ESTIMATE labelled with its model version.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/runs/{run_id}/impact")
+def run_impact(run_id: str):
+    """Per-decision impact for one run (measured saving | None, real counts, labelled
+    time estimate)."""
+    if _run_model_for(run_id) is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    from utils import impact
+    return impact.gather_run_decision(run_id)
+
+
+@app.get("/api/impact")
+def cumulative_impact():
+    """Cumulative impact over the customer's real orders (drillable: per-month + ids)."""
+    from utils import impact
+    return impact.gather_cumulative()
+
+
 @app.post("/api/admin/orders/{order_id}/status")
 def admin_update_order_status(order_id: str, body: OrderStatusRequest,
                               role: str = Depends(require_admin)):

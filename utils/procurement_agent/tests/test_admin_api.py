@@ -357,3 +357,72 @@ class TestBuyerLoopEndpoints:
 
     def test_process_replies_unknown_run_404(self, admin_api):
         assert admin_api.post("/api/runs/nope/process-replies").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# "Your Arkim impact" endpoints — exposes utils.impact over the isolated stores.
+# (The methodology invariants themselves are asserted in test_impact.py; here we
+# only check the API surfaces the module's output, with real counts + measured saving.)
+# ---------------------------------------------------------------------------
+
+class TestImpactEndpoints:
+    def test_run_impact_measured_saving_and_real_counts(self, admin_api, stores):
+        sr, orders, _p, persistence = stores
+        # A PRIOR purchase of the same part (the customer's own last_paid = 100).
+        prior = persistence.create_run(asset_specs=_SPECS)
+        po = orders.create_order({"run_id": prior["id"], "manufacturer": "Baldor",
+                                  "part_number": "EM3770T", "vendor_name": "Old Co",
+                                  "unit_price": 100.0})
+        orders.place_order(po["id"], placed_by="t")
+        # This run: 2 quotes, the cheaper one confirmed (chosen=80), 2 suppliers contacted.
+        run = persistence.create_run(asset_specs=_SPECS)
+        sr.record_sent_message(run_id=run["id"], supplier_domain="a.com", vendor_name="A",
+                               to=["s@a.com"], status="sent")
+        sr.record_sent_message(run_id=run["id"], supplier_domain="b.com", vendor_name="B",
+                               to=["s@b.com"], status="sent")
+        sr.record_review_item("quote", {"unit_price": 110.0}, run_id=run["id"],
+                              vendor_name="B", manufacturer="Baldor", part_number="EM3770T")
+        cid = sr.record_review_item("quote", {"unit_price": 80.0}, status="confirmed",
+                                    run_id=run["id"], vendor_name="A",
+                                    manufacturer="Baldor", part_number="EM3770T")
+        assert cid
+
+        body = admin_api.get(f"/api/runs/{run['id']}/impact").json()
+        assert body["saving"] == 20.0 and body["saving_basis"] == "vs_last_paid"  # 100 - 80
+        assert body["counts"]["suppliers_contacted"] == 2     # real pass-through
+        assert body["counts"]["quotes_read"] == 2
+        # estimate = 1*15 + 2*10 + 2*5 + 1*10 + 0*5 = 55, labelled with the version
+        assert body["time_estimate_minutes"] == 55
+        assert body["estimate_model_version"] == "v1"
+
+    def test_run_impact_no_history_no_fabricated_saving(self, admin_api, stores):
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        sr.record_review_item("quote", {"unit_price": 80.0}, run_id=run["id"],
+                              manufacturer="Zzz", part_number="NOPRIOR")  # single quote, no history
+        body = admin_api.get(f"/api/runs/{run['id']}/impact").json()
+        assert body["saving"] is None and body["saving_basis"] is None   # not a fabricated 0
+
+    def test_run_impact_unknown_run_404(self, admin_api):
+        assert admin_api.get("/api/runs/nope/impact").status_code == 404
+
+    def test_cumulative_impact_aggregates_real_orders(self, admin_api, stores):
+        sr, orders, _p, persistence = stores
+        prior = persistence.create_run(asset_specs=_SPECS)
+        po = orders.create_order({"run_id": prior["id"], "manufacturer": "Baldor",
+                                  "part_number": "EM3770T", "vendor_name": "Old Co",
+                                  "unit_price": 100.0})
+        orders.place_order(po["id"], placed_by="t")
+        run = persistence.create_run(asset_specs=_SPECS)
+        sr.record_review_item("quote", {"unit_price": 80.0}, status="confirmed",
+                              run_id=run["id"], vendor_name="A",
+                              manufacturer="Baldor", part_number="EM3770T")
+        o = orders.create_order({"run_id": run["id"], "manufacturer": "Baldor",
+                                 "part_number": "EM3770T", "vendor_name": "A",
+                                 "unit_price": 80.0})
+        orders.place_order(o["id"], placed_by="t")
+
+        body = admin_api.get("/api/impact").json()
+        assert "total_savings" in body and "savings_by_month" in body
+        assert body["estimate_model_version"] == "v1"
+        assert isinstance(body["contributing_order_ids"], list)
