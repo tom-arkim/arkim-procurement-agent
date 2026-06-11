@@ -379,6 +379,70 @@
 .proc-review .rv-ship { font-size: 13px; color: var(--text); line-height: 1.65; }
 .proc-review .rv-ship .dim { color: var(--muted); }
 
+/* ---- full impact panel (Your Arkim impact) ---- */
+.imp-hero-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+.imp-hero-card { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); padding: 20px 22px; overflow: hidden; position: relative; }
+.imp-hero-card.primary { border-color: var(--accent-line); background: var(--accent-fill); }
+.imp-hero-card .ihc-eye { font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted-2); margin-bottom: 10px; display: flex; align-items: center; gap: 7px; }
+.imp-hero-card.primary .ihc-eye { color: var(--accent-text); opacity: 0.8; }
+.imp-hero-card .ihc-num { font-size: 48px; font-weight: 200; letter-spacing: -2.5px; color: var(--text-strong); line-height: 1; font-variant-numeric: tabular-nums; }
+.imp-hero-card.primary .ihc-num { color: var(--accent-text); }
+.imp-hero-card .ihc-est { font-size: 11px; font-weight: 600; color: var(--muted-2); margin-top: 5px; font-style: italic; }
+.imp-hero-card.primary .ihc-est { color: var(--accent-text); opacity: 0.7; }
+.imp-hero-card .ihc-proof { font-size: 12.5px; color: var(--muted); margin-top: 10px; line-height: 1.6; padding-top: 10px; border-top: 1px solid var(--border-soft); }
+.imp-hero-card.primary .ihc-proof { border-color: var(--accent-line); color: var(--accent-text); opacity: 0.85; }
+.imp-hero-card .ihc-proof b { color: var(--text-strong); font-weight: 700; }
+.imp-hero-card.primary .ihc-proof b { color: var(--accent-text); opacity: 1; }
+
+.imp-work-card { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); overflow: hidden; margin-bottom: 16px; }
+.imp-work-card .iwc-head { padding: 14px 18px 12px; border-bottom: 1px solid var(--border-soft); }
+.imp-work-card .iwc-t { font-size: 13.5px; font-weight: 600; color: var(--text-strong); }
+.imp-work-card .iwc-s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.imp-work-body { display: grid; grid-template-columns: 1fr auto; }
+.imp-steps { padding: 14px 18px; border-right: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 0; }
+.imp-step { display: flex; align-items: center; gap: 12px; padding: 8px 0; position: relative; }
+.imp-step:not(:last-child)::after { content: ""; position: absolute; left: 12px; top: 32px; bottom: -8px; width: 1.5px; background: var(--border-soft); }
+.imp-step .is-dot { width: 26px; height: 26px; flex: none; border-radius: 50%; background: var(--accent-fill); border: 1.5px solid var(--accent-line); color: var(--accent-text); display: flex; align-items: center; justify-content: center; z-index: 1; }
+.imp-step .is-t { font-size: 13px; font-weight: 600; color: var(--text); }
+.imp-you { padding: 14px 18px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; min-width: 200px; }
+.imp-you .iy-l { font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--muted-2); margin-bottom: 10px; }
+.imp-you .iy-num { font-size: 36px; font-weight: 200; letter-spacing: -1.5px; color: var(--st-done); font-variant-numeric: tabular-nums; line-height: 1; }
+.imp-you .iy-label { font-size: 12px; font-weight: 600; color: var(--st-done); margin-top: 2px; }
+.imp-you .iy-did { font-size: 12px; color: var(--muted); margin-top: 14px; line-height: 1.6; padding-top: 12px; border-top: 1px solid var(--border-soft); }
+.imp-you .iy-est { font-size: 11px; font-style: italic; color: var(--muted-2); margin-top: 8px; }
+
+.imp-trend-card { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); padding: 18px 20px; margin-bottom: 16px; }
+.imp-trend-card .itc-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.imp-trend-card .itc-t { font-size: 13.5px; font-weight: 600; color: var(--text-strong); }
+.imp-trend-card .itc-s { font-size: 12px; color: var(--muted); }
+.imp-trend-bars { display: flex; align-items: flex-end; gap: 12px; height: 80px; }
+.imp-trend-bars .itb { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
+.imp-trend-bars .itb-bar { width: 100%; max-width: 54px; border-radius: 3px 3px 0 0; background: var(--accent); min-height: 2px; }
+.imp-trend-bars .itb-bar.zero { background: var(--border); border-radius: 2px; height: 3px !important; }
+.imp-trend-bars .itb-val { font-size: 11px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.imp-trend-bars .itb-val.zero { color: var(--muted-2); }
+.imp-trend-bars .itb-lbl { font-size: 10.5px; font-weight: 600; color: var(--muted-2); letter-spacing: 0.4px; }
+.imp-trend-note { font-size: 11.5px; color: var(--muted-2); margin-top: 12px; border-top: 1px solid var(--border-soft); padding-top: 10px; }
+
+.imp-proof-card { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); overflow: hidden; margin-bottom: 16px; }
+.imp-proof-card .ipc-head { padding: 12px 18px; border-bottom: 1px solid var(--border-soft); font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; color: var(--muted-2); display: flex; align-items: center; gap: 8px; }
+.imp-proof-row { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+.imp-proof-row:last-child { border-bottom: none; }
+.imp-proof-row .ipr-ic { width: 28px; height: 28px; flex: none; border-radius: var(--r); background: var(--st-done-fill); color: var(--st-done); display: flex; align-items: center; justify-content: center; }
+.imp-proof-row .ipr-tt { flex: 1; }
+.imp-proof-row .ipr-t { font-weight: 600; color: var(--text-strong); }
+.imp-proof-row .ipr-s { font-size: 12px; color: var(--muted); margin-top: 2px; line-height: 1.5; }
+.imp-proof-row .ipr-num { font-size: 17px; font-weight: 300; letter-spacing: -0.5px; color: var(--st-done); font-variant-numeric: tabular-nums; }
+.imp-proof-foot { display: flex; justify-content: space-between; align-items: center; padding: 10px 18px; background: var(--surface-2); border-top: 1px solid var(--border-soft); }
+
+.imp-method { padding: 13px 16px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+.imp-method b { color: var(--text); font-weight: 600; }
+.imp-low-data { text-align: center; padding: 30px 20px; }
+.imp-low-data .ild-t { font-size: 16px; font-weight: 600; color: var(--text-strong); }
+.imp-low-data .ild-s { font-family: var(--font-serif); font-style: italic; font-size: 15px; color: var(--muted); margin-top: 6px; }
+.imp-low-data .ild-sub { font-size: 13px; color: var(--muted-2); margin-top: 10px; max-width: 380px; margin-left: auto; margin-right: auto; line-height: 1.65; }
+@media (max-width: 900px) { .imp-hero-grid { grid-template-columns: 1fr; } .imp-work-body { grid-template-columns: 1fr; } .imp-steps { border-right: none; border-bottom: 1px solid var(--border-soft); } }
+
 /* ---- chevron loader ---- */
 .proc-chevstack { display: flex; flex-direction: column; gap: 2.5px; flex: none; }
 .proc-chevstack i { display: block; height: 5px; clip-path: polygon(0 0, 50% 100%, 100% 0); background: var(--accent); animation: proc-chev 1.2s ease-in-out infinite; }

@@ -26,7 +26,7 @@ type NavItem = { key: string; label: string; icon: ProcIconName; href?: string; 
 const NAV: NavItem[] = [
   { key: "home", label: "What needs me", icon: "box", href: "/" },
   { key: "request", label: "New request", icon: "plus", href: "/request" },
-  { key: "history", label: "History & prices", icon: "receipt", soon: true },
+  { key: "history", label: "History & prices", icon: "receipt", href: "/impact" }, // interim: impact view until the orders/prices tabs land
   { key: "settings", label: "Delivery settings", icon: "building", href: "/settings" },
 ];
 

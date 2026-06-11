@@ -15,7 +15,6 @@ import { useRuns } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcPill, SecHead, ProcHead, type ProcTone } from "./proc-ui";
 import { HomeProcImpact } from "./home-impact";
-import { useProcToast } from "./proc-shell";
 import type { Phase, SourcingRunListItem } from "@/types";
 
 const HANDOFF_PHASE: Phase = "pending_intake";
@@ -58,7 +57,6 @@ function relTime(iso?: string): string {
 
 export function HomeScreen() {
   const router = useRouter();
-  const fire = useProcToast();
   const { data: runs, isLoading, isError } = useRuns();
 
   const needPart = (
@@ -175,12 +173,12 @@ export function HomeScreen() {
 
       {/* ---- Your Arkim impact (real, from /api/impact) ---- */}
       <SecHead t="Your Arkim impact" />
-      <HomeProcImpact onDrill={() => fire("Full breakdown — coming in the next build")} />
+      <HomeProcImpact onDrill={() => router.push("/impact")} />
 
       {/* ---- More ---- */}
       <SecHead t="More" />
       <div className="proc-flight">
-        <button className="proc-fl" onClick={() => fire("History & prices — coming in the next build")}>
+        <button className="proc-fl" onClick={() => router.push("/impact")}>
           <span style={{ width: 32, height: 32, flexShrink: 0, borderRadius: "var(--r)", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <ProcIcon name="clock" size={16} />
           </span>
