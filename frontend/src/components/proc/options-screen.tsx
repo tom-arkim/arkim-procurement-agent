@@ -17,6 +17,8 @@ import { useRunLive } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ChevLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
+import { QuotesSection } from "./quotes-section";
+import { OrderSection } from "./order-section";
 import type { AssetSpecs, Candidate, Phase } from "@/types";
 
 const SOURCED_PHASES: Phase[] = [
@@ -149,6 +151,10 @@ export function OptionsScreen({ runId }: { runId: string }) {
           </div>
         </div>
       )}
+
+      {/* Quotes review → confirm, and order place → track (self-hide until relevant) */}
+      <QuotesSection runId={runId} />
+      <OrderSection runId={runId} />
     </Shell>
   );
 }
