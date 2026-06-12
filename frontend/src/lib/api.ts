@@ -159,8 +159,10 @@ export async function rejectRun(
 
 export async function confirmIntake(
   runId: string,
+  exactOnly = false,
 ): Promise<{ run_id: string; phase: string }> {
-  return request(`/runs/${runId}/confirm-intake`, { method: "POST" });
+  const qs = exactOnly ? "?exact_only=true" : "";
+  return request(`/runs/${runId}/confirm-intake${qs}`, { method: "POST" });
 }
 
 export async function openFromPending(

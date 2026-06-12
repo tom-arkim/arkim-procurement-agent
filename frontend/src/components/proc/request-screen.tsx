@@ -100,11 +100,11 @@ export function RequestScreen() {
     }
   };
 
-  const confirm = async () => {
+  const confirm = async (exactOnly: boolean) => {
     if (!runId) return;
     setBusy(true);
     try {
-      await confirmIntake(runId);
+      await confirmIntake(runId, exactOnly);
       router.push(`/parts/${runId}`);
     } catch {
       fire("Couldn't start sourcing — try adding a bit more detail.");
@@ -114,6 +114,9 @@ export function RequestScreen() {
 
   const specs = run?.asset_specs;
   const ready = specsReady(specs);
+  // Exact part number on file -> offer the exact-only choice (the honesty branch).
+  // Spec-based (no PN) -> equivalents are the whole point, so don't offer it.
+  const hasPartNumber = Boolean(val(specs?.part_number)) && !specs?.spec_based_sourcing;
   const partName =
     [val(specs?.manufacturer), val(specs?.model) || val(specs?.part_number)].filter(Boolean).join(" ") ||
     val(specs?.description) ||
@@ -246,9 +249,27 @@ export function RequestScreen() {
                   <button className="proc-btn" data-kind="quiet" onClick={() => setMoreInput(false)} disabled={busy}>Cancel</button>
                 )}
               </div>
+            ) : hasPartNumber ? (
+              <>
+                <div className="id-reply">
+                  We have the exact part number. Exact replacements are always a safe fit. Equivalents
+                  can be cheaper, but we&apos;ll only suggest them when there&apos;s enough detail to check the fit.
+                </div>
+                <div className="id-actions">
+                  <button className="proc-btn" data-kind="primary" disabled={busy} onClick={() => confirm(false)}>
+                    <ProcIcon name="checkCircle" size={15} />{busy ? "Starting…" : "Find options (incl. equivalents)"}
+                  </button>
+                  <button className="proc-btn" disabled={busy} onClick={() => confirm(true)}>
+                    Exact replacements only
+                  </button>
+                  <button className="proc-btn" data-kind="quiet" disabled={busy} onClick={() => setMoreInput(true)}>
+                    Not quite — add detail
+                  </button>
+                </div>
+              </>
             ) : (
               <div className="id-actions">
-                <button className="proc-btn" data-kind="primary" disabled={busy} onClick={confirm}>
+                <button className="proc-btn" data-kind="primary" disabled={busy} onClick={() => confirm(false)}>
                   <ProcIcon name="checkCircle" size={15} />{busy ? "Starting…" : "Yes — find options"}
                 </button>
                 <button className="proc-btn" data-kind="quiet" disabled={busy} onClick={() => setMoreInput(true)}>
