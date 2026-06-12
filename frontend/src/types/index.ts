@@ -432,6 +432,26 @@ export interface ImpactBreakdownItem {
   vendor?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// Reorder intelligence — forecast from the customer's own order cadence.
+// ---------------------------------------------------------------------------
+
+export interface ReorderItem {
+  manufacturer?: string | null;
+  part_number: string;
+  part: string;
+  vendor_name?: string | null;
+  order_count: number;
+  avg_interval_days: number;
+  avg_interval_weeks: number;
+  last_ordered: string;
+  days_since: number;
+  next_due: string;
+  days_until: number;
+  status: "ok" | "due_soon" | "overdue";
+  note: string;
+}
+
 export interface CumulativeImpact {
   total_savings: number;
   savings_by_month: ImpactMonth[];

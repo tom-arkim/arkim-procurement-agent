@@ -64,6 +64,9 @@ export const queryKeys = {
   impact: {
     cumulative: () => ["impact", "cumulative"] as const,
   },
+  reorder: {
+    all: () => ["reorder"] as const,
+  },
 } as const;
 
 // ---------------------------------------------------------------------------

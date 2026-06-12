@@ -22,6 +22,7 @@ import type {
   CreateRunResponse,
   CumulativeImpact,
   Facility,
+  ReorderItem,
   ApprovalRule,
   OrderActionResult,
   OrdersResponse,
@@ -255,6 +256,11 @@ export async function getAllOrders(): Promise<{ count: number; orders: OrdersRes
 
 export async function getImpact(): Promise<CumulativeImpact> {
   return request("/impact");
+}
+
+/** Reorder intelligence — parts due to be reordered (forecast from order cadence). */
+export async function getReorder(): Promise<{ count: number; reorder: ReorderItem[] }> {
+  return request("/reorder");
 }
 
 // ---------------------------------------------------------------------------

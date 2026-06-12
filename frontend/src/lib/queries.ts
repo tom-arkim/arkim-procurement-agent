@@ -42,6 +42,7 @@ import {
   getOrders,
   getAllOrders,
   getImpact,
+  getReorder,
 } from "./api";
 import { queryKeys } from "./query-client";
 import type {
@@ -337,6 +338,13 @@ export function useImpact() {
   return useQuery({
     queryKey: queryKeys.impact.cumulative(),
     queryFn: getImpact,
+  });
+}
+
+export function useReorder() {
+  return useQuery({
+    queryKey: queryKeys.reorder.all(),
+    queryFn: getReorder,
   });
 }
 

@@ -11,11 +11,11 @@
  */
 
 import { useRouter } from "next/navigation";
-import { useRuns } from "@/lib/queries";
+import { useRuns, useReorder } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcPill, SecHead, ProcHead, type ProcTone } from "./proc-ui";
 import { HomeProcImpact } from "./home-impact";
-import type { Phase, SourcingRunListItem } from "@/types";
+import type { Phase, ReorderItem, SourcingRunListItem } from "@/types";
 
 const HANDOFF_PHASE: Phase = "pending_intake";
 const INFLIGHT_PHASES: Phase[] = [
@@ -58,6 +58,7 @@ function relTime(iso?: string): string {
 export function HomeScreen() {
   const router = useRouter();
   const { data: runs, isLoading, isError } = useRuns();
+  const { data: reorderData } = useReorder();
 
   const needPart = (
     <button className="proc-btnprimary" onClick={() => router.push("/request")}>
@@ -175,6 +176,18 @@ export function HomeScreen() {
       <SecHead t="Your Arkim impact" />
       <HomeProcImpact onDrill={() => router.push("/impact")} />
 
+      {/* ---- Coming up (reorder intelligence, from your own order cadence) ---- */}
+      {(reorderData?.reorder.length ?? 0) > 0 && (
+        <>
+          <SecHead t="Coming up" />
+          <div className="proc-actions">
+            {reorderData!.reorder.slice(0, 4).map((r) => (
+              <ReorderCard key={`${r.manufacturer}-${r.part_number}`} item={r} onOrder={() => router.push("/request")} />
+            ))}
+          </div>
+        </>
+      )}
+
       {/* ---- More ---- */}
       <SecHead t="More" />
       <div className="proc-flight">
@@ -203,6 +216,24 @@ export function HomeScreen() {
           <ProcIcon name="chevR" size={15} color="var(--muted-2)" />
         </button>
       </div>
+    </div>
+  );
+}
+
+function ReorderCard({ item, onOrder }: { item: ReorderItem; onOrder: () => void }) {
+  const overdue = item.status === "overdue";
+  return (
+    <div className="proc-reorder-card" style={overdue ? { borderColor: "var(--st-overdue)" } : undefined}>
+      <span className="ric-ic" style={overdue ? { color: "var(--st-overdue)", background: "var(--st-overdue-fill)", borderColor: "transparent" } : undefined}>
+        <ProcIcon name={overdue ? "alert" : "refresh"} size={17} />
+      </span>
+      <div className="ric-tt">
+        <div className="ric-t">{item.part}{item.vendor_name ? ` · ${item.vendor_name}` : ""}</div>
+        <div className="ric-s">{item.note}</div>
+      </div>
+      <button className="proc-btn" data-kind={overdue ? "primary" : undefined} style={{ padding: "7px 12px", fontSize: 12.5 }} onClick={onOrder}>
+        Order now
+      </button>
     </div>
   );
 }
