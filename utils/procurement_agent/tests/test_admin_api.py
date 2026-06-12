@@ -358,6 +358,37 @@ class TestBuyerLoopEndpoints:
     def test_process_replies_unknown_run_404(self, admin_api):
         assert admin_api.post("/api/runs/nope/process-replies").status_code == 404
 
+    def test_place_order_from_confirmed_quote(self, admin_api, stores):
+        # RFQ path: a confirmed quote becomes a placed order directly (double gate:
+        # confirmed price + this deliberate place action).
+        sr, orders, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        item_id = sr.record_review_item(
+            "quote", {"unit_price": 88.0, "currency": "USD", "quantity": 2, "lead_time": "3 days"},
+            status="confirmed", run_id=run["id"], supplier_domain="acme.com",
+            vendor_name="Acme", manufacturer="Baldor", part_number="EM3770T")
+
+        r = admin_api.post(f"/api/review-items/{item_id}/place-order")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["placed"] is True
+        o = body["order"]
+        assert o["status"] == "placed" and o["unit_price"] == 88.0
+        assert o["source"] == "rfq" and o["quantity"] == 2 and o["vendor_name"] == "Acme"
+        listed = admin_api.get(f"/api/runs/{run['id']}/orders").json()
+        assert listed["count"] == 1 and listed["orders"][0]["status"] == "placed"
+
+    def test_place_order_requires_confirmed_quote(self, admin_api, stores):
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        pending = sr.record_review_item("quote", {"unit_price": 50.0}, status="pending",
+                                        run_id=run["id"], vendor_name="X",
+                                        manufacturer="Baldor", part_number="EM3770T")
+        assert admin_api.post(f"/api/review-items/{pending}/place-order").status_code == 409
+
+    def test_place_order_unknown_item_404(self, admin_api):
+        assert admin_api.post("/api/review-items/nope/place-order").status_code == 404
+
     def test_list_all_orders_ungated(self, admin_api, stores):
         # Customer History needs a cross-run orders read. Ungated like the other
         # buyer-loop run endpoints (CLEANUP §4.1) — distinct from gated /api/admin/orders.

@@ -1668,6 +1668,48 @@ def reject_review_item(item_id: str):
             "item": supplier_registry.get_review_item(item_id)}
 
 
+@app.post("/api/review-items/{item_id}/place-order")
+def place_order_from_quote(item_id: str):
+    """Place a durable order directly from a CONFIRMED quote (the RFQ path: Tier 3 RFQ ->
+    quote -> confirm -> order). The double gate holds: the quote must already be
+    human-confirmed (its price is written), AND this is a separate deliberate action —
+    no accidental placement, and no placement without a confirmed price. Ungated like the
+    other review-item endpoints (binds to the buyer role when real auth lands; CLEANUP §4.1)."""
+    from utils import orders, supplier_registry
+    item = supplier_registry.get_review_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    if item.get("kind") != "quote":
+        raise HTTPException(status_code=422, detail="Only a quote can be placed as an order")
+    if item.get("status") != "confirmed":
+        raise HTTPException(status_code=409, detail="Confirm the quote before placing the order")
+    payload = item.get("payload") or {}
+    selection = {
+        "run_id": item.get("run_id"),
+        "vendor_name": item.get("vendor_name"),
+        "supplier_domain": item.get("supplier_domain"),
+        "manufacturer": item.get("manufacturer"),
+        "part_number": item.get("part_number"),
+        "unit_price": payload.get("unit_price"),
+        "currency": payload.get("currency") or "USD",
+        "lead_time": payload.get("lead_time"),
+        "source": "rfq",
+    }
+    order = orders.create_order(selection, quantity=int(payload.get("quantity") or 1), placed_by="buyer")
+    if not order:
+        raise HTTPException(status_code=500, detail="Order capture failed")
+    placed = orders.place_order(order["id"], placed_by="buyer")
+    final = placed or order
+    _persist_order_on_run(item.get("run_id"), final)
+    return {
+        "success": placed is not None,
+        "order": final,
+        "placed": placed is not None,
+        "message": "Order placed." if placed else "Captured as draft — no resolvable price.",
+        "item_id": item_id,
+    }
+
+
 # ---------------------------------------------------------------------------
 # "Your Arkim impact" — all arithmetic lives in utils.impact (one versioned module).
 # These endpoints only expose its output; the frontend renders, never re-computes.
