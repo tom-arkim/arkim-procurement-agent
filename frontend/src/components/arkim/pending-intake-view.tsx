@@ -9,6 +9,16 @@ import { Pill } from "@/components/ui/pill";
 import { PhaseBar } from "@/components/ui/phase";
 import type { SourcingRunDetail } from "@/types";
 
+/** The maintenance-handoff fields this view reads (the payload is otherwise untyped). */
+interface HandoffShape {
+  submitted_by?: string;
+  context?: {
+    work_order_id?: string;
+    asset_tag?: string;
+    chat_thread_summary?: string;
+  };
+}
+
 export function PendingIntakeView({
   run,
   className,
@@ -19,8 +29,8 @@ export function PendingIntakeView({
   const router = useRouter();
   const pushToast = useArkimStore((s) => s.pushToast);
 
-  const handoff = run.maintenance_handoff as Record<string, unknown> | undefined;
-  const context = handoff?.context as Record<string, unknown> | undefined;
+  const handoff = run.maintenance_handoff as HandoffShape | undefined;
+  const context = handoff?.context;
   const specs = run.asset_specs;
 
   const openMut = useOpenFromPending(run.id);
