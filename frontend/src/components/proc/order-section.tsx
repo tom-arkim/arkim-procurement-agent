@@ -13,10 +13,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useOrders, useExecuteOrder, useMarkDelivered, useRunLive } from "@/lib/queries";
+import { useOrders, useExecuteOrder, useMarkDelivered, useRunLive, useSiteShipTo } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { procMoney } from "./proc-ui";
-import { getShipTo, PRIMARY_SITE } from "@/lib/proc-config";
+import { defaultShipTo, PRIMARY_SITE } from "@/lib/proc-config";
 import type { Order, OrderStatus, Phase } from "@/types";
 
 const FLOW = ["placed", "confirmed", "shipped", "received"] as const;
@@ -83,7 +83,8 @@ function PlaceOrderCard({
 }) {
   const [confirming, setConfirming] = useState(false);
   const router = useRouter();
-  const shipTo = getShipTo(PRIMARY_SITE.id);
+  const { data: shipToData } = useSiteShipTo(PRIMARY_SITE.id);
+  const shipTo = shipToData?.ship_to ?? defaultShipTo(PRIMARY_SITE.id);
 
   if (noPrice) {
     return (

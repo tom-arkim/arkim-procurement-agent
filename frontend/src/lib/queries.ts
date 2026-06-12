@@ -43,7 +43,10 @@ import {
   getAllOrders,
   getImpact,
   getReorder,
+  getSiteShipTo,
+  putSiteShipTo,
 } from "./api";
+import type { ShipTo } from "./proc-config";
 import { queryKeys } from "./query-client";
 import type {
   ApproveRequest,
@@ -345,6 +348,28 @@ export function useReorder() {
   return useQuery({
     queryKey: queryKeys.reorder.all(),
     queryFn: getReorder,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Site delivery (ship-to) settings
+// ---------------------------------------------------------------------------
+
+export function useSiteShipTo(siteId: string) {
+  return useQuery({
+    queryKey: queryKeys.siteShipTo.bySite(siteId),
+    queryFn: () => getSiteShipTo(siteId),
+    enabled: Boolean(siteId),
+  });
+}
+
+export function useSaveSiteShipTo(siteId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ShipTo) => putSiteShipTo(siteId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.siteShipTo.bySite(siteId) });
+    },
   });
 }
 

@@ -10,13 +10,23 @@
  * the form is functional within the browser; flagged in the build report.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead } from "./proc-ui";
-import { PROC_SITES, getShipTo, saveShipTo, type ShipTo } from "@/lib/proc-config";
+import { PROC_SITES, defaultShipTo, type ShipTo } from "@/lib/proc-config";
+import { useSiteShipTo, useSaveSiteShipTo } from "@/lib/queries";
 
 type Field = { k: keyof ShipTo; label: string; placeholder: string; hint?: string; multiline?: boolean };
+
+/** Pick the 6 ship-to fields off the backend payload (drops site_id/updated_at). */
+function pickShipTo(s: (ShipTo & { updated_at?: string }) | null | undefined): ShipTo | null {
+  if (!s) return null;
+  return {
+    company: s.company ?? "", address: s.address ?? "", city: s.city ?? "",
+    attention: s.attention ?? "", hours: s.hours ?? "", instructions: s.instructions ?? "",
+  };
+}
 
 const FIELDS: Field[] = [
   { k: "company", label: "Receiving company name", placeholder: "Company name as it should appear on packages" },
@@ -31,22 +41,30 @@ export function SettingsScreen() {
   const router = useRouter();
   const [siteIdx, setSiteIdx] = useState(0);
   const site = PROC_SITES[siteIdx];
+  const { data, isLoading } = useSiteShipTo(site.id);
+  const saveMutation = useSaveSiteShipTo(site.id);
 
-  // Seed each site's form from its saved/default ship-to (read once on mount).
-  const [forms, setForms] = useState<Record<string, ShipTo>>(() =>
-    PROC_SITES.reduce((acc, s) => ({ ...acc, [s.id]: getShipTo(s.id) }), {} as Record<string, ShipTo>),
-  );
+  const [forms, setForms] = useState<Record<string, ShipTo>>({});
   const [savedId, setSavedId] = useState<string | null>(null);
 
-  const form = forms[site.id];
-  const update = (k: keyof ShipTo, v: string) =>
-    setForms((f) => ({ ...f, [site.id]: { ...f[site.id], [k]: v } }));
+  // Seed the active site's form when its stored ship-to resolves (saved value, else the
+  // seeded default). Only seeds once per site so in-progress edits aren't clobbered.
+  useEffect(() => {
+    if (isLoading) return;
+    setForms((f) => (f[site.id] ? f : { ...f, [site.id]: pickShipTo(data?.ship_to) ?? defaultShipTo(site.id) }));
+  }, [site.id, isLoading, data]);
 
-  const save = () => {
-    saveShipTo(site.id, form);
-    setSavedId(site.id);
-    setTimeout(() => setSavedId((s) => (s === site.id ? null : s)), 2500);
-  };
+  const form = forms[site.id] ?? defaultShipTo(site.id);
+  const update = (k: keyof ShipTo, v: string) =>
+    setForms((f) => ({ ...f, [site.id]: { ...(f[site.id] ?? defaultShipTo(site.id)), [k]: v } }));
+
+  const save = () =>
+    saveMutation.mutate(form, {
+      onSuccess: () => {
+        setSavedId(site.id);
+        setTimeout(() => setSavedId((s) => (s === site.id ? null : s)), 2500);
+      },
+    });
 
   return (
     <div className="proc-max proc-center">
@@ -94,8 +112,9 @@ export function SettingsScreen() {
 
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
           <button className="proc-btn" data-kind="quiet" onClick={() => router.push("/")}>Cancel</button>
-          <button className="proc-btn" data-kind="primary" onClick={save}>
-            <ProcIcon name="checkCircle" size={14} />{savedId === site.id ? "Saved" : "Save settings"}
+          <button className="proc-btn" data-kind="primary" onClick={save} disabled={saveMutation.isPending}>
+            <ProcIcon name="checkCircle" size={14} />
+            {saveMutation.isPending ? "Saving…" : savedId === site.id ? "Saved" : "Save settings"}
           </button>
         </div>
       </div>

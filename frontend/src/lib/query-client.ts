@@ -67,6 +67,9 @@ export const queryKeys = {
   reorder: {
     all: () => ["reorder"] as const,
   },
+  siteShipTo: {
+    bySite: (siteId: string) => ["site-shipto", siteId] as const,
+  },
 } as const;
 
 // ---------------------------------------------------------------------------

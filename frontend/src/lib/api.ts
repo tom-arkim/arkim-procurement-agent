@@ -6,6 +6,7 @@
  */
 
 import { ApiError } from "./query-client";
+import type { ShipTo } from "./proc-config";
 
 // When NEXT_PUBLIC_API_URL is set (e.g. http://localhost:8000) requests go
 // directly to the FastAPI backend. When unset, the Next.js rewrite proxy at
@@ -261,6 +262,23 @@ export async function getImpact(): Promise<CumulativeImpact> {
 /** Reorder intelligence — parts due to be reordered (forecast from order cadence). */
 export async function getReorder(): Promise<{ count: number; reorder: ReorderItem[] }> {
   return request("/reorder");
+}
+
+// ---------------------------------------------------------------------------
+// Site delivery (ship-to) settings
+// ---------------------------------------------------------------------------
+
+export interface SiteShipToResponse {
+  site_id: string;
+  ship_to: (ShipTo & { updated_at?: string }) | null;
+}
+
+export async function getSiteShipTo(siteId: string): Promise<SiteShipToResponse> {
+  return request(`/sites/${siteId}/ship-to`);
+}
+
+export async function putSiteShipTo(siteId: string, body: ShipTo): Promise<SiteShipToResponse> {
+  return request(`/sites/${siteId}/ship-to`, { method: "PUT", body: JSON.stringify(body) });
 }
 
 // ---------------------------------------------------------------------------
