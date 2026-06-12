@@ -419,6 +419,11 @@ def _run_sourcing_background(
             warranty_status=warranty_status,
         )
         result = agent.run(run_model)
+        # Exact-only mode (no-spec-sheet honesty branch): drop aftermarket/equivalent
+        # Tier 2/3 candidates, leaving only exact OEM matches (Tier 1 untouched).
+        if specs_dict.get("exact_only"):
+            from utils.sourcing_filter import apply_exact_only
+            result = apply_exact_only(result)
     except Exception as exc:
         log.error("[%s] Sourcing failed: %s", run_id, exc)
         with _SessionFactory() as session:
@@ -1132,13 +1137,17 @@ def reject_run(run_id: str, body: RejectRequest):
 
 
 @app.post("/api/runs/{run_id}/confirm-intake")
-def confirm_intake(run_id: str, background_tasks: BackgroundTasks):
+def confirm_intake(run_id: str, background_tasks: BackgroundTasks, exact_only: bool = False):
     """
     Confirm intake specs and atomically advance to sourcing.
 
     Writes the inventory stub and transitions phase in a single DB commit so
     there is no window where the run is phase=sourcing without inventory_result.
     Idempotent: returns 409 if the run is already past intake.
+
+    exact_only=true ("find exact replacements only" — the no-spec-sheet honesty
+    branch): records the flag so the background sourcing drops aftermarket/equivalent
+    Tier 2/3 candidates, surfacing only exact OEM matches (Tier 1 network unaffected).
     """
     with _SessionFactory() as session:
         run = session.get(SourcingRunORM, run_id)
@@ -1158,6 +1167,9 @@ def confirm_intake(run_id: str, background_tasks: BackgroundTasks):
                 detail="No asset specs captured yet — complete intake chat first",
             )
         specs_dict = json.loads(run.asset_specs_json)
+        if exact_only:
+            specs_dict["exact_only"] = True
+            run.asset_specs_json = json.dumps(specs_dict)
         urgency_factor = run.urgency_factor
         warranty_status = run.warranty_status
         run.inventory_result_json = json.dumps({

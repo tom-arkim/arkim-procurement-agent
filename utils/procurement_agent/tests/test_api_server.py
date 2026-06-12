@@ -479,6 +479,43 @@ class TestConfirmIntake:
         # SpecComparisonAgent artifact flows through to camelCase comparisonArtifact.
         assert tier1[0]["comparisonArtifact"] == {"fit": "confirmed"}
 
+    def test_exact_only_filters_aftermarket_from_tier2(self, api, monkeypatch):
+        # The no-spec-sheet honesty branch: confirm-intake?exact_only=true -> background
+        # sourcing drops aftermarket/equivalent Tier 2 candidates, keeps exact OEM.
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({"manufacturer": "Goulds", "part_number": "3196"}))
+        sourcing = _empty_sourcing()
+        sourcing["tier_2"]["results"] = [
+            {"vendor_name": "Exact Co", "match_type": "Exact OEM", "base_price": 100,
+             "suitability_score": 80, "confidence_score": 70},
+            {"vendor_name": "Aftermarket Co", "match_type": "Aftermarket Compatible", "base_price": 80,
+             "suitability_score": 70, "confidence_score": 60},
+        ]
+        sourcing["tier_2"]["count"] = 2
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=sourcing, artifact=None)
+
+        api.post(f"/api/runs/{rid}/confirm-intake?exact_only=true")
+        tier2 = api.get(f"/api/runs/{rid}").json()["sourcing_results"]["tier2"]
+        names = [c["vendorName"] for c in tier2]
+        assert names == ["Exact Co"]   # aftermarket dropped
+
+    def test_default_keeps_equivalents(self, api, monkeypatch):
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({"manufacturer": "Goulds", "part_number": "3196"}))
+        sourcing = _empty_sourcing()
+        sourcing["tier_2"]["results"] = [
+            {"vendor_name": "Exact Co", "match_type": "Exact OEM", "base_price": 100,
+             "suitability_score": 80, "confidence_score": 70},
+            {"vendor_name": "Aftermarket Co", "match_type": "Aftermarket Compatible", "base_price": 80,
+             "suitability_score": 70, "confidence_score": 60},
+        ]
+        sourcing["tier_2"]["count"] = 2
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=sourcing, artifact=None)
+
+        api.post(f"/api/runs/{rid}/confirm-intake")  # no exact_only -> equivalents kept
+        tier2 = api.get(f"/api/runs/{rid}").json()["sourcing_results"]["tier2"]
+        assert len(tier2) == 2
+
     def test_sourcing_failure_advances_to_error_phase(self, api, monkeypatch):
         # A background SourcingAgent failure advances the run to phase="error"
         # (the React frontend renders this state and stops polling) rather than
