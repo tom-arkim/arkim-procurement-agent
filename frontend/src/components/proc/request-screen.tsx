@@ -11,10 +11,10 @@
  * UI never fabricates an identification.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { createRun, sendMessage, confirmIntake } from "@/lib/api";
+import { createRun, sendMessage, confirmIntake, uploadNameplate } from "@/lib/api";
 import { useRun } from "@/lib/queries";
 import { queryKeys } from "@/lib/query-client";
 import { ProcIcon } from "./proc-icon";
@@ -46,6 +46,8 @@ export function RequestScreen() {
 
   const [stage, setStage] = useState<Stage>("entry");
   const [text, setText] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [runId, setRunId] = useState<string | null>(null);
   const [reply, setReply] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -61,13 +63,19 @@ export function RequestScreen() {
 
   const start = async () => {
     const desc = text.trim();
-    if (!desc) return;
+    if (!desc && !file) return;
     setStage("working");
     try {
       const created = await createRun({});
       setRunId(created.id);
-      const r = await sendMessage(created.id, { content: desc });
-      setReply(r.message.content);
+      if (file) {
+        // Nameplate photo -> vision extraction updates the run's asset_specs.
+        const up = await uploadNameplate(created.id, file);
+        setReply(up.message?.content ?? "Read the nameplate from your photo.");
+      } else {
+        const r = await sendMessage(created.id, { content: desc });
+        setReply(r.message.content);
+      }
       refresh(created.id);
       setStage("identify");
     } catch {
@@ -129,9 +137,29 @@ export function RequestScreen() {
               placeholder="Describe the part you need… (e.g. 'air-oil separator for the GA37 compressor')"
               autoFocus
             />
+            {file && (
+              <div className="ask-file">
+                <ProcIcon name="toolbox" size={16} color="var(--muted)" />
+                <span>
+                  <div>{file.name}</div>
+                  <div className="af-meta">Nameplate photo · {Math.round(file.size / 1024)} KB</div>
+                </span>
+                <button className="af-x" onClick={() => setFile(null)} title="Remove"><ProcIcon name="chevR" size={14} /></button>
+              </div>
+            )}
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
             <div className="ask-row">
+              <button className="ask-attach" onClick={() => fileRef.current?.click()}>
+                <ProcIcon name="box" size={15} />Photo of the nameplate
+              </button>
               <span className="ask-spacer" />
-              <button className="ask-send" disabled={!text.trim()} onClick={start}>
+              <button className="ask-send" disabled={!text.trim() && !file} onClick={start}>
                 <ProcIcon name="arrowR" size={17} color="var(--on-accent)" />
               </button>
             </div>
@@ -157,8 +185,8 @@ export function RequestScreen() {
         <div className="proc-working">
           <ChevLoader size={20} />
           <div>
-            <div className="w-t">Identifying part…</div>
-            <div className="w-s">Checking service records and manuals.</div>
+            <div className="w-t">{file ? "Reading the nameplate…" : "Identifying part…"}</div>
+            <div className="w-s">{file ? "Pulling the part details from your photo." : "Checking service records and manuals."}</div>
           </div>
         </div>
       )}

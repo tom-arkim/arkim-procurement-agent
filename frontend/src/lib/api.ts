@@ -108,7 +108,13 @@ export async function sendMessage(
 export async function uploadNameplate(
   runId: string,
   file: File,
-): Promise<{ run_id: string; filename: string; size_bytes: number; extraction: unknown }> {
+): Promise<{
+  run_id: string;
+  filename: string;
+  size_bytes: number;
+  message?: { id: string; role: string; content: string; created_at: string };
+  extraction: unknown;
+}> {
   const form = new FormData();
   form.append("file", file);
   // Don't set Content-Type header — browser sets it with boundary for multipart.

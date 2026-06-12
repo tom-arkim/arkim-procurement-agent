@@ -340,6 +340,12 @@
 .ask-send { width: 38px; height: 38px; flex: none; border-radius: var(--r); border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: filter 0.14s, opacity 0.14s; }
 .ask-send:hover { filter: brightness(1.08); }
 .ask-send[disabled] { opacity: 0.38; cursor: default; filter: none; }
+.ask-attach { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--muted); padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); cursor: pointer; font-family: var(--font-sans); transition: color 0.14s, border-color 0.14s; }
+.ask-attach:hover { color: var(--text); border-color: var(--accent-line); }
+.ask-file { display: inline-flex; align-items: center; gap: 10px; margin-top: 12px; padding: 8px 11px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); font-size: 12.5px; font-weight: 600; color: var(--text); }
+.ask-file .af-meta { font-size: 11px; font-weight: 500; color: var(--muted); margin-top: 1px; }
+.ask-file .af-x { background: none; border: none; color: var(--muted); cursor: pointer; display: flex; padding: 3px; margin-left: 4px; }
+.ask-file .af-x:hover { color: var(--text); }
 .ask-hint { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted-2); margin-top: 12px; }
 .ask-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .ask-chip { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; color: var(--accent-text); border: 1px solid var(--accent-line); background: var(--accent-fill); border-radius: 999px; padding: 7px 13px; cursor: pointer; font-family: var(--font-sans); transition: background-color 0.14s; }
