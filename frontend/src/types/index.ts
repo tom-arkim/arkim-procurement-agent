@@ -422,6 +422,16 @@ export interface ImpactMonth {
   note: string;
 }
 
+/** One order's measured saving — drillable per-order proof. */
+export interface ImpactBreakdownItem {
+  order_id: string | null;
+  month: string;
+  saving: number;
+  saving_basis: string | null;
+  part?: string | null;
+  vendor?: string | null;
+}
+
 export interface CumulativeImpact {
   total_savings: number;
   savings_by_month: ImpactMonth[];
@@ -429,6 +439,7 @@ export interface CumulativeImpact {
   time_estimate_minutes: number;
   estimate_model_version: string;
   contributing_order_ids: string[];
+  breakdown: ImpactBreakdownItem[];
 }
 
 // ---------------------------------------------------------------------------

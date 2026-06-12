@@ -21,6 +21,10 @@ import type { CumulativeImpact, ImpactCounts, ImpactMonth } from "@/types";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fmtMonth = (m: string) => { const mo = Number(m.split("-")[1]); return mo >= 1 && mo <= 12 ? MONTHS[mo - 1] : m; };
+const basisLabel = (b: string | null) =>
+  b === "vs_last_paid" ? "vs your last paid price"
+  : b === "vs_highest_quote" ? "vs the highest quote received"
+  : "measured saving";
 
 function fmtTime(minutes: number): string {
   if (!minutes || minutes <= 0) return "—";
@@ -66,7 +70,6 @@ export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
   const time = fmtTime(d.time_estimate_minutes);
   const steps = workSteps(d.counts);
   const months = d.savings_by_month;
-  const earnedMonths = months.filter((m) => m.savings > 0);
   const hasSavings = d.total_savings > 0;
   const hasAnything = hasSavings || months.length > 0 || d.counts.suppliers_contacted > 0;
 
@@ -153,18 +156,18 @@ export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
         </div>
       </div>
 
-      {/* per-month proof */}
-      {earnedMonths.length > 0 && (
+      {/* per-order proof — every figure traces to one real order */}
+      {d.breakdown.length > 0 && (
         <div className="imp-proof-card">
-          <div className="ipc-head"><ProcIcon name="doc" size={12} />Savings breakdown — every figure traces to real orders</div>
-          {earnedMonths.map((m) => (
-            <div key={m.month} className="imp-proof-row">
+          <div className="ipc-head"><ProcIcon name="doc" size={12} />Savings breakdown — every figure traces to a real order</div>
+          {d.breakdown.map((row, i) => (
+            <div key={row.order_id ?? i} className="imp-proof-row">
               <span className="ipr-ic"><ProcIcon name="checkCircle" size={15} /></span>
               <div className="ipr-tt">
-                <div className="ipr-t">{fmtMonth(m.month)}</div>
-                <div className="ipr-s">{m.note}{m.order_ids.length ? ` · ${m.order_ids.length} order${m.order_ids.length === 1 ? "" : "s"}` : ""}</div>
+                <div className="ipr-t">{row.part ?? "Part"}{row.vendor ? ` — ${row.vendor}` : ""}</div>
+                <div className="ipr-s">{fmtMonth(row.month)} · {basisLabel(row.saving_basis)}</div>
               </div>
-              <div className="ipr-num">− {procMoney(m.savings)}</div>
+              <div className="ipr-num">− {procMoney(row.saving)}</div>
             </div>
           ))}
           <div className="imp-proof-foot">
