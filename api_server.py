@@ -1592,6 +1592,16 @@ def list_all_orders():
     return {"count": len(rows), "orders": rows}
 
 
+@app.get("/api/reorder")
+def list_reorder():
+    """Reorder intelligence — parts due to be reordered, forecast from the customer's OWN
+    order history (cadence from repeat purchases; never external data). Ungated like the
+    History feed."""
+    from utils import reorder
+    items = reorder.gather_reorder()
+    return {"count": len(items), "reorder": items}
+
+
 # ---------------------------------------------------------------------------
 # Buyer-loop endpoints — inbound quote review (the comparison table) + confirm/reject.
 #

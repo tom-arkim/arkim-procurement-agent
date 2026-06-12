@@ -403,6 +403,19 @@ class TestBuyerLoopEndpoints:
         assert body["count"] >= 1
         assert any(o["vendor_name"] == "Bay Power" for o in body["orders"])
 
+    def test_reorder_endpoint_forecasts_repeat_part(self, admin_api, stores):
+        _sr, orders, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        for _ in range(2):  # two purchases of the same part -> a cadence
+            o = orders.create_order({"run_id": run["id"], "manufacturer": "Baldor",
+                                     "part_number": "EM3770T", "vendor_name": "Bay Power",
+                                     "unit_price": 100.0})
+            orders.place_order(o["id"], placed_by="t")
+        r = admin_api.get("/api/reorder")
+        assert r.status_code == 200
+        item = next(i for i in r.json()["reorder"] if i["part_number"] == "EM3770T")
+        assert item["order_count"] == 2 and item["status"] in ("ok", "due_soon", "overdue")
+
 
 # ---------------------------------------------------------------------------
 # "Your Arkim impact" endpoints — exposes utils.impact over the isolated stores.
