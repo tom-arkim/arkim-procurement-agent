@@ -30,12 +30,14 @@ def admin_api(tmp_path, monkeypatch):
     monkeypatch.setattr(persistence, "_SessionFactory", TestSession)
 
     # Redirect the raw-sqlite3 / json stores the admin endpoints read.
-    from utils import supplier_registry, orders, price_db
+    from utils import supplier_registry, orders, price_db, site_settings
     monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(supplier_registry, "_DB_PATH", str(tmp_path / "supplier_registry.sqlite"))
     monkeypatch.setattr(orders, "_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(orders, "_DB_PATH", str(tmp_path / "orders.sqlite"))
     monkeypatch.setattr(price_db, "_DB_PATH", str(tmp_path / "price_db.json"))
+    monkeypatch.setattr(site_settings, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(site_settings, "_DB_PATH", str(tmp_path / "site_settings.sqlite"))
 
     monkeypatch.setenv("ARKIM_ADMIN_TOKEN", _TOKEN)
 
@@ -402,6 +404,21 @@ class TestBuyerLoopEndpoints:
         body = r.json()
         assert body["count"] >= 1
         assert any(o["vendor_name"] == "Bay Power" for o in body["orders"])
+
+    def test_site_shipto_get_empty_put_get(self, admin_api):
+        # No ship-to saved yet -> null (UI falls back to its seeded default).
+        assert admin_api.get("/api/sites/lamirada/ship-to").json()["ship_to"] is None
+        body = {"company": "CAPTEK Softgel", "address": "14704 Industry Circle",
+                "city": "La Mirada, CA 90638", "attention": "Sam Torres — Maintenance",
+                "hours": "Mon–Fri 7–3:30", "instructions": "Dock 2"}
+        r = admin_api.put("/api/sites/lamirada/ship-to", json=body)
+        assert r.status_code == 200 and r.json()["ship_to"]["company"] == "CAPTEK Softgel"
+        # persisted + readable
+        got = admin_api.get("/api/sites/lamirada/ship-to").json()["ship_to"]
+        assert got["address"] == "14704 Industry Circle" and got["attention"].startswith("Sam Torres")
+        # upsert replaces in place (one row per site)
+        admin_api.put("/api/sites/lamirada/ship-to", json={**body, "instructions": "Dock 4"})
+        assert admin_api.get("/api/sites/lamirada/ship-to").json()["ship_to"]["instructions"] == "Dock 4"
 
     def test_reorder_endpoint_forecasts_repeat_part(self, admin_api, stores):
         _sr, orders, _p, persistence = stores

@@ -1602,6 +1602,33 @@ def list_reorder():
     return {"count": len(items), "reorder": items}
 
 
+class ShipToBody(BaseModel):
+    company: str = ""
+    address: str = ""
+    city: str = ""
+    attention: str = ""
+    hours: str = ""
+    instructions: str = ""
+
+
+@app.get("/api/sites/{site_id}/ship-to")
+def get_site_shipto(site_id: str):
+    """A site's delivery ship-to (the durable store behind Delivery Settings + the
+    graduated disclosure at order placement). null when nothing is saved yet — the UI
+    falls back to its seeded default. Ungated like the other customer endpoints."""
+    from utils import site_settings
+    return {"site_id": site_id, "ship_to": site_settings.get_shipto(site_id)}
+
+
+@app.put("/api/sites/{site_id}/ship-to")
+def put_site_shipto(site_id: str, body: ShipToBody):
+    """Save (upsert) a site's ship-to. One row per site. Ungated; binds to the buyer/
+    admin role when real auth lands (CLEANUP §4.1)."""
+    from utils import site_settings
+    site_settings.upsert_shipto(site_id, body.model_dump())
+    return {"site_id": site_id, "ship_to": site_settings.get_shipto(site_id)}
+
+
 # ---------------------------------------------------------------------------
 # Buyer-loop endpoints — inbound quote review (the comparison table) + confirm/reject.
 #
