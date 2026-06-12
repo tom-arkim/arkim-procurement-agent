@@ -165,6 +165,7 @@ def cumulative_impact(decisions: list[dict], *, version: str = ESTIMATE_MODEL_VE
     """
     total = 0.0
     contributing: list[str] = []
+    breakdown: list[dict] = []   # one entry per order with a measured saving (drillable)
     summed = dict(_ZERO_COUNTS)
     by_month: dict[str, dict] = {}
     order_seen: list[str] = []  # preserve first-seen month order for a stable trend
@@ -193,6 +194,10 @@ def cumulative_impact(decisions: list[dict], *, version: str = ESTIMATE_MODEL_VE
             bucket["measured_count"] += 1
             if oid is not None:
                 contributing.append(oid)
+            breakdown.append({
+                "order_id": oid, "month": month, "saving": saving, "saving_basis": basis,
+                "part": d.get("part"), "vendor": d.get("vendor"),
+            })
 
     savings_by_month = []
     for month in order_seen:
@@ -214,6 +219,7 @@ def cumulative_impact(decisions: list[dict], *, version: str = ESTIMATE_MODEL_VE
         "time_estimate_minutes": time_saved_minutes(summed, version),  # estimated
         "estimate_model_version": version,
         "contributing_order_ids": contributing,            # measured-saving orders, drillable
+        "breakdown": breakdown,                            # per-order measured savings (part/vendor/basis)
     }
 
 
@@ -320,11 +326,14 @@ def gather_cumulative(version: str = ESTIMATE_MODEL_VERSION) -> dict:
             continue
         seen_runs.add(rid)
         dec = gather_run_decision(rid)
+        part = " ".join(str(o.get(k)) for k in ("manufacturer", "part_number") if o.get(k)) or None
         decisions.append({
             "order_id": o.get("id"),
             "month": (o.get("created_at") or "")[:7],   # YYYY-MM (real order month)
             "saving": dec["saving"],
             "saving_basis": dec["saving_basis"],
             "counts": dec["counts"],
+            "part": part,                                 # for the per-order breakdown
+            "vendor": o.get("vendor_name"),
         })
     return cumulative_impact(decisions, version=version)

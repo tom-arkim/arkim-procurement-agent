@@ -183,6 +183,21 @@ class TestCumulativeImpact:
         assert out["time_estimate_minutes"] == 130        # 65 + 65
         assert out["estimate_model_version"] == "v1"
 
+    def test_breakdown_lists_per_order_measured_savings(self):
+        # Per-order drill: one entry per order that carries a measured saving, with its
+        # basis + pass-through part/vendor. Orders with no comparator are excluded.
+        decisions = [
+            {"order_id": "o1", "month": "2026-01", "saving": 20.0, "saving_basis": "vs_last_paid",
+             "counts": _VBELT_COUNTS, "part": "SKF 6205", "vendor": "Acme"},
+            {"order_id": "o2", "month": "2026-02", "saving": None, "saving_basis": None,
+             "counts": _VBELT_COUNTS, "part": "Gates 5VX", "vendor": "Western"},
+        ]
+        out = cumulative_impact(decisions, version="v1")
+        assert [b["order_id"] for b in out["breakdown"]] == ["o1"]   # o2 has no comparator
+        b = out["breakdown"][0]
+        assert b["saving"] == 20.0 and b["saving_basis"] == "vs_last_paid"
+        assert b["part"] == "SKF 6205" and b["vendor"] == "Acme"
+
     def test_month_note_records_basis_mix(self):
         out = cumulative_impact([
             _decision("o1", "2026-01", 20.0, "vs_last_paid"),
