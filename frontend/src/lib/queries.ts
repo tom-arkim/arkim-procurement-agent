@@ -36,6 +36,7 @@ import {
   processReplies,
   confirmReviewItem,
   rejectReviewItem,
+  placeOrderFromQuote,
   executeOrder,
   markDelivered,
   getOrders,
@@ -269,6 +270,19 @@ export function useRejectReviewItem(runId: string) {
   return useMutation({
     mutationFn: (itemId: string) => rejectReviewItem(itemId),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.reviewItems.byRun(runId) });
+    },
+  });
+}
+
+/** Place an order from a confirmed quote (RFQ path) — surfaces in the order section. */
+export function usePlaceOrderFromQuote(runId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: string) => placeOrderFromQuote(itemId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: queryKeys.orders.byRun(runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
       qc.invalidateQueries({ queryKey: queryKeys.reviewItems.byRun(runId) });
     },
   });

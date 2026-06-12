@@ -17,6 +17,7 @@ import {
   useProcessReplies,
   useConfirmReviewItem,
   useRejectReviewItem,
+  usePlaceOrderFromQuote,
 } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { procMoney } from "./proc-ui";
@@ -33,6 +34,7 @@ function relTime(iso?: string): string {
 export function QuotesSection({ runId }: { runId: string }) {
   const { data, isLoading } = useReviewItems(runId);
   const process = useProcessReplies(runId);
+  const placeOrder = usePlaceOrderFromQuote(runId);
 
   if (isLoading || !data) return null;
   const sent = data.sent_count;
@@ -92,13 +94,28 @@ export function QuotesSection({ runId }: { runId: string }) {
         </div>
       )}
 
-      {/* confirmed banner */}
+      {/* confirmed banner — confirm is the price; placing is a second deliberate step */}
       {confirmed && (
         <div className="proc-confirmed-banner">
           <ProcIcon name="checkCircle" size={18} color="var(--st-done)" />
           <span style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>
             Quote confirmed — {confirmed.vendor_name} · {procMoney(confirmed.payload.unit_price ?? 0)}. This is your price.
           </span>
+          {placeOrder.data?.placed ? (
+            <span style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: "var(--st-done)" }}>
+              <ProcIcon name="checkCircle" size={14} />Order placed
+            </span>
+          ) : (
+            <button
+              className="proc-btn"
+              data-kind="primary"
+              style={{ marginLeft: "auto", padding: "7px 14px" }}
+              disabled={placeOrder.isPending}
+              onClick={() => placeOrder.mutate(confirmed.id)}
+            >
+              <ProcIcon name="box" size={14} />{placeOrder.isPending ? "Placing…" : "Place order"}
+            </button>
+          )}
         </div>
       )}
 

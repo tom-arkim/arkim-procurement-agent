@@ -217,6 +217,11 @@ export async function rejectReviewItem(itemId: string): Promise<RejectReviewItem
   return request(`/review-items/${itemId}/reject`, { method: "POST" });
 }
 
+/** Place a durable order directly from a CONFIRMED quote (RFQ path). */
+export async function placeOrderFromQuote(itemId: string): Promise<OrderActionResult> {
+  return request(`/review-items/${itemId}/place-order`, { method: "POST" });
+}
+
 // ---------------------------------------------------------------------------
 // Buyer loop — order placement + tracking
 // ---------------------------------------------------------------------------
