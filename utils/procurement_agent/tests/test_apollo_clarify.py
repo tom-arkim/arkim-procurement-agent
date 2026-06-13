@@ -438,6 +438,17 @@ class TestNamesPlausiblyMatch:
         assert _names_plausibly_match("Warfield Electric", "Warfield Electric Products Inc")
         assert _names_plausibly_match("J&D", "J&D Manufacturing LLC")
 
+    def test_despaced_match(self):
+        # C1: same tokens, only internal spacing differs -> match.
+        assert _names_plausibly_match("MROSupply", "MRO Supply")
+        assert _names_plausibly_match("MRO Supply", "MROSupply")        # symmetric
+
+    def test_despaced_does_not_wave_through_near_miss(self):
+        # Guard the loosening: a genuinely-different org whose tokens ALMOST
+        # concatenate alike (one char off) must still be rejected — despaced match
+        # requires identical character composition, not fuzzy overlap.
+        assert not _names_plausibly_match("MROSupply", "MRP Supply")
+
     def test_gross_mismatch(self):
         assert not _names_plausibly_match("J&D Manufacturing", "QC Supply")
         assert not _names_plausibly_match("IBT Industrial Solutions", "High Q Tower Training Institute")

@@ -242,6 +242,11 @@ def _names_plausibly_match(vendor_name: Optional[str], apollo_org_name: Optional
     b = _normalize_org_name(apollo_org_name)
     if not a or not b:
         return False
+    # Despaced match (C1): the same core tokens differing only in internal spacing,
+    # e.g. "MROSupply" vs "MRO Supply". Compares the character composition of the
+    # suffix-stripped token sets, so a near-miss ("MRP Supply") stays a miss.
+    if "".join(sorted(a)) == "".join(sorted(b)):
+        return True
     if a <= b or b <= a:                      # one core-token set contains the other
         return True
     overlap = a & b
