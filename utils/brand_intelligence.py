@@ -17,6 +17,7 @@ import os
 import re
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -251,40 +252,40 @@ def get_brand_relationships(manufacturer: str,
         }
 
     try:
-        conn = _get_conn()
-        row  = conn.execute(
-            "SELECT * FROM brand_intelligence WHERE manufacturer = ? AND equipment_type = ?",
-            (mfg, etype),
-        ).fetchone()
+        with closing(_get_conn()) as conn:
+            row  = conn.execute(
+                "SELECT * FROM brand_intelligence WHERE manufacturer = ? AND equipment_type = ?",
+                (mfg, etype),
+            ).fetchone()
 
-        if row and not _is_stale(row["last_accessed_at"], row["ttl_days"]):
-            _touch(conn, mfg, etype)
-            return {
-                "manufacturer": mfg, "equipment_type": etype,
-                "parent_company": row["parent_company"],
-                "subsidiaries": json.loads(row["subsidiaries"] or "[]"),
-                "authorized_service_brands": json.loads(row["authorized_service_brands"] or "[]"),
-                "common_competitors": json.loads(row["common_competitors"] or "[]"),
-                "subcategory_niche_terms": json.loads(row["subcategory_niche_terms"] or "[]"),
-                "wrong_category_terms": json.loads(row["wrong_category_terms"] or "[]"),
-                "from_cache": True,
-            }
+            if row and not _is_stale(row["last_accessed_at"], row["ttl_days"]):
+                _touch(conn, mfg, etype)
+                return {
+                    "manufacturer": mfg, "equipment_type": etype,
+                    "parent_company": row["parent_company"],
+                    "subsidiaries": json.loads(row["subsidiaries"] or "[]"),
+                    "authorized_service_brands": json.loads(row["authorized_service_brands"] or "[]"),
+                    "common_competitors": json.loads(row["common_competitors"] or "[]"),
+                    "subcategory_niche_terms": json.loads(row["subcategory_niche_terms"] or "[]"),
+                    "wrong_category_terms": json.loads(row["wrong_category_terms"] or "[]"),
+                    "from_cache": True,
+                }
 
-        # Cache miss or stale — discover via LLM
-        print(f"[BrandIntel] Discovering relationships: {manufacturer!r} / {equipment_type!r}")
-        payload = _discover_via_llm(manufacturer, equipment_type)
-        if payload:
-            _upsert(conn, mfg, etype, payload, _INTEL_MODEL)
-            return {
-                "manufacturer": mfg, "equipment_type": etype,
-                "parent_company": payload.get("parent_company"),
-                "subsidiaries": payload.get("subsidiaries") or [],
-                "authorized_service_brands": payload.get("authorized_service_brands") or [],
-                "common_competitors": payload.get("competitors") or payload.get("common_competitors") or [],
-                "subcategory_niche_terms": payload.get("subcategory_niche_terms") or [],
-                "wrong_category_terms": payload.get("wrong_category_terms") or [],
-                "from_cache": False,
-            }
+            # Cache miss or stale — discover via LLM
+            print(f"[BrandIntel] Discovering relationships: {manufacturer!r} / {equipment_type!r}")
+            payload = _discover_via_llm(manufacturer, equipment_type)
+            if payload:
+                _upsert(conn, mfg, etype, payload, _INTEL_MODEL)
+                return {
+                    "manufacturer": mfg, "equipment_type": etype,
+                    "parent_company": payload.get("parent_company"),
+                    "subsidiaries": payload.get("subsidiaries") or [],
+                    "authorized_service_brands": payload.get("authorized_service_brands") or [],
+                    "common_competitors": payload.get("common_competitors") or [],
+                    "subcategory_niche_terms": payload.get("subcategory_niche_terms") or [],
+                    "wrong_category_terms": payload.get("wrong_category_terms") or [],
+                    "from_cache": False,
+                }
     except Exception as exc:
         print(f"[BrandIntel] Error: {exc}")
 
@@ -510,27 +511,27 @@ def warm_cache(pairs: list[tuple[str, str]]) -> list[dict]:
 def all_cached_entries() -> list[dict]:
     """Return all records in the brand_intelligence cache (for CLI display)."""
     try:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT * FROM brand_intelligence ORDER BY last_accessed_at DESC"
-        ).fetchall()
-        out = []
-        for r in rows:
-            out.append({
-                "manufacturer":             r["manufacturer"],
-                "equipment_type":           r["equipment_type"],
-                "parent_company":           r["parent_company"],
-                "subsidiaries":             json.loads(r["subsidiaries"] or "[]"),
-                "authorized_service_brands": json.loads(r["authorized_service_brands"] or "[]"),
-                "common_competitors":        json.loads(r["common_competitors"] or "[]"),
-                "subcategory_niche_terms":   json.loads(r["subcategory_niche_terms"] or "[]"),
-                "wrong_category_terms":      json.loads(r["wrong_category_terms"] or "[]"),
-                "discovered_at":             r["discovered_at"],
-                "last_accessed_at":          r["last_accessed_at"],
-                "ttl_days":                  r["ttl_days"],
-                "llm_model_used":            r["llm_model_used"],
-            })
-        return out
+        with closing(_get_conn()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM brand_intelligence ORDER BY last_accessed_at DESC"
+            ).fetchall()
+            out = []
+            for r in rows:
+                out.append({
+                    "manufacturer":             r["manufacturer"],
+                    "equipment_type":           r["equipment_type"],
+                    "parent_company":           r["parent_company"],
+                    "subsidiaries":             json.loads(r["subsidiaries"] or "[]"),
+                    "authorized_service_brands": json.loads(r["authorized_service_brands"] or "[]"),
+                    "common_competitors":        json.loads(r["common_competitors"] or "[]"),
+                    "subcategory_niche_terms":   json.loads(r["subcategory_niche_terms"] or "[]"),
+                    "wrong_category_terms":      json.loads(r["wrong_category_terms"] or "[]"),
+                    "discovered_at":             r["discovered_at"],
+                    "last_accessed_at":          r["last_accessed_at"],
+                    "ttl_days":                  r["ttl_days"],
+                    "llm_model_used":            r["llm_model_used"],
+                })
+            return out
     except Exception as exc:
         print(f"[BrandIntel] all_cached_entries error: {exc}")
         return []
@@ -624,13 +625,13 @@ def lookup_manufacturer_from_pn(part_number: str) -> Optional[str]:
 def invalidate(manufacturer: str, equipment_type: str) -> bool:
     """Force re-discovery by setting last_accessed_at far in the past."""
     try:
-        conn = _get_conn()
-        conn.execute(
-            "UPDATE brand_intelligence SET last_accessed_at = '2000-01-01T00:00:00' "
-            "WHERE manufacturer = ? AND equipment_type = ?",
-            (manufacturer.lower().strip(), equipment_type.lower().strip()),
-        )
-        conn.commit()
-        return conn.total_changes > 0
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                "UPDATE brand_intelligence SET last_accessed_at = '2000-01-01T00:00:00' "
+                "WHERE manufacturer = ? AND equipment_type = ?",
+                (manufacturer.lower().strip(), equipment_type.lower().strip()),
+            )
+            conn.commit()
+            return conn.total_changes > 0
     except Exception:
         return False

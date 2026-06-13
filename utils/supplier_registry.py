@@ -65,6 +65,7 @@ import os
 import re
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -275,16 +276,16 @@ def _maybe_seed(conn: sqlite3.Connection) -> None:
 def load_registry() -> dict:
     """Return all suppliers indexed by lowercased name for O(1) lookup."""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT * FROM suppliers").fetchall()
-        result = {}
-        for r in rows:
-            d = dict(r)
-            result[d["name"].lower()] = d
-            if d.get("domain"):
-                result[d["domain"]] = d
-        return result
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM suppliers").fetchall()
+            result = {}
+            for r in rows:
+                d = dict(r)
+                result[d["name"].lower()] = d
+                if d.get("domain"):
+                    result[d["domain"]] = d
+            return result
     except Exception as exc:
         print(f"[SupplierRegistry] load_registry failed: {exc}")
         return {}
@@ -294,12 +295,12 @@ def lookup_by_domain(domain: str) -> Optional[dict]:
     """Look up a supplier by domain (normalized). Returns None if not found."""
     norm = _normalize_domain(domain)
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM suppliers WHERE domain = ?", (norm,)
-        ).fetchone()
-        return dict(row) if row else None
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM suppliers WHERE domain = ?", (norm,)
+            ).fetchone()
+            return dict(row) if row else None
     except Exception:
         return None
 
@@ -307,12 +308,12 @@ def lookup_by_domain(domain: str) -> Optional[dict]:
 def lookup_supplier(name: str) -> Optional[dict]:
     """Look up by vendor name (case-insensitive)."""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT * FROM suppliers WHERE LOWER(name) = ?", (name.lower(),)
-        ).fetchone()
-        return dict(row) if row else None
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM suppliers WHERE LOWER(name) = ?", (name.lower(),)
+            ).fetchone()
+            return dict(row) if row else None
     except Exception:
         return None
 
@@ -349,14 +350,14 @@ def create_stub(name: str, domain: str = "", source_url: str = "") -> dict:
         "updated_at":                  now,
     }
     try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT OR IGNORE INTO suppliers
-               (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
-               VALUES (:id, :domain, :name, :onboarding_status, :vendor_authorization_status, :created_at, :updated_at)""",
-            stub,
-        )
-        conn.commit()
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO suppliers
+                   (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
+                   VALUES (:id, :domain, :name, :onboarding_status, :vendor_authorization_status, :created_at, :updated_at)""",
+                stub,
+            )
+            conn.commit()
         print(f"[SupplierRegistry] Created stub: {name} ({norm_domain})")
     except Exception as exc:
         print(f"[SupplierRegistry] create_stub failed: {exc}")
@@ -405,13 +406,13 @@ def update_supplier(name: str, **fields) -> bool:
     set_clause = ", ".join(f"{k} = :{k}" for k in updates)
     updates["_name_lower"] = name.lower()
     try:
-        conn = _get_conn()
-        cursor = conn.execute(
-            f"UPDATE suppliers SET {set_clause} WHERE LOWER(name) = :_name_lower",
-            updates,
-        )
-        conn.commit()
-        return cursor.rowcount > 0
+        with closing(_get_conn()) as conn:
+            cursor = conn.execute(
+                f"UPDATE suppliers SET {set_clause} WHERE LOWER(name) = :_name_lower",
+                updates,
+            )
+            conn.commit()
+            return cursor.rowcount > 0
     except Exception as exc:
         print(f"[SupplierRegistry] update failed: {exc}")
         return False
@@ -456,25 +457,25 @@ def upsert_apollo_data(domain: str, fields: dict) -> bool:
     updates["updated_at"] = datetime.utcnow().isoformat()
 
     try:
-        conn = _get_conn()
-        exists = conn.execute(
-            "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
-        ).fetchone()
-        if not exists:
-            now = datetime.utcnow().isoformat()
-            conn.execute(
-                """INSERT OR IGNORE INTO suppliers
-                   (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
-                   VALUES (?,?,?,'discovery_only','Unknown',?,?)""",
-                (str(uuid.uuid4()), norm, norm, now, now),
+        with closing(_get_conn()) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
+            ).fetchone()
+            if not exists:
+                now = datetime.utcnow().isoformat()
+                conn.execute(
+                    """INSERT OR IGNORE INTO suppliers
+                       (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
+                       VALUES (?,?,?,'discovery_only','Unknown',?,?)""",
+                    (str(uuid.uuid4()), norm, norm, now, now),
+                )
+            set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+            params = {**updates, "_domain": norm}
+            cursor = conn.execute(
+                f"UPDATE suppliers SET {set_clause} WHERE domain = :_domain", params
             )
-        set_clause = ", ".join(f"{k} = :{k}" for k in updates)
-        params = {**updates, "_domain": norm}
-        cursor = conn.execute(
-            f"UPDATE suppliers SET {set_clause} WHERE domain = :_domain", params
-        )
-        conn.commit()
-        return cursor.rowcount > 0
+            conn.commit()
+            return cursor.rowcount > 0
     except Exception as exc:
         print(f"[SupplierRegistry] upsert_apollo_data failed for {norm!r}: {exc}")
         return False
@@ -502,25 +503,25 @@ def upsert_contact(domain: str, fields: dict) -> bool:
     updates.setdefault("contact_resolved_at", datetime.utcnow().isoformat())
     updates["updated_at"] = datetime.utcnow().isoformat()
     try:
-        conn = _get_conn()
-        exists = conn.execute(
-            "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
-        ).fetchone()
-        if not exists:
-            now = datetime.utcnow().isoformat()
-            conn.execute(
-                """INSERT OR IGNORE INTO suppliers
-                   (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
-                   VALUES (?,?,?,'discovery_only','Unknown',?,?)""",
-                (str(uuid.uuid4()), norm, norm, now, now),
+        with closing(_get_conn()) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
+            ).fetchone()
+            if not exists:
+                now = datetime.utcnow().isoformat()
+                conn.execute(
+                    """INSERT OR IGNORE INTO suppliers
+                       (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
+                       VALUES (?,?,?,'discovery_only','Unknown',?,?)""",
+                    (str(uuid.uuid4()), norm, norm, now, now),
+                )
+            set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+            cursor = conn.execute(
+                f"UPDATE suppliers SET {set_clause} WHERE domain = :_domain",
+                {**updates, "_domain": norm},
             )
-        set_clause = ", ".join(f"{k} = :{k}" for k in updates)
-        cursor = conn.execute(
-            f"UPDATE suppliers SET {set_clause} WHERE domain = :_domain",
-            {**updates, "_domain": norm},
-        )
-        conn.commit()
-        return cursor.rowcount > 0
+            conn.commit()
+            return cursor.rowcount > 0
     except Exception as exc:
         print(f"[SupplierRegistry] upsert_contact failed for {norm!r}: {exc}")
         return False
@@ -547,25 +548,25 @@ def upsert_primary_contact(domain: str, fields: dict) -> bool:
     updates.setdefault("primary_contact_at", datetime.utcnow().isoformat())
     updates["updated_at"] = datetime.utcnow().isoformat()
     try:
-        conn = _get_conn()
-        exists = conn.execute(
-            "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
-        ).fetchone()
-        if not exists:
-            now = datetime.utcnow().isoformat()
-            conn.execute(
-                """INSERT OR IGNORE INTO suppliers
-                   (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
-                   VALUES (?,?,?,'discovery_only','Unknown',?,?)""",
-                (str(uuid.uuid4()), norm, norm, now, now),
+        with closing(_get_conn()) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
+            ).fetchone()
+            if not exists:
+                now = datetime.utcnow().isoformat()
+                conn.execute(
+                    """INSERT OR IGNORE INTO suppliers
+                       (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
+                       VALUES (?,?,?,'discovery_only','Unknown',?,?)""",
+                    (str(uuid.uuid4()), norm, norm, now, now),
+                )
+            set_clause = ", ".join(f"{k} = :{k}" for k in updates)
+            cursor = conn.execute(
+                f"UPDATE suppliers SET {set_clause} WHERE domain = :_domain",
+                {**updates, "_domain": norm},
             )
-        set_clause = ", ".join(f"{k} = :{k}" for k in updates)
-        cursor = conn.execute(
-            f"UPDATE suppliers SET {set_clause} WHERE domain = :_domain",
-            {**updates, "_domain": norm},
-        )
-        conn.commit()
-        return cursor.rowcount > 0
+            conn.commit()
+            return cursor.rowcount > 0
     except Exception as exc:
         print(f"[SupplierRegistry] upsert_primary_contact failed for {norm!r}: {exc}")
         return False
@@ -590,10 +591,10 @@ def mark_contact_bounced(domain: str, which: str = "generic") -> bool:
         sql = ("UPDATE suppliers SET contact_email = NULL, contact_status = 'bounced', "
                "updated_at = ? WHERE domain = ?")
     try:
-        conn = _get_conn()
-        cursor = conn.execute(sql, (datetime.utcnow().isoformat(), norm))
-        conn.commit()
-        return cursor.rowcount > 0
+        with closing(_get_conn()) as conn:
+            cursor = conn.execute(sql, (datetime.utcnow().isoformat(), norm))
+            conn.commit()
+            return cursor.rowcount > 0
     except Exception as exc:
         print(f"[SupplierRegistry] mark_contact_bounced({which}) failed for {norm!r}: {exc}")
         return False
@@ -688,16 +689,16 @@ def record_sent_message(
         now,
     )
     try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO sent_messages
-               (id, run_id, supplier_domain, vendor_name, recipients_to_json,
-                recipients_cc_json, subject, body, message_id, thread_id, status,
-                approved_by, sent_at, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            row,
-        )
-        conn.commit()
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                """INSERT INTO sent_messages
+                   (id, run_id, supplier_domain, vendor_name, recipients_to_json,
+                    recipients_cc_json, subject, body, message_id, thread_id, status,
+                    approved_by, sent_at, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                row,
+            )
+            conn.commit()
         print(f"[SupplierRegistry] Sent-message recorded: {vendor_name} ({domain}) status={status}")
         return row[0]
     except Exception as exc:
@@ -721,18 +722,18 @@ def get_sent_messages(
         params.append(_normalize_domain(domain))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"SELECT * FROM sent_messages{where} ORDER BY created_at DESC", params
-        ).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            d["recipients_to"] = json.loads(d.get("recipients_to_json") or "[]")
-            d["recipients_cc"] = json.loads(d.get("recipients_cc_json") or "[]")
-            out.append(d)
-        return out
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM sent_messages{where} ORDER BY created_at DESC", params
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["recipients_to"] = json.loads(d.get("recipients_to_json") or "[]")
+                d["recipients_cc"] = json.loads(d.get("recipients_cc_json") or "[]")
+                out.append(d)
+            return out
     except Exception as exc:
         print(f"[SupplierRegistry] get_sent_messages failed: {exc}")
         return []
@@ -794,15 +795,15 @@ def record_review_item(
         confidence, raw_source, now, None,
     )
     try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO review_items
-               (id, kind, status, run_id, supplier_domain, vendor_name, manufacturer,
-                part_number, payload_json, confidence, raw_source, created_at, resolved_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            row,
-        )
-        conn.commit()
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                """INSERT INTO review_items
+                   (id, kind, status, run_id, supplier_domain, vendor_name, manufacturer,
+                    part_number, payload_json, confidence, raw_source, created_at, resolved_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                row,
+            )
+            conn.commit()
         print(f"[SupplierRegistry] Review item queued: {kind} status={status} "
               f"({vendor_name} / {domain})")
         return row[0]
@@ -834,12 +835,12 @@ def get_review_items(
             params.append(val)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"SELECT * FROM review_items{where} ORDER BY created_at DESC", params
-        ).fetchall()
-        return [_row_to_review_item(r) for r in rows]
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM review_items{where} ORDER BY created_at DESC", params
+            ).fetchall()
+            return [_row_to_review_item(r) for r in rows]
     except Exception as exc:
         print(f"[SupplierRegistry] get_review_items failed: {exc}")
         return []
@@ -848,10 +849,10 @@ def get_review_items(
 def get_review_item(item_id: str) -> Optional[dict]:
     """Return one review item by id (payload decoded), or None."""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        r = conn.execute("SELECT * FROM review_items WHERE id = ?", (item_id,)).fetchone()
-        return _row_to_review_item(r) if r else None
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            r = conn.execute("SELECT * FROM review_items WHERE id = ?", (item_id,)).fetchone()
+            return _row_to_review_item(r) if r else None
     except Exception:
         return None
 
@@ -859,13 +860,13 @@ def get_review_item(item_id: str) -> Optional[dict]:
 def set_review_item_status(item_id: str, status: str) -> bool:
     """Set a review item's status (e.g. confirmed/rejected) + stamp resolved_at."""
     try:
-        conn = _get_conn()
-        cur = conn.execute(
-            "UPDATE review_items SET status = ?, resolved_at = ? WHERE id = ?",
-            (status, datetime.utcnow().isoformat(), item_id),
-        )
-        conn.commit()
-        return cur.rowcount > 0
+        with closing(_get_conn()) as conn:
+            cur = conn.execute(
+                "UPDATE review_items SET status = ?, resolved_at = ? WHERE id = ?",
+                (status, datetime.utcnow().isoformat(), item_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
     except Exception as exc:
         print(f"[SupplierRegistry] set_review_item_status failed: {exc}")
         return False
@@ -874,8 +875,8 @@ def set_review_item_status(item_id: str, status: str) -> bool:
 def all_entries() -> list[dict]:
     """Return all supplier records for diagnostics."""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        return [dict(r) for r in conn.execute("SELECT * FROM suppliers ORDER BY name").fetchall()]
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute("SELECT * FROM suppliers ORDER BY name").fetchall()]
     except Exception:
         return []
