@@ -7,8 +7,8 @@ Excluded from this inventory: unbuilt features with no existing code, active bug
 tracked elsewhere, and frontend UI polish / design iteration items.
 
 **Highest-risk items in this file:**
-- **§3.3** — PN cache keyed by part number only; manufacturer collision silently serves wrong price.
-- **§4.1** — RBAC enforcement deferred; any caller can supply any approver role. Acceptable for prototype; not for production.
+- **§3.3** — ✅ RESOLVED (Phase R). PN cache now keyed on `(manufacturer, part_number)`; the `part_number` None-guard (L2) is in. Kept for history.
+- **§4.1** — RBAC enforcement deferred; any caller can supply any approver role. Acceptable for prototype; not for production. Now also tracks the H1/M1/D2 auth-dependent cluster (see §4.1).
 
 ---
 
@@ -45,8 +45,8 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **File** | `utils/email_sender.py` (canonical), `utils/sourcing_archieved/tier3_outreach.py` (DEAD), `utils/procurement_agent/outreach.py` (returns `email_send_enabled=False` literal) |
 | **Kind** | Hard-coded prototype guard; email send is permanently suppressed at module level |
 | **Why it exists** | Prevents accidental emails to real vendors during prototyping and demos |
-| **Risk / impact** | The Tier 3 outreach flow completes and marks vendors "Awaiting" without any real communication. **Flag is now defined in THREE places** (the new clean send layer owns the canonical one; the archived copy is dead-but-imported per §1.1 and was intentionally NOT reused; `outreach.py` returns its own literal). New-clean-abuts-old boundary. |
-| **Recommended action** | Consolidate to the single canonical `utils/email_sender.EMAIL_SEND_ENABLED` (delete the archived copy when `sourcing_archieved/` is retired; have `outreach.py` import the canonical flag). Post-seed: back it with an env var and add an integration test that stubs the provider and asserts `EmailSender.send` is called when the flag is true. |
+| **Risk / impact** | The Tier 3 outreach flow completes and marks vendors "Awaiting" without any real communication. **Flag now resolves from the single canonical source for live code** — Phase R (L3) removed the `outreach.py` literal; it reads `email_sender.EMAIL_SEND_ENABLED`. Only the **dead-but-imported** archived copy (`sourcing_archieved/tier3_outreach.py`, §1.1) still re-declares it; that expression goes when the archived dir is retired. |
+| **Recommended action** | ✅ Partly done (Phase R, L3): `outreach.py` now reads the canonical flag. Remaining: delete the archived copy when `sourcing_archieved/` is retired. Post-seed: back the canonical flag with an env var (done — opt-in via `EMAIL_SEND_ENABLED`) and add an integration test that stubs the provider and asserts `EmailSender.send` is called when the flag is true. |
 | **Status** | The REAL Gmail API is now wired behind `GmailSender` (send) and `GmailInboxReader` (bounces/replies) via `utils/gmail_client.py` (google libs lazy-imported; creds from env; fail-soft). The flag stays **False** and the suite makes **no** real Gmail call (service mocked, no creds). The double gate (`EMAIL_SEND_ENABLED` AND the per-draft approval in `rfq_send`) is unchanged. |
 
 #### Go-live checklist (NOT executed in the repo — Tom runs this on his machine)
@@ -89,6 +89,7 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **Why it exists** | Simple prototype cache; manufacturer-level disambiguation not yet implemented |
 | **Risk / impact** | Part number collisions across manufacturers could silently serve the wrong cached price. Low probability in the current 4-brand seed dataset but undetectable if it occurs. |
 | **Recommended action** | Post-seed: key the cache on `(manufacturer.lower(), part_number.upper())` composite; add a unit test with a deliberate PN-collision fixture. Becomes higher-risk when the manufacturer count grows beyond the current 4 seeded brands — address before adding new manufacturers with potentially overlapping prefix conventions. |
+| **Status** | ✅ RESOLVED (Phase R). `_make_key` composites `(manufacturer.lower(), part_number.upper())`; PN-collision fixture covered in `test_price_db.py`. The `part_number` None-guard (audit L2) is also in. Legacy PN-only on-disk keys cleanly miss and re-populate (no migration). |
 
 ---
 
@@ -105,6 +106,7 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **Recommended action** | Post-seed: integrate with identity provider; validate `approver_role` against authenticated user claims rather than the request body. |
 | **Interim** | The internal admin/inspector endpoints (`/api/admin/*`) DO have real enforcement: `require_admin` checks an admin bearer token against the server secret `ARKIM_ADMIN_TOKEN` (401 no header / 403 mismatch / 503 fail-closed when unset; constant-time compare). Since there's no login/session yet, possession of the token == admin. This is the smallest real server-side gate; replace with proper auth claims when the identity provider lands. The admin endpoints are read-only. |
 | **Buyer-loop confirm (NEW, ungated)** | The customer-facing buyer-loop mutations — `POST /api/review-items/{id}/confirm` and `/reject`, and `POST /api/runs/{id}/process-replies` — follow the existing **ungated** run-endpoint convention (like `approve`/`select`). **`confirm` is consequential: a quote-confirm writes `price_db` (source="rfq").** When real auth lands, bind these to the **buyer role** (authenticated user claims), not the request path. `process-replies` is read-only (live Gmail `gmail.readonly`, fail-soft without creds, never sends). No price is ever written without an explicit `confirm` — there is no auto-confirm anywhere. |
+| **Auth-dependent cluster — H1 routing / M1 / D2 (Phase R)** | The `_execute` phase guard is **in** (Phase R, commit `20df65c`): an order places only from an `approved`/`executing` run, closing H1's select→execute bypass. Three coupled gaps remain and **land together** when the identity/auth layer arrives, because all three require authenticated caller claims (a count/role taken from the request body is not enforcement): **(a) dual-approver routing** — the FastAPI `approve` endpoint advances to `APPROVED` on a single approval regardless of the `$5k`/`$25k` rule (`api_server.py:1099`); **(b) distinct-approver (M1)** — `submit_approval` (`core.py`) counts approval rows but never checks the two approvals come from different identities, so one person can satisfy "2 approvers"; **(c) customer-endpoint tenant-scoping (D2)** — `/api/orders`, `/api/impact`, `/api/reorder`, `/api/sites/{id}/ship-to`, `/api/review-items/*`, and the run endpoints are global/ungated (correct for single-tenant prototype; a cross-tenant leak the moment multi-tenant lands). Do **not** implement any of the three without binding to authenticated claims. Tracked as a single auth-dependent item; see `PHASE_R_RESOLUTION.md`. |
 
 ### 4.2 Cache suitability defaults hardcoded — `70.0` (rfq) / `50.0` (live)
 
