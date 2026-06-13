@@ -2,11 +2,14 @@
 Multi-vendor outreach campaign helper (Phase 3 UI feature).
 
 Captures parallel outreach intent for Tier 3 vendors (Quote Required)
-in the audit log. Email sending is always disabled at this prototype stage.
+in the audit log. This helper only drafts + records intent; it never sends. The
+reported `email_send_enabled` is read from the canonical send gate
+(utils.email_sender.EMAIL_SEND_ENABLED, default-off) rather than re-declared here.
 """
 
 from __future__ import annotations
 
+from utils import email_sender
 from utils.audit_log import write_audit_log
 
 # Appended to an RFQ ONLY when it falls back to a generic inbox (no resolved named
@@ -66,7 +69,7 @@ def initiate_outreach_campaign(
     Does not send email. Returns a dict with:
       vendors       list[str]        — vendor names in selection order
       drafts        dict[str, str]   — {vendor_name: draft_email_text}
-      email_send_enabled  bool       — always False in prototype
+      email_send_enabled  bool       — the canonical send gate (default-off)
     """
     vendor_names = [v.get("vendor_name") or "Unknown" for v in selected_vendors]
     drafts       = {
@@ -92,5 +95,5 @@ def initiate_outreach_campaign(
     return {
         "vendors":            vendor_names,
         "drafts":             drafts,
-        "email_send_enabled": False,
+        "email_send_enabled": email_sender.EMAIL_SEND_ENABLED,
     }

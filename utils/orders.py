@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -105,10 +106,10 @@ def _row_to_order(row: sqlite3.Row) -> dict:
 def get_order(order_id: str) -> Optional[dict]:
     """Return one order by id, or None."""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        r = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-        return _row_to_order(r) if r else None
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            r = conn.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
+            return _row_to_order(r) if r else None
     except Exception:
         return None
 
@@ -191,18 +192,18 @@ def create_order(selection: dict, quantity: int = 1,
         "notes": selection.get("notes"),
     }
     try:
-        conn = _get_conn()
-        conn.execute(
-            """INSERT INTO orders
-               (id, run_id, manufacturer, part_number, vendor_name, supplier_domain,
-                unit_price, currency, quantity, lead_time, source, status,
-                created_at, updated_at, placed_by, notes)
-               VALUES (:id,:run_id,:manufacturer,:part_number,:vendor_name,:supplier_domain,
-                       :unit_price,:currency,:quantity,:lead_time,:source,:status,
-                       :created_at,:updated_at,:placed_by,:notes)""",
-            order,
-        )
-        conn.commit()
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                """INSERT INTO orders
+                   (id, run_id, manufacturer, part_number, vendor_name, supplier_domain,
+                    unit_price, currency, quantity, lead_time, source, status,
+                    created_at, updated_at, placed_by, notes)
+                   VALUES (:id,:run_id,:manufacturer,:part_number,:vendor_name,:supplier_domain,
+                           :unit_price,:currency,:quantity,:lead_time,:source,:status,
+                           :created_at,:updated_at,:placed_by,:notes)""",
+                order,
+            )
+            conn.commit()
         print(f"[Orders] Captured draft {order['id']} — {vendor} {manufacturer} "
               f"{part_number} x{order['quantity']} @ {unit_price} ({source})")
         return order
@@ -224,9 +225,9 @@ def _set_status(order_id: str, new_status: str, *, placed_by: Optional[str] = No
         updates["notes"] = note
         sets.append("notes = :notes")
     try:
-        conn = _get_conn()
-        conn.execute(f"UPDATE orders SET {', '.join(sets)} WHERE id = :_id", updates)
-        conn.commit()
+        with closing(_get_conn()) as conn:
+            conn.execute(f"UPDATE orders SET {', '.join(sets)} WHERE id = :_id", updates)
+            conn.commit()
     except Exception as exc:
         print(f"[Orders] _set_status failed: {exc}")
         return None
@@ -303,12 +304,12 @@ def get_orders(run_id: Optional[str] = None, status: Optional[str] = None,
             params.append(val)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     try:
-        conn = _get_conn()
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            f"SELECT * FROM orders{where} ORDER BY created_at DESC", params
-        ).fetchall()
-        return [_row_to_order(r) for r in rows]
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM orders{where} ORDER BY created_at DESC", params
+            ).fetchall()
+            return [_row_to_order(r) for r in rows]
     except Exception as exc:
         print(f"[Orders] get_orders failed: {exc}")
         return []

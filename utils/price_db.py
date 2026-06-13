@@ -24,7 +24,7 @@ def _make_key(manufacturer: str, part_number: str) -> str:
     Including the manufacturer prevents two makers' parts that share a part
     number from colliding (CLEANUP.md §3.3).
     """
-    return f"{(manufacturer or '').lower().strip()}|{part_number.upper().strip()}"
+    return f"{(manufacturer or '').lower().strip()}|{(part_number or '').upper().strip()}"
 
 
 def _load() -> dict:

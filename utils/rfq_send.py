@@ -8,8 +8,9 @@ Turns an APPROVED draft into a sent RFQ:
 
 This is the only place a send is *initiated*. It is deliberately separate from
 drafting (utils/procurement_agent/outreach.py) and from the provider
-(utils/email_sender.py). Built behind EMAIL_SEND_ENABLED (stays False), with the
-actual Gmail call STUBBED — NO real emails are sent in this layer.
+(utils/email_sender.py). The real Gmail send is WIRED via the provider but stays
+behind EMAIL_SEND_ENABLED (default-off): at the repo/test default the flag is off,
+so NO real emails are sent in this layer.
 
 Hard gates (this is the first layer that can take an external action):
   - HUMAN APPROVAL: a send requires an explicit Approval for that draft. With no
@@ -19,8 +20,8 @@ Hard gates (this is the first layer that can take an external action):
     invoked at all (stub path only) — the message is recorded as "stubbed" and the
     vendor is marked "awaiting", matching the existing no-send demo behaviour.
   - When True + approval, the EmailSender is invoked exactly once; the concrete
-    GmailSender is itself stubbed (no creds -> "stubbed", no network), so even an
-    accidental enable sends nothing until Gmail is deliberately wired.
+    GmailSender makes the real Gmail call only if creds resolve — with no creds it
+    fail-softs to "error" (no network, no half-send), never a silent stub.
 
 Inbound concerns (bounce detection, quote ingestion) are SEPARATE later layers.
 Conventions mirror the sibling util modules (bracket-prefixed print logging,

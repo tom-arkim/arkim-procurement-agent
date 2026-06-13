@@ -139,7 +139,9 @@ class EmailSender(ABC):
 
 
 class GmailSender(EmailSender):
-    """Gmail-backed sender. The real Gmail API call is STUBBED (not wired).
+    """Gmail-backed sender. The real Gmail API call is WIRED (utils.gmail_client) and
+    fires only when EMAIL_SEND_ENABLED is on AND a Gmail service/creds resolve —
+    default-off and double-gated, so the repo/test default sends nothing.
 
     Behaviour:
       - EMAIL_SEND_ENABLED False (repo/test default) -> "stubbed", zero network.
