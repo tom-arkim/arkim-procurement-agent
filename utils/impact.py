@@ -233,9 +233,15 @@ _PURCHASED_STATUSES = ("placed", "confirmed", "shipped", "received")
 
 
 def _last_paid_price(manufacturer: Optional[str], part_number: Optional[str],
-                     exclude_run_id: Optional[str]) -> Optional[float]:
+                     exclude_run_id: Optional[str], before: Optional[str] = None) -> Optional[float]:
     """The customer's most recent prior PURCHASE price of this exact part (their own
-    order history), or None when there's no prior purchase. Never a market price."""
+    order history), or None when there's no prior purchase. Never a market price.
+
+    `before` (an ISO created_at): when given, only purchases made strictly BEFORE it
+    are considered, so the comparator is the purchase chronologically preceding the
+    order being scored — not a later one (D1). Orders are newest-first, so the first
+    match under the cutoff is the most-recent preceding purchase. `before=None` keeps
+    the most-recent-prior-purchase behaviour (correct for a run scored at 'now')."""
     if not (manufacturer and part_number):
         return None
     from utils import orders as orders_store
@@ -243,18 +249,24 @@ def _last_paid_price(manufacturer: Optional[str], part_number: Optional[str],
     for o in rows:
         if o.get("run_id") == exclude_run_id:
             continue
+        if before is not None and (o.get("created_at") or "") >= before:
+            continue  # purchase is at/after the scored order — not a prior comparator
         if (o.get("manufacturer") == manufacturer and o.get("part_number") == part_number
                 and o.get("status") in _PURCHASED_STATUSES and o.get("unit_price") is not None):
             return float(o["unit_price"])
     return None
 
 
-def gather_run_decision(run_id: str) -> dict:
+def gather_run_decision(run_id: str, *, before: Optional[str] = None) -> dict:
     """Assemble one decision's calc inputs for a run from the stores, then compute.
 
     chosen_price = the confirmed/selected quote (the rfq price the buyer took); quotes =
     unit prices of all quote review-items for this run; counts from sent_messages /
-    review_items / run specs. Returns the per_decision_impact payload (+ run_id)."""
+    review_items / run specs. Returns the per_decision_impact payload (+ run_id).
+
+    `before` (an ISO created_at) is passed through to the last-paid lookup so the
+    comparator is the purchase preceding the scored order's date, not a later one (D1).
+    Defaults None (most-recent prior purchase) for a run scored live at 'now'."""
     from utils import supplier_registry
 
     review_items = supplier_registry.get_review_items(run_id=run_id)
@@ -287,7 +299,7 @@ def gather_run_decision(run_id: str) -> dict:
             specs = {}
     manufacturer, part_number = specs.get("manufacturer"), specs.get("part_number")
 
-    last_paid = _last_paid_price(manufacturer, part_number, exclude_run_id=run_id)
+    last_paid = _last_paid_price(manufacturer, part_number, exclude_run_id=run_id, before=before)
 
     sent = supplier_registry.get_sent_messages(run_id=run_id)
     counts = {
@@ -311,10 +323,10 @@ def gather_cumulative(version: str = ESTIMATE_MODEL_VERSION) -> dict:
     produced a purchased order, aggregated by cumulative_impact. Month comes from the
     order's created_at; the per-run measured saving comes from gather_run_decision.
 
-    NOTE (auditable simplification): last_paid is the customer's most recent purchase of
-    the same part across runs — not strictly the purchase preceding this order's date.
-    Refine here when historical temporal ordering matters; the savings stay measured
-    from the customer's own orders only (never an external baseline)."""
+    Date-aware (D1): each order is compared against the purchase chronologically
+    PRECEDING it — the order's own created_at is passed as the `before` cutoff, so an
+    out-of-order replay can't compare a decision against a later purchase. The savings
+    stay measured from the customer's own orders only (never an external baseline)."""
     from utils import orders as orders_store
 
     purchased = [o for o in orders_store.get_orders() if o.get("status") in _PURCHASED_STATUSES]
@@ -325,7 +337,7 @@ def gather_cumulative(version: str = ESTIMATE_MODEL_VERSION) -> dict:
         if not rid or rid in seen_runs:
             continue
         seen_runs.add(rid)
-        dec = gather_run_decision(rid)
+        dec = gather_run_decision(rid, before=o.get("created_at"))
         part = " ".join(str(o.get(k)) for k in ("manufacturer", "part_number") if o.get(k)) or None
         decisions.append({
             "order_id": o.get("id"),

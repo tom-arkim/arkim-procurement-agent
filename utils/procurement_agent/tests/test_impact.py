@@ -13,7 +13,11 @@ These are pure-function tests — no DB, no network, no external calls.
 """
 
 import inspect
+import uuid
 
+import pytest
+
+from utils import impact
 from utils.impact import (
     ESTIMATE_MODEL_VERSION,
     ESTIMATE_MODELS,
@@ -207,3 +211,55 @@ class TestCumulativeImpact:
         assert jan["savings"] == 20.0
         assert set(jan["order_ids"]) == {"o1", "o2"}
         assert "note" in jan
+
+
+# ---------------------------------------------------------------------------
+# Gather layer — last_paid is DATE-AWARE (D1): compare against the PRECEDING
+# purchase, never a later one. Uses an isolated orders store (no network).
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def isolated_orders(tmp_path, monkeypatch):
+    from utils import orders
+    monkeypatch.setattr(orders, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(orders, "_DB_PATH", str(tmp_path / "orders.sqlite"))
+    return orders
+
+
+def _seed_purchase(orders, run_id, created_at, price, mfg="SKF", pn="6205"):
+    """Insert a 'placed' purchase row with a controlled created_at (create_order would
+    stamp 'now', which we can't order deterministically)."""
+    conn = orders._get_conn()
+    conn.execute(
+        "INSERT INTO orders (id, run_id, manufacturer, part_number, vendor_name, "
+        "unit_price, currency, quantity, source, status, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (str(uuid.uuid4()), run_id, mfg, pn, "V", price, "USD", 1, "buy", "placed",
+         created_at, created_at),
+    )
+    conn.commit()
+
+
+class TestLastPaidDateAware:
+    def test_saving_uses_prior_purchase_not_later(self, isolated_orders):
+        # Same part purchased in Jan (100) and Mar (60). The order being SCORED is the
+        # Feb one (chosen 80). The correct comparator is the PRECEDING purchase (Jan,
+        # 100) -> saving +20. The LATER Mar purchase (60) must not be the comparator
+        # (that would wrongly yield -20). Rows are seeded out of date order on purpose.
+        _seed_purchase(isolated_orders, "rMar", "2026-03-01T00:00:00+00:00", 60.0)
+        _seed_purchase(isolated_orders, "rJan", "2026-01-01T00:00:00+00:00", 100.0)
+        scored_at = "2026-02-01T00:00:00+00:00"
+
+        last_paid = impact._last_paid_price("SKF", "6205", exclude_run_id="rFeb", before=scored_at)
+        assert last_paid == 100.0                              # the prior purchase, not 60
+
+        saving, basis, _ = compute_savings(chosen_price=80.0, last_paid_price=last_paid, quotes=None)
+        assert saving == 20.0 and basis == "vs_last_paid"      # +20 vs prior, NOT -20 vs later
+
+    def test_no_cutoff_returns_most_recent_across_runs(self, isolated_orders):
+        # Regression guard for the default (before=None) path: without a cutoff the
+        # lookup still returns the most-recent purchase across runs (the live-'now'
+        # case). Date-awareness is precisely what the `before` cutoff adds.
+        _seed_purchase(isolated_orders, "rMar", "2026-03-01T00:00:00+00:00", 60.0)
+        _seed_purchase(isolated_orders, "rJan", "2026-01-01T00:00:00+00:00", 100.0)
+        assert impact._last_paid_price("SKF", "6205", exclude_run_id="rFeb") == 60.0
