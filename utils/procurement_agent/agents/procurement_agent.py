@@ -65,6 +65,18 @@ class ProcurementAgent:
 
     def _execute(self, run: SourcingRun) -> dict:
         from utils import orders
+        from utils.procurement_agent.state.phases import Phase
+
+        # Pre-ship gate (H1): an order may only be PLACED from an APPROVED run.
+        # Without this, /execute can be called straight after /select-candidate,
+        # bypassing approval entirely. EXECUTING is allowed so a re-entrant execute
+        # is idempotent. (Dual-approver routing + distinct-approver + tenant scoping
+        # remain deferred pending the auth layer — see CLEANUP.md §4.1.)
+        phase = getattr(run, "current_phase", None)
+        if phase not in (Phase.APPROVED.value, Phase.EXECUTING.value):
+            return {"success": False, "action": "execute", "order": None, "placed": False,
+                    "message": f"Run is not approved (phase={phase}); cannot place order.",
+                    "next_phase": None}
 
         selection = self._selection_for_order(run)
         if not selection or not selection.get("vendor_name"):

@@ -31,6 +31,7 @@ def _run(candidate, **over):
         asset_specs_json=_SPECS,
         selected_candidate_json=candidate,
         approval_history_json=_APPROVED,
+        current_phase="approved",          # execute is now gated on an approved run (H1)
     )
     kw.update(over)
     return SourcingRun(**kw)
@@ -89,6 +90,17 @@ class TestExecute:
         res = ProcurementAgent().run(run, "execute")
         assert res["success"] is False and res["order"] is None
         assert isolated.get_orders() == []
+
+    def test_execute_blocked_when_not_approved(self, isolated):
+        # H1 gate: select-candidate advances to pending_first_approval; calling execute
+        # straight away (skipping approval) must NOT capture or place any order.
+        run = _run({"vendor_name": "Global Industrial", "base_price": 1799.0,
+                    "source_url": "https://www.globalindustrial.com/p/x"},
+                   current_phase="pending_first_approval")
+        res = ProcurementAgent().run(run, "execute")
+        assert res["success"] is False and res["placed"] is False
+        assert res["order"] is None
+        assert isolated.get_orders() == []          # nothing captured, nothing placed
 
 
 class TestMarkDelivered:
