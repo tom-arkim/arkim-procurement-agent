@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/types";
 
@@ -45,10 +46,16 @@ export function MessageBubble({ message, pending = false }: MessageBubbleProps) 
         {message.attachment?.type === "image" && (
           message.attachment.previewUrl ? (
             <div className="mb-2 flex flex-col gap-1">
-              <img
+              {/* Client-side object-URL preview: unoptimized (the Next loader can't
+                  fetch a blob) + CSS sizing to preserve the original layout. */}
+              <Image
                 src={message.attachment.previewUrl}
                 alt={message.attachment.filename}
-                className="rounded max-h-[200px] max-w-full object-contain"
+                width={0}
+                height={0}
+                sizes="100vw"
+                unoptimized
+                className="rounded max-h-[200px] max-w-full w-auto h-auto object-contain"
               />
               <span className="font-mono text-[10px] text-fg-4 truncate">
                 {message.attachment.filename}
