@@ -23,6 +23,9 @@ Branch: `feature/phase3-comparison-approval`. Suite green throughout (686 baseli
 | — | `<img>` → `next/image` (message-bubble) | DOC | ✅ | `b9a6b39` — `unoptimized` + CSS sizing; lint warning cleared. |
 | §5a | Dedup cross-name aliases (OTC/Great Lakes) | — | 📋 BACKLOG | Needs entity-resolution/alias layer; approach in report. |
 | §5b | Tiering by lane not signal | — | 📋 BACKLOG | Needs commerce-signal promotion; approach in report. |
+| N1 (audit 2) | `supplier_registry.py` + `brand_intelligence.py` connections not closed | LOW | ✅ | `4aa1df3` — `contextlib.closing` on all `_get_conn()` sites (16 + 3). Completion of L1. |
+| N2 (audit 2) | `brand_intelligence.py` dead `"competitors"` probe | B | ✅ | `4aa1df3` — `common_competitors` only. |
+| N3 (audit 2) | Per-tier sourcing failure not surfaced (status captured but presents as "0 results") | LOW | 🔒 DEFERRED | Low urgency while Streamlit is retiring; finer-grained sibling of CLEANUP §4.5. Surface `tier.status` + WARN log when the durable surface is hardened. |
 
 ## Auth-layer dependency note
 H1 (dual-approver routing), M1 (distinct approver), and D2 (tenant scoping) share one root
