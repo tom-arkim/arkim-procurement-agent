@@ -14,7 +14,6 @@ venv_win/
 
 # Logs
 *.log
-streamlit_err.log
 
 # Test / coverage artifacts
 .pytest_cache/

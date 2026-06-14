@@ -21,9 +21,9 @@ An AI procurement agent for industrial maintenance parts (companion to the Arkim
 
 ---
 
-## 2. Architecture as it actually is (read carefully — there's a gotcha)
+## 2. Architecture as it actually is
 
-Two parallel front ends sit over **one shared backend core** (`utils/`). They do **not** talk to each other.
+**One shipping front end** (Next.js/React) talks to the FastAPI surface, which wraps **one shared backend core** (`utils/`).
 
 ```
                     ┌──────────────────────────────┐
@@ -32,43 +32,39 @@ Two parallel front ends sit over **one shared backend core** (`utils/`). They do
                     │   scoring, intake, brand-     │
                     │   intelligence, persistence   │
                     └──────────────────────────────┘
-                       ▲                        ▲
-        imports in-process                 imports in-process
-                       │                        │
-        ┌──────────────┴───────┐    ┌───────────┴───────────────┐
-        │  Streamlit front end │    │  FastAPI (api_server.py)  │
-        │  app.py →            │    │  ~22 REST endpoints       │
-        │  pages/sourcing_     │    │  uvicorn api_server:app   │
-        │  runs.py             │    │      --port 8001          │
-        │  (NO HTTP, in-proc)  │    └───────────┬───────────────┘
-        └──────────────────────┘                │ HTTP /api/*
-                                                 │
-                                    ┌────────────┴─────────────┐
-                                    │  Next.js / React         │
-                                    │  frontend/  (next dev    │
-                                    │      --port 3000)        │
-                                    └──────────────────────────┘
+                                   ▲
+                          imports in-process
+                                   │
+                       ┌───────────┴───────────────┐
+                       │  FastAPI (api_server.py)  │
+                       │  ~22 REST endpoints       │
+                       │  uvicorn api_server:app   │
+                       │      --port 8001          │
+                       └───────────┬───────────────┘
+                                   │ HTTP /api/*
+                       ┌───────────┴──────────────┐
+                       │  Next.js / React          │
+                       │  frontend/  (next dev     │
+                       │      --port 3000)         │
+                       └──────────────────────────┘
 ```
 
-**The gotcha:** Streamlit imports `utils/` **directly, in-process** — it never goes through FastAPI. FastAPI (`api_server.py`) is a thin REST wrapper over the *same* `utils/`, consumed **only** by the React frontend. Both run against the same SQLite DB (WAL mode), separate ports, no conflict.
+`api_server.py` is a thin REST wrapper over `utils/`, consumed by the React frontend. (A Streamlit front end was **retired** — see §8; `app.py`, `pages/`, and the `streamlit` dependency are gone. The orchestrator it used, `utils/procurement_agent/orchestrator/core.py`, is **retained as a tested module but is not on the shipping path** — its fate is a separate decision, see §8 / CLEANUP.md §4.5.)
 
 **Consequences:**
-- **Harden `utils/`, and you harden both front ends at once.** This is the right target for backend work.
-- **Harden `api_server.py` (validation, error handling, auth), and you only harden the React path** — Streamlit bypasses all of it. Do this as part of frontend/endpoint work (Arc 1), not core hardening.
-- **Any `utils/` change is immediately live in Streamlit** with no contract layer between them. A changed return shape hits `pages/sourcing_runs.py` directly. When you change `utils/`, keep the Streamlit pages matched in the same change.
+- **Harden `utils/`, and you harden the core the API (and any future caller) shares.** This is the right target for backend work.
+- **Harden `api_server.py` (validation, error handling, auth) to harden the shipping React path** — it is now the single front-end gate.
+- **Any `utils/` change with a changed return shape hits the FastAPI response models / React types.** Keep them matched in the same change.
 
 ---
 
 ## 3. Running it
 
 ```bash
-# Streamlit front end (the current primary build/demo surface)
-streamlit run app.py            # NOT chat_app.py — the README is stale; chat_app.py does not exist
-
-# FastAPI backend (consumed by the React frontend)
+# FastAPI backend (the shipping API; consumed by the React frontend)
 uvicorn api_server:app --reload --port 8001
 
-# React frontend
+# React frontend (the shipping front end)
 cd frontend && next dev --port 3000
 ```
 
@@ -107,7 +103,7 @@ With a green baseline and the API characterization net, structural refactors are
 - **Investigation first.** For any non-trivial change, report findings before writing code. Don't start editing on a guess.
 - **Show `git diff` (and `git status` for untracked files) before committing.** A known Claude Code failure mode is missing untracked files — check `git status`, not just `git diff`.
 - **One commit per logical change. Don't bundle unrelated files.** Commit convention: **Conventional Commits** (`type: summary`, e.g. `fix: key price cache on (manufacturer, part_number)`) — there is no Jira yet. Once Jira is adopted, prefix with the ticket: `HEL-### type: summary`. Branches: `feature/<desc>` / `bugfix/<desc>` now; `feature/HEL-###-<desc>` once Jira exists. See `docs/arkim_procurement_code_standard.md` §3.
-- **Keep Streamlit pages matched to `utils/` return shapes** when you change the core (see §2 gotcha).
+- **Keep the FastAPI response models / React types matched to `utils/` return shapes** when you change the core (see §2).
 - **Update `design/interactions.md`** in the same change as any user-facing behavior change.
 - **Run the suite after every commit** (`uv run pytest`) and report the real result. It runs green (360) on `.venv`; never claim a pass you didn't run.
 - **Stay in scope.** State out-of-scope items explicitly; don't drive-by refactor or expand scope. Watch for generic exception handlers that mask bugs.
@@ -123,20 +119,18 @@ With a green baseline and the API characterization net, structural refactors are
 - **Highest-risk debt items** (CLEANUP §4.1):
   - `price_db.py` cache PN-collision is **fixed** — keyed on `(manufacturer, part_number)`; old PN-only on-disk entries cleanly miss and re-populate (verified, no migration needed). Keep the composite key when touching this.
   - **RBAC is not enforced** — any caller can supply any `approver_role`; `approve` also ignores approval-rule thresholds. Acceptable for prototype, not production. (Needs auth infra — Arc 1.)
-- **Two front ends, one core** (§2) — remember which layer your change affects.
-- **Streamlit-bypasses-FastAPI** — hardening `api_server.py` validation does **not** protect the Streamlit path.
+- **One shipping front end over the FastAPI surface** (§2) — `api_server.py` validation/auth is the single gate for the React path. (The retired Streamlit surface used to bypass it; that surface is gone — §8.)
 
 ---
 
 ## 7. Where things live
 
 ```
-app.py                      # Streamlit entry — switches to pages/sourcing_runs.py
-pages/sourcing_runs.py      # Streamlit UI (imports utils/ directly)
-api_server.py               # FastAPI app (~22 endpoints, thin wrapper over utils/)
-frontend/                   # Next.js/React (calls FastAPI over HTTP)
+api_server.py               # FastAPI app (~22 endpoints, thin wrapper over utils/) — the shipping API
+frontend/                   # Next.js/React (calls FastAPI over HTTP) — the shipping front end
 utils/                      # THE CORE — harden here
-  procurement_agent/        # orchestrator, agents, state (persistence, approval_rules)
+  procurement_agent/        # agents, state (persistence, approval_rules)
+    orchestrator/core.py    # retained, tested; NOT on the shipping path (Streamlit-era coordinator) — §8
   sourcing_archieved/       # DEAD — still imported; don't touch without auditing (§6)
   price_db.py               # price cache (PN-collision risk — §6)
   brand_intelligence.py     # LLM manufacturer-relationship cache
@@ -151,9 +145,8 @@ design/interactions.md      # behavior documentation — keep in sync
 ## 8. Direction (so you don't optimize for the wrong target)
 
 - **Backend hardening (`utils/`) is the current focus.** Stabilize the procurement workflows and their contracts first.
-- **The React frontend is migrated/hardened in Arc 1**, against stable endpoints, after the backend settles. Streamlit is the fast build/demo harness for now and is retired then.
+- **The React/FastAPI path is the shipping surface.** The Streamlit harness has been **retired** — `app.py`, `pages/`, `.streamlit/`, and the `streamlit` dependency are removed. The orchestrator it used (`utils/procurement_agent/orchestrator/core.py`, incl. `start_new_run` / `_stub_sourcing`) is **retained as a tested module but is not on the shipping path**. Its fate — keep as the reference coordinator (brief §4), wire FastAPI onto it, or retire it + its tests — is a **separate architectural decision**, and reconciling its `_stub_sourcing` failure-masking (advances to `COMPARISON` instead of `Phase.ERROR`, CLEANUP §4.5) rides along with it. See CLEANUP.md §4.5 / `docs/PHASE_R_RESOLUTION.md` so it isn't forgotten.
 - **The deliberate divergences from the house standard** (Postgres + pgvector over DynamoDB, Alembic, pytest-as-a-gate, DBOS durable execution) are conscious choices — see the code standard §7. Build toward them; Sergei reviews once there's a hardened working product.
-- Don't introduce new features on the Streamlit layer expecting them to be permanent — the durable surface is the React/FastAPI path.
 
 ---
 

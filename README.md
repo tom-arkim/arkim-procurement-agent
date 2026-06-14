@@ -9,7 +9,7 @@ Arkim-branded quote with TCA/TLV scoring.
 ## Architecture
 
 ```
-chat_app.py (Streamlit UI)
+frontend/ (Next.js/React UI) → api_server.py (FastAPI) → utils/  (the shared core)
     │
     ├── utils/vision.py          Phase 0 — photo → AssetSpecs (Claude vision)
     ├── utils/sourcing.py        Tier 1/2/3 vendor discovery
@@ -134,7 +134,12 @@ python scripts/refresh_brand_intel.py invalidate Baldor motor
 uv sync
 export TAVILY_API_KEY=tvly-...
 export ANTHROPIC_API_KEY=sk-ant-...
-uv run streamlit run app.py
+
+# Backend (the shipping API)
+uv run uvicorn api_server:app --reload --port 8001
+
+# Frontend (the shipping front end)
+cd frontend && next dev --port 3000
 ```
 
 ### Environment variables

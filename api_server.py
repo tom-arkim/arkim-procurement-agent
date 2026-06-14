@@ -2,8 +2,7 @@
 Arkim Sourcing Engine — FastAPI server.
 
 Exposes the existing SQLAlchemy-backed sourcing pipeline as REST endpoints
-consumed by the React frontend. Runs alongside the Streamlit app without
-conflict (separate port, same SQLite DB via WAL mode).
+consumed by the React frontend (the shipping front end). SQLite DB via WAL mode.
 
 Start with:
     uvicorn api_server:app --reload --port 8001
