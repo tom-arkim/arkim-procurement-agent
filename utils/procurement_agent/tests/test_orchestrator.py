@@ -125,6 +125,52 @@ def test_execute_phase_populates_sourcing_results(db_url):
 
 
 # ---------------------------------------------------------------------------
+# Sourcing failure propagation (§4.5): a hard FAILURE surfaces as Phase.ERROR
+# (matching the FastAPI path), never masked as an empty COMPARISON result. A
+# genuine empty-but-successful search is NOT an error and still → COMPARISON.
+# ---------------------------------------------------------------------------
+
+def test_sourcing_failure_advances_to_error(db_url, monkeypatch):
+    import utils.procurement_agent.agents.sourcing_agent as sa
+
+    def _boom(self, run):
+        raise RuntimeError("tavily exploded")
+    monkeypatch.setattr(sa.SourcingAgent, "run", _boom)
+
+    orch = start_new_run(db_url=db_url)
+    orch.execute_current_phase()  # INTAKE → INVENTORY
+    orch.execute_current_phase()  # INVENTORY → SOURCING
+    orch.execute_current_phase()  # SOURCING → ERROR (was masked as COMPARISON)
+
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.ERROR.value
+    sr = state["sourcing_results_json"]
+    assert sr and sr.get("error")            # the failure detail is retained, not hidden
+
+
+def test_sourcing_empty_but_successful_stays_comparison(db_url, monkeypatch):
+    import utils.procurement_agent.agents.sourcing_agent as sa
+
+    empty_ok = {
+        "tier_1": {"results": [], "count": 0, "status": "ok"},
+        "tier_2": {"results": [], "count": 0, "status": "ok"},
+        "tier_3": {"results": [], "count": 0, "status": "ok"},
+        "warranty_banner": None, "urgency_applied": "predictive", "filters_applied": [],
+    }
+    monkeypatch.setattr(sa.SourcingAgent, "run", lambda self, run: empty_ok)
+
+    orch = start_new_run(db_url=db_url)
+    orch.execute_current_phase()  # INTAKE → INVENTORY
+    orch.execute_current_phase()  # INVENTORY → SOURCING
+    orch.execute_current_phase()  # SOURCING → COMPARISON (empty is not an error)
+
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.COMPARISON.value
+    assert state["sourcing_results_json"]["tier_1"]["count"] == 0
+    assert "error" not in state["sourcing_results_json"]
+
+
+# ---------------------------------------------------------------------------
 # Audit log
 # ---------------------------------------------------------------------------
 

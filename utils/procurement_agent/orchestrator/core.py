@@ -284,7 +284,13 @@ class Orchestrator:
         )
 
     def _stub_sourcing(self, data: dict) -> None:
-        """Phase 2: calls the real SourcingAgent — three-tier parallel search."""
+        """Phase 2: calls the real SourcingAgent — three-tier parallel search.
+
+        A successful search advances to COMPARISON — even with zero candidates (a
+        genuine empty result is NOT a failure). A hard FAILURE (the agent raised)
+        advances to Phase.ERROR, matching the FastAPI path
+        (api_server._run_sourcing_background); a failure is never masked as an
+        empty COMPARISON result (§4.5 divergence — retired)."""
         import os
         from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
 
@@ -297,15 +303,20 @@ class Orchestrator:
             result = agent.run(run)
         except Exception as exc:
             logger.error("[%s] SourcingAgent failed: %s", self.run_id, exc)
-            result = {
-                "tier_1": {"results": [], "count": 0, "status": "error"},
-                "tier_2": {"results": [], "count": 0, "status": "error"},
-                "tier_3": {"results": [], "count": 0, "status": "error"},
-                "warranty_banner": None,
-                "urgency_applied": "unknown",
-                "filters_applied": [],
-                "error": str(exc),
-            }
+            # Surface the failure honestly (Phase.ERROR) rather than masking it as an
+            # empty COMPARISON result. The error detail is retained for debugging.
+            self._advance(
+                data,
+                Phase.ERROR,
+                output_key="sourcing_results_json",
+                output_value={
+                    "error": str(exc),
+                    "tier_1": {"results": [], "count": 0, "status": "error"},
+                    "tier_2": {"results": [], "count": 0, "status": "error"},
+                    "tier_3": {"results": [], "count": 0, "status": "error"},
+                },
+            )
+            return
 
         self._advance(
             data,
