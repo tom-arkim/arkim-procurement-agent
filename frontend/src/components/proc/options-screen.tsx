@@ -73,7 +73,7 @@ function recReason(c: Candidate): string {
 export function OptionsScreen({ runId }: { runId: string }) {
   const router = useRouter();
   const fire = useProcToast();
-  const { data: run, isLoading, isError, refetch, isFetching } = useRunLive(runId);
+  const { data: run, isLoading, isError, refetch } = useRunLive(runId);
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
 
   // Reliable auto-advance: while the run is still being prepared (or phase unknown),
@@ -100,15 +100,6 @@ export function OptionsScreen({ runId }: { runId: string }) {
     return (
       <Shell sub={partLabel} onHome={() => router.push("/")}>
         <Working label="Finding your best options…" sub="Checking the Arkim network, marketplaces, and specialist suppliers — this can take a minute or two." spin />
-        <button
-          className="proc-btn"
-          data-kind="quiet"
-          style={{ marginTop: 14 }}
-          onClick={() => refetch()}
-          disabled={isFetching}
-        >
-          {isFetching ? "Checking…" : "Check for results now"}
-        </button>
       </Shell>
     );
   }
