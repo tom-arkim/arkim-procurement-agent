@@ -239,7 +239,11 @@
 .proc-opt .rec-band { display: flex; align-items: center; gap: 8px; padding: 8px 17px; background: var(--accent-fill); color: var(--accent-text); font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; border-bottom: 1px solid var(--accent-line); flex-wrap: wrap; }
 .proc-opt .rec-band .reason { font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 12.5px; opacity: 0.92; }
 .proc-opt .o-body { display: flex; align-items: center; gap: 16px; padding: 16px 17px; flex-wrap: wrap; }
-.proc-opt .o-tt { flex: 1; min-width: 220px; }
+/* min-width 0 (was 220): the info column grows to fill on desktop, but its floor must
+   not force the action column (e.g. the wider "Order through Arkim" button) to wrap to
+   its own line below the price. It stays beside the price; it only stacks on a genuinely
+   narrow column. */
+.proc-opt .o-tt { flex: 1; min-width: 0; }
 .proc-opt .o-name { font-size: 15.5px; font-weight: 600; color: var(--text-strong); letter-spacing: -0.1px; }
 .proc-opt .o-part { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
 .proc-opt .o-tags { display: flex; align-items: center; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
@@ -263,7 +267,8 @@
 .proc-opt .o-unv-i:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .proc-opt .o-unv-tip { position: absolute; top: calc(100% + 7px); right: 0; z-index: 40; width: 232px; max-width: 76vw; padding: 10px 12px; border-radius: var(--r); background: var(--surface-hi); border: 1px solid var(--border); color: var(--text); font-size: 12px; font-weight: 500; line-height: 1.5; text-align: left; box-shadow: 0 14px 32px -10px rgba(0,0,0,0.55); visibility: hidden; opacity: 0; transition: opacity 0.12s ease; pointer-events: none; }
 .proc-opt .o-unv-tip[data-open="true"], .proc-opt .o-unv:hover .o-unv-tip, .proc-opt .o-unv:focus-within .o-unv-tip { visibility: visible; opacity: 1; pointer-events: auto; }
-.proc-opt .o-act { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
+.proc-opt .o-act { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; flex: none; }
+.proc-opt .o-act .proc-btn { white-space: nowrap; }
 .proc-opt .o-why { background: none; border: none; font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--muted-2); cursor: pointer; display: inline-flex; align-items: center; gap: 4px; padding: 2px; }
 .proc-opt .o-why:hover { color: var(--accent-text); }
 .proc-opt .o-whybody { border-top: 1px solid var(--border-soft); background: var(--surface-2); padding: 13px 17px 15px; }
