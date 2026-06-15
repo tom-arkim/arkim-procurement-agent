@@ -51,6 +51,7 @@ function whyBullets(c: Candidate, manufacturer?: string): string[] {
     return out;
   }
   // Priced — a real listing backs the claim.
+  if (c.purchaseChannel === "marketplace") out.push(`Available to buy directly at ${c.vendorName} at this price — no quote needed.`);
   out.push(isExact(c)
     ? "Matches the exact part number on your equipment record."
     : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
@@ -126,6 +127,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
             {options.map((c) => {
               const rec = c.id === recId;
               const exact = isExact(c);
+              const isMkt = c.purchaseChannel === "marketplace";  // State M: a buyable price now
               return (
                 <div key={c.id} className="proc-opt" data-rec={rec}>
                   {rec && (
@@ -160,14 +162,22 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {/* Lead time shown only when a listing backs it; on uncontacted rows
                           it's a hardcoded default, so it's omitted (not shown as fact). */}
                       {!isUncontacted(c) && c.leadTime && <div className="o-ships">{c.leadTime}</div>}
+                      {/* State M: a buyable price at a registered marketplace — buy directly. */}
+                      {isMkt && <div className="o-mkt">Available now · buy direct</div>}
                     </div>
                     <div className="o-act">
                       <button
                         className="proc-btn"
                         data-kind="primary"
-                        onClick={() => fire(c.price != null ? "Ordering — coming in the next build" : "Quote request — coming in the next build")}
+                        onClick={() => fire(
+                          isMkt
+                            ? "Buy now — coming in the next build"
+                            : c.price != null
+                              ? "Ordering — coming in the next build"
+                              : "Quote request — coming in the next build",
+                        )}
                       >
-                        {c.price != null ? "Order" : "Get quote"}
+                        {isMkt ? "Buy now" : c.price != null ? "Order" : "Get quote"}
                       </button>
                       <button className="o-why" onClick={() => setWhyOpen((s) => ({ ...s, [c.id]: !s[c.id] }))}>
                         Why?<ProcIcon name={whyOpen[c.id] ? "chevD" : "chevR"} size={12} />

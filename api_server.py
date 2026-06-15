@@ -20,6 +20,7 @@ load_dotenv()
 
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
 from utils.models import SourcingRun
+from utils.marketplace_registry import is_marketplace
 
 import secrets
 
@@ -369,6 +370,14 @@ def _transform_option(opt: dict, tier: int, idx: int) -> dict:
         # = no price/quote, so the UI must NOT assert a part match. ("quoted" — the
         # review_items join — is a later increment and is NOT faked here.)
         "evidenceState":         "priced" if price is not None else "uncontacted",
+        # Purchase channel (increment 2, State M): "marketplace" = a buyable price at a
+        # curated transactable marketplace (buy directly); any other priced row =
+        # "reference" (price read off a page). State M requires a real price.
+        # DEFERRED DECISION: this is transform-derived (display-only) because State M is a
+        # label + coming-soon button with no real purchase behaviour yet. When manual-
+        # fulfilment "buy now" becomes a real ACTION, promote purchase_channel to a
+        # SourcingOption model field (it will then drive behaviour, not just display).
+        "purchaseChannel":       "marketplace" if (price is not None and is_marketplace(opt.get("source_url"))) else "reference",
         "leadTime":              _lead_time_label(int(opt.get("lead_time_days") or 0)),
         "url":                   opt.get("source_url") or "",
         # The listing's actual PN — surfaced so a priced exact/equivalent claim is verifiable.

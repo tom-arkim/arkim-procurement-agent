@@ -183,6 +183,16 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 | **Risk / impact** | Per commit a721479, polling now extends through the comparison phase in addition to sourcing — active polling phases are broader than a pre-a721479 estimate would suggest. At prototype scale this is fine; at production scale, every open tab polling every 5 s across sourcing and comparison generates meaningful API load on the FastAPI backend. |
 | **Recommended action** | Post-seed: replace `useRunLive` polling with an SSE or WebSocket subscription pushed from the FastAPI backend; remove the polling interval. |
 
+### 5.3 `purchaseChannel` is transform-derived (display-only) — deferred model-field decision
+
+| Field | Detail |
+|---|---|
+| **File** | `api_server.py` `_transform_option` (`purchaseChannel`); `utils/marketplace_registry.py` (curated allowlist) |
+| **Kind** | Deliberate deferred decision (State M / increment 2), recorded so it isn't mistaken for an oversight. |
+| **Why it exists** | State M ("marketplace / buy now") is **display-only** this increment — a label + a coming-soon button, no real purchase behaviour. So `purchaseChannel` ("marketplace" \| "reference") is **derived in the transform** from `is_marketplace(source_url)` + a real price, not stored on the model. Marketplace detection is the **curated registry only** (no commerce-signal / add-to-cart parsing — a deliberate non-goal). |
+| **Risk / impact** | None today (display label). The registry is a manually-curated allowlist — a wrong entry would mis-label a row "buy direct"; kept obviously editable in `marketplace_registry.py`. |
+| **Recommended action** | When manual-fulfilment **"buy now" becomes a real ACTION** (not just a label), promote `purchase_channel` to a `SourcingOption` model field set during sourcing — at that point it drives behaviour, not just display, and should be persisted/auditable rather than re-derived per request. Revisit registry-vs-commerce-signal detection then too. |
+
 ---
 
 ## 6. Documentation

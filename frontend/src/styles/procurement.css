@@ -253,6 +253,8 @@
 .proc-opt .o-num { font-size: 22px; font-weight: 300; letter-spacing: -0.5px; color: var(--text-strong); font-variant-numeric: tabular-nums; }
 .proc-opt .o-num .q { font-size: 13.5px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
 .proc-opt .o-ships { font-size: 12px; color: var(--muted); margin-top: 3px; }
+/* State M (marketplace, buy-now): a buyable price the customer can purchase directly. */
+.proc-opt .o-mkt { font-size: 11.5px; font-weight: 600; color: var(--accent-text); margin-top: 3px; }
 /* Unverified-price affordance: short label + info icon; tooltip on hover/focus/tap. */
 .proc-opt .o-unv { position: relative; display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 4px; color: var(--st-overdue); font-size: 12px; }
 .proc-opt .o-unv-l { white-space: nowrap; }

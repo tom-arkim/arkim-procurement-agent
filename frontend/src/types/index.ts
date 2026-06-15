@@ -118,6 +118,7 @@ export interface Candidate {
   tier: 1 | 2 | 3;
   price?: number;
   evidenceState?: "priced" | "uncontacted";   // increment 1; "quoted" is a later increment
+  purchaseChannel?: "marketplace" | "reference";  // increment 2 (State M); marketplace = buyable price
   leadTime: string;
   url: string;
   suitability: number;

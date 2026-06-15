@@ -736,6 +736,24 @@ class TestTransformOptionEvidenceState:
         from api_server import _transform_option
         assert _transform_option({"vendor_name": "v", "base_price": 1.0}, 2, 0)["stock"] is None
 
+    def test_purchase_channel_marketplace_requires_price_and_registered_domain(self):
+        # State M = a buyable price at a registered marketplace. Anything else = reference.
+        from api_server import _transform_option
+        m = _transform_option({"vendor_name": "Seal It 123", "base_price": 53.25,
+                               "source_url": "https://sealit123.com/x"}, 2, 0)
+        assert m["price"] == 53.25 and m["purchaseChannel"] == "marketplace"
+        # Priced but NOT a registered marketplace -> reference.
+        ref = _transform_option({"vendor_name": "Industrial Pump Parts", "base_price": 173.0,
+                                 "source_url": "https://industrialpumpparts.com/x"}, 3, 0)
+        assert ref["purchaseChannel"] == "reference"
+        # Registered marketplace but no buyable price (RFQ/price_tbd) -> NOT marketplace.
+        nob = _transform_option({"vendor_name": "Seal It 123", "price_tbd": True,
+                                 "requires_rfq": True, "source_url": "https://sealit123.com/x"}, 3, 0)
+        assert nob["price"] is None and nob["purchaseChannel"] == "reference"
+        # Uncontacted (no price, no url) -> reference (State M requires a price).
+        unc = _transform_option({"vendor_name": "Phoenix Pumps", "price_tbd": True}, 3, 0)
+        assert unc["purchaseChannel"] == "reference"
+
     def test_price_unverified_below_confidence_floor(self):
         # Live case: Industrial Pump Parts $173 @ conf 28% — a low-confidence extracted
         # price must be flagged unverified (kept, not suppressed, not fabricated).
