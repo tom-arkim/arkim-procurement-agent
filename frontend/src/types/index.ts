@@ -134,6 +134,7 @@ export interface Candidate {
   stock?: string;
   shipFrom?: string;
   priceVerified?: boolean;
+  priceUnverified?: boolean;                   // extracted price below the confidence floor
   contact?: string;
   relationship?: string;
   // Tier 1 two-mode display: true = show "Request Confirmation"; false = show "Buy Now".

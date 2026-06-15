@@ -301,6 +301,11 @@ _URGENCY_FACTORS: Dict[str, float] = {
 # Sourcing results transformation: backend SourcingOption → frontend Candidate
 # ---------------------------------------------------------------------------
 
+# Below this identification/extraction confidence (0–100), an extracted price is shown
+# as UNVERIFIED rather than a firm figure (the number is kept, but labelled). Tunable.
+_PRICE_CONFIDENCE_FLOOR: float = 40.0
+
+
 def _lead_time_label(days: int) -> str:
     if days <= 1:  return "Next day"
     if days <= 5:  return f"{days} days"
@@ -377,6 +382,13 @@ def _transform_option(opt: dict, tier: int, idx: int) -> dict:
         "isOemDirect":           bool(opt.get("is_oem_direct")),
         "isAuthorizedDistributor": opt.get("vendor_authorization_status") == "Authorized",
         "priceVerified":         not opt.get("limited_price_data", False),
+        # A priced row whose extraction confidence is a real low reading (0 < c < floor)
+        # is shown as an UNVERIFIED price (kept + labelled), not a firm figure — displayed
+        # confidence must match actual confidence (live: $173 @ conf 28% was a mis-extraction).
+        # A 0/absent score is "no confidence signal" (e.g. the Tier 2 lane doesn't populate
+        # it), NOT low confidence — those rows are not flagged here (their price honesty is
+        # handled by priceVerified/limited_price_data).
+        "priceUnverified":       price is not None and 0 < float(opt.get("confidence_score") or 0) < _PRICE_CONFIDENCE_FLOOR,
         # Real stock signal only when the listing actually reported in-stock; else omitted
         # (no fabricated stock). Wires the previously-dead frontend `stock` read.
         "stock":                 "In stock" if opt.get("in_stock") is True else None,

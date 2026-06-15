@@ -55,6 +55,7 @@ function whyBullets(c: Candidate, manufacturer?: string): string[] {
     ? "Matches the exact part number on your equipment record."
     : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
   if (c.foundPartNumber) out.push(`Listed for part ${c.foundPartNumber}.`);
+  if (c.priceUnverified) out.push("Price auto-extracted at low confidence — confirm it with the vendor before ordering.");
   if (c.priceVerified === false) out.push("Limited price data — treat the listed price as indicative.");
   if (c.comparisonArtifact?.engineerNotes) out.push(c.comparisonArtifact.engineerNotes);
   return out;
@@ -65,7 +66,7 @@ function recReason(c: Candidate): string {
   const bits: string[] = [];
   if (c.stock?.toLowerCase().includes("stock")) bits.push("in stock");
   if (c.leadTime) bits.push(c.leadTime.toLowerCase());
-  if (c.price != null) bits.push("best price");
+  if (c.price != null && !c.priceUnverified) bits.push("best price");
   return bits.length ? bits.join(", ") + "." : "Best match for your part.";
 }
 
@@ -136,7 +137,12 @@ export function OptionsScreen({ runId }: { runId: string }) {
                     </div>
                     <div className="o-price">
                       {c.price != null
-                        ? <div className="o-num">{procMoney(c.price)}</div>
+                        ? (c.priceUnverified
+                            ? <>
+                                <div className="o-num" style={{ opacity: 0.8 }}>≈{procMoney(c.price)}</div>
+                                <div className="o-ships" style={{ color: "var(--st-overdue)" }}>price unverified — confirm with vendor</div>
+                              </>
+                            : <div className="o-num">{procMoney(c.price)}</div>)
                         : <div className="o-num"><span className="q">Get a quote</span></div>}
                       {/* Lead time shown only when a listing backs it; on uncontacted rows
                           it's a hardcoded default, so it's omitted (not shown as fact). */}

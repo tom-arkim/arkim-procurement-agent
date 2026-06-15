@@ -736,6 +736,27 @@ class TestTransformOptionEvidenceState:
         from api_server import _transform_option
         assert _transform_option({"vendor_name": "v", "base_price": 1.0}, 2, 0)["stock"] is None
 
+    def test_price_unverified_below_confidence_floor(self):
+        # Live case: Industrial Pump Parts $173 @ conf 28% — a low-confidence extracted
+        # price must be flagged unverified (kept, not suppressed, not fabricated).
+        from api_server import _transform_option, _PRICE_CONFIDENCE_FLOOR
+        assert _PRICE_CONFIDENCE_FLOOR == 40.0
+        low = _transform_option({"vendor_name": "Industrial Pump Parts", "base_price": 173.0,
+                                 "confidence_score": 28.0}, 3, 0)
+        assert low["price"] == 173.0 and low["priceUnverified"] is True
+        high = _transform_option({"vendor_name": "sealit123", "base_price": 53.25,
+                                  "confidence_score": 75.0}, 2, 0)
+        assert high["priceUnverified"] is False
+        # A 0/absent confidence score is "no signal" (e.g. the Tier 2 lane), NOT low
+        # confidence — must NOT be flagged (otherwise every priced row cries wolf).
+        zero = _transform_option({"vendor_name": "sealit123", "base_price": 53.25,
+                                  "confidence_score": 0.0}, 2, 0)
+        assert zero["priceUnverified"] is False
+        # No price → nothing to qualify as unverified.
+        nohp = _transform_option({"vendor_name": "v", "price_tbd": True,
+                                  "confidence_score": 10.0}, 3, 0)
+        assert nohp["priceUnverified"] is False
+
     def test_wrong_phase_409_dict_detail(self, api):
         rid = _create_run(api)  # intake, not pending_intake
         resp = api.post(f"/api/runs/{rid}/reject-submission")

@@ -99,24 +99,37 @@ def _normalize_vendor_name(name: str) -> str:
 def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
     """Mark lower-tier duplicates of active higher-tier vendors.
 
-    Vendor identity: normalized vendor_name (lowercase alphanumeric only).
-    Priority: Tier 1 > Tier 2 > Tier 3. An active higher-tier entry claims the
-    vendor slot; the same vendor in a lower tier gets rejection_reason=
-    "duplicate_in_higher_tier". First-set wins: options already rejected are
-    left unchanged. Rejected higher-tier entries do NOT claim the slot, so the
-    same vendor can surface in a lower tier if the higher-tier result was poor.
+    Vendor identity: normalized vendor_name (lowercase alphanumeric only) OR the
+    identical listing URL (normalized: trailing "/" stripped, lowercased). The URL
+    check catches the same listing surfaced under different name spellings
+    (e.g. "sealit123.com" / "sealit123" / "Seal It 123" at one URL) that the
+    name-only key misses.
+
+    Priority: Tier 1 > Tier 2 > Tier 3. An active higher-tier entry claims BOTH its
+    name slot and its URL slot; the same vendor/listing in a lower tier gets
+    rejection_reason="duplicate_in_higher_tier". First-set wins: options already
+    rejected are left unchanged. Rejected higher-tier entries do NOT claim a slot,
+    so the same vendor can resurface lower if the higher-tier result was poor.
+
+    Scope note: this resolves only the URL-IDENTICAL subset of the §5a dedup
+    backlog. The alias root cause — the same supplier under different names at
+    DIFFERENT urls (e.g. OTC Industrial / OTC Industrial Technologies) — is
+    unchanged and still needs the entity-resolution layer. §5a is NOT resolved.
 
     Returns the count of newly-marked duplicates.
     """
-    seen: set[str] = set()
+    seen_names: set[str] = set()
+    seen_urls: set[str] = set()
     deduped = 0
 
     for tier_label, tier_data in (("tier_1", tier1), ("tier_2", tier2), ("tier_3", tier3)):
         for o in tier_data.get("results", []):
             name = _normalize_vendor_name(o.get("vendor_name") or "")
-            if not name:
+            url = (o.get("source_url") or "").rstrip("/").lower()
+            if not name and not url:
                 continue
-            if name in seen:
+            is_dup = (name and name in seen_names) or (url and url in seen_urls)
+            if is_dup:
                 if not o.get("rejection_reason"):
                     o["rejection_reason"] = "duplicate_in_higher_tier"
                     print(
@@ -125,7 +138,11 @@ def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
                     )
                     deduped += 1
             elif not o.get("rejection_reason"):
-                seen.add(name)
+                # First (highest-tier) occurrence claims BOTH slots.
+                if name:
+                    seen_names.add(name)
+                if url:
+                    seen_urls.add(url)
 
     return deduped
 

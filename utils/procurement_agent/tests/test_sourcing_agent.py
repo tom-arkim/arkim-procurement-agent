@@ -15,6 +15,7 @@ from utils.procurement_agent.agents.sourcing_agent import (
     SourcingAgent,
     _URGENCY_WEIGHTS,
     _WARRANTY_BANNER,
+    _dedup_across_tiers,
 )
 
 
@@ -717,3 +718,45 @@ class TestTier2CacheSuitability:
         assert vendor is not None
         assert not vendor.get("rejection_reason"), \
             f"rfq cache hit should not be rejected, got: {vendor.get('rejection_reason')}"
+
+
+# ---------------------------------------------------------------------------
+# Cross-tier dedup — by vendor name OR identical listing URL (sourcing honesty).
+# Resolves the URL-identical subset of §5a; NOT the alias root cause (same supplier
+# under different names at DIFFERENT urls — e.g. OTC — still needs entity resolution).
+# ---------------------------------------------------------------------------
+
+class TestDedupByUrl:
+    def test_same_url_different_names_collapses_to_one(self):
+        # The live sealit123 case: one listing, three name spellings, same URL.
+        t2 = {"results": [
+            {"vendor_name": "sealit123.com", "source_url": "https://sealit123.com/p/84004-28"},
+            {"vendor_name": "Seal It 123",   "source_url": "https://sealit123.com/p/84004-28/"},  # trailing slash
+        ]}
+        t3 = {"results": [
+            {"vendor_name": "sealit123",     "source_url": "HTTPS://sealit123.com/p/84004-28"},   # case variant
+        ]}
+        n = _dedup_across_tiers({"results": []}, t2, t3)
+        survivors = [o for o in (t2["results"] + t3["results"]) if not o.get("rejection_reason")]
+        assert len(survivors) == 1
+        assert survivors[0]["vendor_name"] == "sealit123.com"   # first (higher-tier) wins
+        assert n == 2
+
+    def test_same_domain_different_urls_both_survive(self):
+        # Two DIFFERENT products on one marketplace must NOT be merged (URL-level, not domain).
+        t2 = {"results": [
+            {"vendor_name": "Grainger", "source_url": "https://grainger.com/p/AAA"},
+            {"vendor_name": "Grainger Pumps", "source_url": "https://grainger.com/p/BBB"},
+        ]}
+        n = _dedup_across_tiers({"results": []}, t2, {"results": []})
+        survivors = [o for o in t2["results"] if not o.get("rejection_reason")]
+        assert len(survivors) == 2 and n == 0
+
+    def test_same_name_still_dedups_without_url(self):
+        # Existing name-based dedup is preserved when no URL is present.
+        t1 = {"results": [{"vendor_name": "Acme Co"}]}
+        t3 = {"results": [{"vendor_name": "Acme Co."}]}   # normalizes to same name
+        n = _dedup_across_tiers(t1, {"results": []}, t3)
+        assert t1["results"][0].get("rejection_reason") is None
+        assert t3["results"][0].get("rejection_reason") == "duplicate_in_higher_tier"
+        assert n == 1
