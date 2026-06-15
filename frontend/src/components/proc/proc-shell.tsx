@@ -4,6 +4,7 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { useRouter, usePathname } from "next/navigation";
 import { ProcIcon, type ProcIconName } from "./proc-icon";
 import { ProcToast } from "./proc-ui";
+import { ArkimMark } from "./arkim-mark";
 import { PROC_TENANT, PRIMARY_SITE } from "@/lib/proc-config";
 
 // Tenant / site framing comes from proc-config (fixture until customer auth + a real
@@ -66,7 +67,7 @@ export function ProcShell({ children }: { children: ReactNode }) {
           {/* left nav */}
           <nav className="proc-dnav">
             <div className="proc-brand">
-              <span className="bm">A</span>
+              <span className="bm"><ArkimMark size={20} /></span>
               <span className="bn">arkim</span>
             </div>
 
