@@ -39,6 +39,7 @@ data/*.sqlite-wal
 # Runtime price caches under utils/ (regenerated at runtime — not seed data)
 utils/*.db
 utils/price_db.json
+utils/known_parts.json
 
 # Frontend — build artefacts, dependencies, and local env overrides (never commit)
 frontend/node_modules/

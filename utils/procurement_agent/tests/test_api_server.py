@@ -680,6 +680,48 @@ class TestOpenFromPending:
         assert resp.json()["detail"]["current_phase"] == "intake"
 
 
+class TestKnownPartsCacheFirst:
+    """Increment: a previously-seen part reads its remembered supplier set from
+    known_parts (deterministic) instead of re-rolling variable discovery."""
+
+    def test_second_run_returns_cached_suppliers_and_skips_discovery(self, api, monkeypatch, tmp_path):
+        from utils import known_parts
+        monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
+        specs = json.dumps({"manufacturer": "Gusher Pumps", "part_number": "84004-28-C238CBC"})
+
+        # Run 1 — discovery yields a candidate set; written back to known_parts.
+        rid1 = _create_run(api)
+        _set_run(api, rid1, asset_specs_json=specs)
+        s1 = _empty_sourcing()
+        s1["tier_2"]["results"] = [{
+            "vendor_name": "Seal It 123", "base_price": 53.25,
+            "source_url": "https://sealit123.com/x", "suitability_score": 75,
+            "match_type": "Exact OEM",
+        }]
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=s1, artifact=None)
+        assert api.post(f"/api/runs/{rid1}/confirm-intake").status_code == 200
+
+        pk = known_parts.canonical_part_key("Gusher Pumps", "84004-28-C238CBC")
+        assert any(e["supplier_id"] == "sealit123.com" for e in known_parts.get_edges(pk))
+
+        # Run 2 — same part. Discovery (if it ran) would now return a DIFFERENT set;
+        # cache-first must return the remembered suppliers and skip discovery.
+        rid2 = _create_run(api)
+        _set_run(api, rid2, asset_specs_json=specs)
+        s2 = _empty_sourcing()
+        s2["tier_2"]["results"] = [{
+            "vendor_name": "Different Vendor", "base_price": 99.0,
+            "source_url": "https://othersite.com/x", "suitability_score": 60,
+        }]
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=s2, artifact=None)
+        assert api.post(f"/api/runs/{rid2}/confirm-intake").status_code == 200
+
+        detail = api.get(f"/api/runs/{rid2}").json()
+        vendors = [c["vendorName"] for c in detail["sourcing_results"]["tier2"]]
+        assert "Seal It 123" in vendors          # the cached set was returned
+        assert "Different Vendor" not in vendors  # discovery was skipped
+
+
 class TestRejectSubmission:
     def test_happy_transitions_to_cancelled(self, api):
         rid = _create_pending(api, submission_id="sub-rej")

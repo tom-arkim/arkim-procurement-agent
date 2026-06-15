@@ -434,6 +434,50 @@ def _transform_sourcing_results(raw: dict) -> dict:
 # Background sourcing task
 # ---------------------------------------------------------------------------
 
+def _result_from_cached_edges(edges: list) -> dict:
+    """Reconstruct the SourcingAgent result shape from cached known_parts edges, so a
+    cache hit flows through the same transform/persist path without re-discovery.
+
+    A STALE cached price is marked low-confidence so the transform flags it
+    priceUnverified (a stale price shown as current is an overclaim — same honesty
+    discipline as the unverified-price work). No comparison artifact on cache hits —
+    the spec comparison is recomputed only on a fresh discovery."""
+    tiers: dict = {1: [], 2: [], 3: []}
+    for e in edges:
+        price = e.get("price")
+        mt = e.get("match_type") or "Functional Alternative"
+        pn_status = ("exact_match" if mt == "Exact OEM"
+                     else "partial_match" if mt == "Aftermarket Compatible"
+                     else "not_visible")
+        cand = {
+            "vendor_name":       e.get("display_name") or e.get("supplier_id"),
+            "base_price":        price,
+            "price_tbd":         price is None,
+            "requires_rfq":      e.get("purchase_channel") == "rfq",
+            "source_url":        e.get("source_url"),
+            "match_type":        mt,
+            "pn_match_status":   pn_status,
+            "found_part_number": e.get("found_pn"),
+            "suitability_score": e.get("suitability") or 0,
+            # Stale cached price -> low confidence -> priceUnverified in the UI; fresh ->
+            # no signal (shown firm). Reuses the existing confidence-floor treatment.
+            "confidence_score":  1.0 if e.get("price_stale") else 0.0,
+            "lead_time_days":    e.get("lead_days") or 5,
+            "from_cache":        True,
+        }
+        t = e.get("tier") if e.get("tier") in (1, 2, 3) else (3 if price is None else 2)
+        tiers[t].append(cand)
+
+    def _t(n: int) -> dict:
+        return {"results": tiers[n], "count": len(tiers[n]), "status": "ok"}
+
+    return {
+        "tier_1": _t(1), "tier_2": _t(2), "tier_3": _t(3),
+        "warranty_banner": None, "urgency_applied": "cached",
+        "filters_applied": ["known_parts_cache"], "tier3_capability_pivot": False,
+    }
+
+
 def _run_sourcing_background(
     run_id: str,
     specs_dict: dict,
@@ -442,89 +486,128 @@ def _run_sourcing_background(
 ) -> None:
     """Run SourcingAgent then ComparisonAgent in a single background thread.
 
-    Order of operations is load-bearing:
-    1. SourcingAgent runs → raw results held in memory, phase stays SOURCING (polling active).
-    2. ComparisonAgent runs in parallel over all candidates (phase still SOURCING).
-    3. Artifacts embedded into results, phase advances to COMPARISON, commit.
+    Cache-first: a previously-seen part returns its remembered supplier set from
+    known_parts (deterministic, no web discovery). Otherwise discovery runs and the
+    candidate set is written back so the NEXT request for this part is consistent.
 
-    Phase advances only after artifacts exist. Polling stops at COMPARISON, so the
-    frontend always receives a complete payload on the first post-transition poll.
+    Order of operations is load-bearing:
+    0. known_parts cache-first read → if HIT, reconstruct results, skip discovery.
+    1. (miss) SourcingAgent runs → raw results, phase stays SOURCING (polling active).
+    2. (miss) ComparisonAgent runs in parallel over all candidates (phase still SOURCING).
+       Then the candidate set is written back to known_parts.
+    3. Persist results, advance phase to COMPARISON, commit (both paths).
     """
     import logging
     from concurrent.futures import ThreadPoolExecutor
     log = logging.getLogger(__name__)
 
-    # ── Step 1: Sourcing ────────────────────────────────────────────────────
+    result = None
+
+    # ── Step 0: Cache-first (known_parts) ────────────────────────────────────
+    # Canonical part-key (aliases + PN-normalize) so the cache doesn't fork on
+    # "Gusher" vs "Gusher Pumps". exact_only runs bypass the cache (filtered set).
+    part_key = ""
     try:
-        from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
-        from utils.models import SourcingRun as _SourcingRunModel
-        agent = SourcingAgent(
-            tavily_api_key=os.environ.get("TAVILY_API_KEY"),
-            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
-        )
-        run_model = _SourcingRunModel(
-            id=run_id,
-            current_phase="sourcing",
-            asset_specs_json=specs_dict,
-            urgency_factor=urgency_factor,
-            warranty_status=warranty_status,
-        )
-        result = agent.run(run_model)
-        # Exact-only mode (no-spec-sheet honesty branch): drop aftermarket/equivalent
-        # Tier 2/3 candidates, leaving only exact OEM matches (Tier 1 untouched).
-        if specs_dict.get("exact_only"):
-            from utils.sourcing_filter import apply_exact_only
-            result = apply_exact_only(result)
+        from utils import known_parts
+        part_key = known_parts.canonical_part_key(
+            specs_dict.get("manufacturer"), specs_dict.get("part_number"))
+        if part_key and not specs_dict.get("exact_only"):
+            edges = known_parts.get_edges(part_key)
+            if edges:
+                result = _result_from_cached_edges(edges)
+                log.info("[%s] known_parts cache HIT (%d suppliers) — skipping discovery", run_id, len(edges))
     except Exception as exc:
-        log.error("[%s] Sourcing failed: %s", run_id, exc)
-        with _SessionFactory() as session:
-            orm = session.get(SourcingRunORM, run_id)
-            if orm:
-                orm.sourcing_results_json = json.dumps({
-                    "error": str(exc),
-                    "tier_1": {"results": [], "count": 0, "status": "error"},
-                    "tier_2": {"results": [], "count": 0, "status": "error"},
-                    "tier_3": {"results": [], "count": 0, "status": "error"},
-                })
-                # Surface the failure as an explicit terminal-ish state so the run
-                # is not stranded at "sourcing" (where the frontend polls forever).
-                # The error detail above is retained for debugging.
-                orm.current_phase = Phase.ERROR.value
-                orm.updated_at = datetime.now(timezone.utc)
-                session.commit()
-        return
+        log.warning("[%s] known_parts cache read failed: %s", run_id, exc)
+        result = None
 
-    # ── Step 2: Comparison (parallel, phase stays SOURCING) ─────────────────
-    try:
-        from utils.procurement_agent.agents.spec_comparison_agent import SpecComparisonAgent
-        comp_agent = SpecComparisonAgent(
-            anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY")
-        )
-        work = [
-            (candidate, tier_num)
-            for tier_key, tier_num in [("tier_1", 1), ("tier_2", 2), ("tier_3", 3)]
-            for candidate in result.get(tier_key, {}).get("results", [])
-        ]
+    if result is None:
+        # ── Step 1: Sourcing (discovery) ─────────────────────────────────────
+        try:
+            from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+            from utils.models import SourcingRun as _SourcingRunModel
+            agent = SourcingAgent(
+                tavily_api_key=os.environ.get("TAVILY_API_KEY"),
+                anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+            )
+            run_model = _SourcingRunModel(
+                id=run_id,
+                current_phase="sourcing",
+                asset_specs_json=specs_dict,
+                urgency_factor=urgency_factor,
+                warranty_status=warranty_status,
+            )
+            result = agent.run(run_model)
+            # Exact-only mode (no-spec-sheet honesty branch): drop aftermarket/equivalent
+            # Tier 2/3 candidates, leaving only exact OEM matches (Tier 1 untouched).
+            if specs_dict.get("exact_only"):
+                from utils.sourcing_filter import apply_exact_only
+                result = apply_exact_only(result)
+        except Exception as exc:
+            log.error("[%s] Sourcing failed: %s", run_id, exc)
+            with _SessionFactory() as session:
+                orm = session.get(SourcingRunORM, run_id)
+                if orm:
+                    orm.sourcing_results_json = json.dumps({
+                        "error": str(exc),
+                        "tier_1": {"results": [], "count": 0, "status": "error"},
+                        "tier_2": {"results": [], "count": 0, "status": "error"},
+                        "tier_3": {"results": [], "count": 0, "status": "error"},
+                    })
+                    # Surface the failure as an explicit terminal-ish state so the run
+                    # is not stranded at "sourcing" (where the frontend polls forever).
+                    orm.current_phase = Phase.ERROR.value
+                    orm.updated_at = datetime.now(timezone.utc)
+                    session.commit()
+            return
 
-        def _compare_one(args: tuple) -> tuple:
-            candidate, tier_num = args
-            try:
-                return candidate, comp_agent.run(run_model, candidate, tier=tier_num)
-            except Exception as cexc:
-                log.warning("[%s] Comparison skipped for %s: %s",
-                            run_id, candidate.get("vendor_name"), cexc)
-                return candidate, None
+        # ── Step 2: Comparison (parallel, phase stays SOURCING) ──────────────
+        try:
+            from utils.procurement_agent.agents.spec_comparison_agent import SpecComparisonAgent
+            comp_agent = SpecComparisonAgent(
+                anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY")
+            )
+            work = [
+                (candidate, tier_num)
+                for tier_key, tier_num in [("tier_1", 1), ("tier_2", 2), ("tier_3", 3)]
+                for candidate in result.get(tier_key, {}).get("results", [])
+            ]
 
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            for candidate, artifact in pool.map(_compare_one, work):
-                candidate["comparison_artifact"] = artifact
+            def _compare_one(args: tuple) -> tuple:
+                candidate, tier_num = args
+                try:
+                    return candidate, comp_agent.run(run_model, candidate, tier=tier_num)
+                except Exception as cexc:
+                    log.warning("[%s] Comparison skipped for %s: %s",
+                                run_id, candidate.get("vendor_name"), cexc)
+                    return candidate, None
 
-        log.info("[%s] Comparison artifacts attached (%d candidates)", run_id, len(work))
-    except Exception as exc:
-        log.error("[%s] Comparison step failed: %s", run_id, exc)
-        # Non-fatal: advance to COMPARISON with artifacts absent rather than stalling.
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                for candidate, artifact in pool.map(_compare_one, work):
+                    candidate["comparison_artifact"] = artifact
 
-    # ── Step 3: Persist final results and advance phase ──────────────────────
+            log.info("[%s] Comparison artifacts attached (%d candidates)", run_id, len(work))
+        except Exception as exc:
+            log.error("[%s] Comparison step failed: %s", run_id, exc)
+            # Non-fatal: advance to COMPARISON with artifacts absent rather than stalling.
+
+        # ── Write-back: remember this part's suppliers so the next request reads the
+        # cache (consistent, no re-roll). Skip exact_only (a filtered set would poison
+        # the part's cache). Durable supplier edges; volatile prices via the store. ──
+        try:
+            if part_key and not specs_dict.get("exact_only"):
+                from utils import known_parts
+                cands = [
+                    {**o, "tier": n}
+                    for tier_key, n in (("tier_1", 1), ("tier_2", 2), ("tier_3", 3))
+                    for o in result.get(tier_key, {}).get("results", [])
+                    if not o.get("rejection_reason")
+                ]
+                written = known_parts.upsert_edges(part_key, cands)
+                log.info("[%s] known_parts write-back: %d supplier edge(s) for %r", run_id, written, part_key)
+        except Exception as exc:
+            log.warning("[%s] known_parts write-back failed: %s", run_id, exc)
+
+    # ── Step 3: Persist final results and advance phase (both paths) ─────────
     with _SessionFactory() as session:
         orm = session.get(SourcingRunORM, run_id)
         if orm and orm.current_phase == Phase.SOURCING.value:
@@ -532,7 +615,7 @@ def _run_sourcing_background(
             orm.current_phase = Phase.COMPARISON.value
             orm.updated_at = datetime.now(timezone.utc)
             session.commit()
-    log.info("[%s] Sourcing + comparison complete → comparison", run_id)
+    log.info("[%s] Sourcing complete → comparison", run_id)
 
 
 # ---------------------------------------------------------------------------
