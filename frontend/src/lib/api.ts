@@ -48,6 +48,11 @@ async function request<T>(
   options: RequestInit = {},
 ): Promise<T> {
   const res = await fetch(`${API_BASE}/api${path}`, {
+    // Never serve API responses from the browser HTTP cache. Without this, a polled
+    // GET to the same URL (e.g. useRunLive on /api/runs/{id}) can be answered from
+    // cache and never observe the run advancing sourcing -> comparison — the run
+    // stays stuck on "finding your best options" until a full browser reload.
+    cache: "no-store",
     headers: {
       "Content-Type": "application/json",
       ...options.headers,
