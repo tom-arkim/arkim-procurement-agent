@@ -97,6 +97,10 @@ export function useRunLive(runId: string) {
       const activePhases = ["sourcing", "executing", "fulfilling", "inventory", "comparison"];
       return phase && activePhases.includes(phase) ? 5_000 : false;
     },
+    // Sourcing takes 1–2 min of real provider calls; users often tab away while
+    // waiting. Keep polling in the background so the run advances to its options
+    // view without a manual refresh when they return.
+    refetchIntervalInBackground: true,
   });
 }
 

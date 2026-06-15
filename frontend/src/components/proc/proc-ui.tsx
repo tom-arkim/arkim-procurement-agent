@@ -57,6 +57,21 @@ export function ChevLoader({ size = 20 }: { size?: number }) {
   );
 }
 
+/** Brand loader — the Arkim mark (anvil bar + three descending arrow bands) with
+ *  blue light cascading down it. The four bands light in sequence top→bottom. */
+export function ArkimLoader({ size = 34 }: { size?: number }) {
+  return (
+    <span className="proc-arkloader" style={{ width: size, height: size }} aria-hidden="true">
+      <svg viewBox="0 0 120 120" width={size} height={size}>
+        <polygon className="ak" points="14,16 52,16 52,25 68,25 68,16 106,16 98,38 22,38" />
+        <polygon className="ak" points="26,45 82,45 96,55.5 82,66 26,66 37,55.5" />
+        <polygon className="ak" points="34,72 74,72 88,82 74,92 34,92 45,82" />
+        <polygon className="ak" points="42,98 66,98 80,108 66,118 42,118 53,108" />
+      </svg>
+    </span>
+  );
+}
+
 /** Bottom-center toast (mockup ProcToast), positioned within the proc surface. */
 export function ProcToast({ msg }: { msg: string | null }) {
   if (!msg) return null;

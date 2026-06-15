@@ -18,7 +18,7 @@ import { createRun, sendMessage, confirmIntake, uploadNameplate } from "@/lib/ap
 import { useRun } from "@/lib/queries";
 import { queryKeys } from "@/lib/query-client";
 import { ProcIcon } from "./proc-icon";
-import { ProcHead, ChevLoader } from "./proc-ui";
+import { ProcHead, ArkimLoader } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
 import type { AssetSpecs } from "@/types";
 
@@ -186,7 +186,7 @@ export function RequestScreen() {
       {/* WORKING */}
       {stage === "working" && (
         <div className="proc-working">
-          <ChevLoader size={20} />
+          <ArkimLoader size={36} />
           <div>
             <div className="w-t">{file ? "Reading the nameplate…" : "Identifying part…"}</div>
             <div className="w-s">{file ? "Pulling the part details from your photo." : "Checking service records and manuals."}</div>

@@ -15,7 +15,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRunLive } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
-import { ProcHead, ChevLoader, procMoney } from "./proc-ui";
+import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
 import { QuotesSection } from "./quotes-section";
 import { OrderSection } from "./order-section";
@@ -209,7 +209,7 @@ function Shell({ children, sub, onHome }: { children: React.ReactNode; sub?: str
 function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin?: boolean; loud?: boolean }) {
   return (
     <div className="proc-working">
-      {spin ? <ChevLoader size={20} /> : <ProcIcon name={loud ? "alert" : "box"} size={20} color={loud ? "var(--st-overdue)" : "var(--muted)"} />}
+      {spin ? <ArkimLoader size={36} /> : <ProcIcon name={loud ? "alert" : "box"} size={20} color={loud ? "var(--st-overdue)" : "var(--muted)"} />}
       <div>
         <div className="w-t">{label}</div>
         {sub && <div className="w-s">{sub}</div>}
