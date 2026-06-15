@@ -117,6 +117,7 @@ export interface Candidate {
   vendorType: VendorType;
   tier: 1 | 2 | 3;
   price?: number;
+  evidenceState?: "priced" | "uncontacted";   // increment 1; "quoted" is a later increment
   leadTime: string;
   url: string;
   suitability: number;
@@ -125,6 +126,7 @@ export interface Candidate {
   comparisonArtifact?: ComparisonArtifact;
   loc: string;
   // Display-layer extras
+  foundPartNumber?: string;                    // listing's actual PN (priced rows)
   isExactMatch?: boolean;
   isAftermarket?: boolean;
   isOemDirect?: boolean;
@@ -132,7 +134,6 @@ export interface Candidate {
   stock?: string;
   shipFrom?: string;
   priceVerified?: boolean;
-  priceSource?: string;
   contact?: string;
   relationship?: string;
   // Tier 1 two-mode display: true = show "Request Confirmation"; false = show "Buy Now".

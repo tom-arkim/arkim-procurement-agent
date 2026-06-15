@@ -330,16 +330,44 @@ def _pn_match_level(opt: dict, tier: int) -> str:
     }.get(opt.get("pn_match_status") or "", "none")
 
 
+def _camel_artifact(art: Optional[dict]) -> Optional[dict]:
+    """Map the snake_case spec-comparison artifact to the camelCase shape the frontend
+    Candidate.comparisonArtifact expects. Until now the raw artifact was passed through
+    verbatim, so the frontend's comparison[] / engineerNotes reads silently saw nothing
+    (snake/camel mismatch)."""
+    if not art:
+        return None
+    return {
+        "fidelity":             art.get("fidelity"),
+        "compatibilitySummary": art.get("compatibility_summary"),
+        "comparison": [
+            {"field": f.get("field"), "fieldLabel": f.get("field_label"),
+             "assetValue": f.get("asset_value"), "candidateValue": f.get("candidate_value"),
+             "match": f.get("match"), "notes": f.get("notes")}
+            for f in (art.get("comparison") or [])
+        ],
+        "verificationRequiredFields": art.get("verification_required_fields") or [],
+        "engineerNotes":        art.get("engineer_notes"),
+    }
+
+
 def _transform_option(opt: dict, tier: int, idx: int) -> dict:
     price_hidden = opt.get("price_tbd", False) or opt.get("requires_rfq", False)
+    price = None if price_hidden else opt.get("base_price")
     return {
         "id":                    f"{opt.get('vendor_name','')}-t{tier}-{idx}",
         "vendorName":            opt.get("vendor_name") or "Unknown",
         "vendorType":            _vendor_type(opt.get("merchant_type") or ""),
         "tier":                  tier,
-        "price":                 None if price_hidden else opt.get("base_price"),
+        "price":                 price,
+        # Evidence state (increment 1): "priced" = a real listing price exists; "uncontacted"
+        # = no price/quote, so the UI must NOT assert a part match. ("quoted" — the
+        # review_items join — is a later increment and is NOT faked here.)
+        "evidenceState":         "priced" if price is not None else "uncontacted",
         "leadTime":              _lead_time_label(int(opt.get("lead_time_days") or 0)),
         "url":                   opt.get("source_url") or "",
+        # The listing's actual PN — surfaced so a priced exact/equivalent claim is verifiable.
+        "foundPartNumber":       opt.get("found_part_number"),
         "suitability":           float(opt.get("suitability_score") or 0),
         "confidence":            float(opt.get("confidence_score") or 0),
         "pnMatchLevel":          _pn_match_level(opt, tier),
@@ -349,10 +377,13 @@ def _transform_option(opt: dict, tier: int, idx: int) -> dict:
         "isOemDirect":           bool(opt.get("is_oem_direct")),
         "isAuthorizedDistributor": opt.get("vendor_authorization_status") == "Authorized",
         "priceVerified":         not opt.get("limited_price_data", False),
+        # Real stock signal only when the listing actually reported in-stock; else omitted
+        # (no fabricated stock). Wires the previously-dead frontend `stock` read.
+        "stock":                 "In stock" if opt.get("in_stock") is True else None,
         "shipFrom":              opt.get("ship_from_country"),
         "contact":               opt.get("contact_email"),
         "relationship":          opt.get("suitability_tier") or None,
-        "comparisonArtifact":    opt.get("comparison_artifact"),
+        "comparisonArtifact":    _camel_artifact(opt.get("comparison_artifact")),
         # Tier 1 two-mode display: all Tier 1 candidates start in confirmation-needed mode.
         # After POST /request-confirmation fires and mock response arrives (3-8 s),
         # confirmation_needed is set False in the raw data and this flips to False,

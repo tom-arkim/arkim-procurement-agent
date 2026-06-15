@@ -19,7 +19,7 @@ import { ProcHead, ChevLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
 import { QuotesSection } from "./quotes-section";
 import { OrderSection } from "./order-section";
-import type { AssetSpecs, Candidate, Phase } from "@/types";
+import type { AssetSpecs, Candidate, ComparisonArtifact, Phase } from "@/types";
 
 const SOURCED_PHASES: Phase[] = [
   "comparison", "pending_first_approval", "pending_second_approval", "approved",
@@ -31,18 +31,37 @@ function isExact(c: Candidate): boolean {
   return Boolean(c.isExactMatch) || c.pnMatchLevel === "exact" || c.pnMatchLevel === "normalized";
 }
 
-function whyBullets(c: Candidate): string[] {
+/** Evidence state drives the claim. Prefer the backend's explicit evidenceState;
+ *  fall back to price presence for older payloads. ("quoted" is a later increment.) */
+function isUncontacted(c: Candidate): boolean {
+  return (c.evidenceState ?? (c.price != null ? "priced" : "uncontacted")) === "uncontacted";
+}
+
+function whyBullets(c: Candidate, manufacturer?: string): string[] {
   const out: string[] = [];
+  if (isUncontacted(c)) {
+    // No part-match / price / quote evidence for an uncontacted supplier — selection
+    // rationale ONLY. Never assert an exact-PN or cross-reference match here.
+    if (c.isAuthorizedDistributor) out.push(`Authorized distributor${manufacturer ? ` for ${manufacturer}` : ""}.`);
+    else if (c.isOemDirect) out.push("Sells direct from the manufacturer.");
+    else out.push("Specialist supplier selected for this part category.");
+    const region = c.shipFrom || c.loc;
+    if (region) out.push(`Based in ${region}.`);
+    out.push("Pricing and exact-part confirmation come from the supplier when they quote.");
+    return out;
+  }
+  // Priced — a real listing backs the claim.
   out.push(isExact(c)
     ? "Matches the exact part number on your equipment record."
     : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
-  if (c.price != null && c.priceSource) out.push(`Price read from ${c.priceSource}.`);
-  if (c.stock) out.push(`${c.stock}${c.leadTime ? ` · ${c.leadTime}` : ""}.`);
+  if (c.foundPartNumber) out.push(`Listed for part ${c.foundPartNumber}.`);
+  if (c.priceVerified === false) out.push("Limited price data — treat the listed price as indicative.");
   if (c.comparisonArtifact?.engineerNotes) out.push(c.comparisonArtifact.engineerNotes);
   return out;
 }
 
 function recReason(c: Candidate): string {
+  if (isUncontacted(c)) return "Best-matched supplier — request a quote.";
   const bits: string[] = [];
   if (c.stock?.toLowerCase().includes("stock")) bits.push("in stock");
   if (c.leadTime) bits.push(c.leadTime.toLowerCase());
@@ -119,7 +138,9 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {c.price != null
                         ? <div className="o-num">{procMoney(c.price)}</div>
                         : <div className="o-num"><span className="q">Get a quote</span></div>}
-                      {c.leadTime && <div className="o-ships">{c.leadTime}</div>}
+                      {/* Lead time shown only when a listing backs it; on uncontacted rows
+                          it's a hardcoded default, so it's omitted (not shown as fact). */}
+                      {!isUncontacted(c) && c.leadTime && <div className="o-ships">{c.leadTime}</div>}
                     </div>
                     <div className="o-act">
                       <button
@@ -136,9 +157,16 @@ export function OptionsScreen({ runId }: { runId: string }) {
                   </div>
                   {whyOpen[c.id] && (
                     <div className="o-whybody">
-                      {whyBullets(c).map((w, i) => (
+                      {whyBullets(c, specs?.manufacturer).map((w, i) => (
                         <div key={i} className="wb-row"><span className="d" /><span>{w}</span></div>
                       ))}
+                      {!isUncontacted(c) && c.url && (
+                        <div className="wb-row"><span className="d" /><span>
+                          <a href={c.url} target="_blank" rel="noopener noreferrer"
+                             style={{ color: "var(--accent)", textDecoration: "underline" }}>View listing ↗</a>
+                        </span></div>
+                      )}
+                      {!isUncontacted(c) && c.comparisonArtifact && <SpecMatch artifact={c.comparisonArtifact} />}
                     </div>
                   )}
                 </div>
@@ -186,6 +214,25 @@ function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin
         <div className="w-t">{label}</div>
         {sub && <div className="w-s">{sub}</div>}
       </div>
+    </div>
+  );
+}
+
+function SpecMatch({ artifact }: { artifact: ComparisonArtifact }) {
+  // Only render fields we actually extracted a candidate value for — render nothing
+  // (not a fabricated row) when the comparison has no real candidate data.
+  const rows = (artifact.comparison ?? []).filter((f) => f.candidateValue);
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ marginTop: 6, paddingTop: 6, borderTop: "1px solid var(--border)" }}>
+      <div style={{ fontSize: 11, color: "var(--muted-2)", marginBottom: 4 }}>
+        Spec match · {artifact.fidelity} confidence — verify against your unit before ordering
+      </div>
+      {rows.map((f) => (
+        <div key={f.field} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12, color: "var(--muted)" }}>
+          <span>{f.fieldLabel}</span><span>{f.assetValue ?? "—"} → {f.candidateValue}</span>
+        </div>
+      ))}
     </div>
   );
 }

@@ -469,15 +469,22 @@ class TestConfirmIntake:
             "suitability_score": 80, "confidence_score": 70,
         }]
         _mock_sourcing_pipeline(monkeypatch, sourcing_result=sourcing,
-                                artifact={"fit": "confirmed"})
+                                artifact={"fidelity": "high", "compatibility_summary": "confirmed",
+                                          "comparison": [{"field": "seal", "field_label": "Seal type",
+                                                          "asset_value": "Type 21", "candidate_value": "Type 21",
+                                                          "match": "exact"}],
+                                          "verification_required_fields": [], "engineer_notes": "ok"})
 
         api.post(f"/api/runs/{rid}/confirm-intake")
         detail = api.get(f"/api/runs/{rid}").json()
         assert detail["phase"] == "comparison"
         tier1 = detail["sourcing_results"]["tier1"]
         assert len(tier1) == 1
-        # SpecComparisonAgent artifact flows through to camelCase comparisonArtifact.
-        assert tier1[0]["comparisonArtifact"] == {"fit": "confirmed"}
+        # SpecComparisonAgent artifact is camelCased for the frontend (was raw before).
+        art = tier1[0]["comparisonArtifact"]
+        assert art["fidelity"] == "high" and art["engineerNotes"] == "ok"
+        assert art["comparison"][0]["fieldLabel"] == "Seal type"
+        assert art["comparison"][0]["candidateValue"] == "Type 21"
 
     def test_exact_only_filters_aftermarket_from_tier2(self, api, monkeypatch):
         # The no-spec-sheet honesty branch: confirm-intake?exact_only=true -> background
@@ -683,6 +690,51 @@ class TestRejectSubmission:
     def test_not_found_404(self, api):
         resp = api.post("/api/runs/missing/reject-submission")
         assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Candidate transform — evidence state + verifiable-data fields (increment 1).
+# The frontend's "why"/claims branch on these; the strength of a claim must
+# match the strength of the evidence on the candidate.
+# ---------------------------------------------------------------------------
+
+class TestTransformOptionEvidenceState:
+    def test_uncontacted_when_price_hidden(self):
+        # The live All Seals case: a Tavily-discovered Tier 3 row with pn_match present
+        # but NO price/quote. evidenceState must be "uncontacted" so the UI makes no
+        # part-match claim — a discovery PN match is not contact/quote evidence.
+        from api_server import _transform_option
+        out = _transform_option({"vendor_name": "All Seals Inc.", "price_tbd": True,
+                                 "requires_rfq": True, "pn_match_status": "exact_match",
+                                 "match_type": "Exact OEM", "found_part_number": "84004-28"}, 3, 0)
+        assert out["price"] is None
+        assert out["evidenceState"] == "uncontacted"
+
+    def test_priced_passes_found_pn_and_url(self):
+        from api_server import _transform_option
+        out = _transform_option({"vendor_name": "sealit123", "base_price": 53.25,
+                                 "source_url": "https://sealit123.com/x",
+                                 "found_part_number": "84004-28-C238CBC"}, 2, 0)
+        assert out["price"] == 53.25 and out["evidenceState"] == "priced"
+        assert out["foundPartNumber"] == "84004-28-C238CBC"   # surfaced so the claim is verifiable
+        assert out["url"] == "https://sealit123.com/x"        # source link present
+
+    def test_artifact_camelcased_and_stock_wired(self):
+        from api_server import _transform_option
+        out = _transform_option({"vendor_name": "v", "base_price": 10.0, "in_stock": True,
+            "comparison_artifact": {"fidelity": "low", "compatibility_summary": "verification_required",
+                "comparison": [{"field": "seal", "field_label": "Seal type", "asset_value": "Type 21",
+                                "candidate_value": None, "match": "unknown"}],
+                "verification_required_fields": ["seal"], "engineer_notes": "spec sheet required"}}, 2, 0)
+        assert out["stock"] == "In stock"
+        art = out["comparisonArtifact"]
+        assert art["engineerNotes"] == "spec sheet required"   # was a dead snake_case read before
+        assert art["comparison"][0]["fieldLabel"] == "Seal type"
+        assert art["comparison"][0]["assetValue"] == "Type 21"
+
+    def test_stock_none_when_not_reported(self):
+        from api_server import _transform_option
+        assert _transform_option({"vendor_name": "v", "base_price": 1.0}, 2, 0)["stock"] is None
 
     def test_wrong_phase_409_dict_detail(self, api):
         rid = _create_run(api)  # intake, not pending_intake
