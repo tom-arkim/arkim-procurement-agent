@@ -11,7 +11,7 @@
  * this screen is the read-and-decide surface.
  */
 
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRunLive } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
@@ -75,6 +75,19 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const fire = useProcToast();
   const { data: run, isLoading, isError, refetch, isFetching } = useRunLive(runId);
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
+
+  // Reliable auto-advance: while the run is still being prepared (or phase unknown),
+  // poll via the query's own refetch() on a plain interval. This drives the view
+  // imperatively (the same call the "Check for results now" button uses), so it
+  // populates even when React Query's declarative refetchInterval doesn't propagate
+  // in a long-lived dev tab. Stops once the run is sourced (comparison+).
+  const runPhase = run?.phase as string | undefined;
+  useEffect(() => {
+    const preparing = !runPhase || ["intake", "inventory", "sourcing"].includes(runPhase);
+    if (!preparing) return;
+    const t = setInterval(() => { void refetch(); }, 4000);
+    return () => clearInterval(t);
+  }, [runPhase, refetch]);
 
   if (isLoading) return <Shell><Working label="Loading…" sub="Fetching your request." /></Shell>;
   if (isError || !run) return <Shell><Working label="Couldn't load this request" sub="Is the backend running?" loud /></Shell>;
