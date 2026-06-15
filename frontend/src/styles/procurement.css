@@ -495,12 +495,14 @@
 /* ---- Arkim brand loader (logo with cascading blue light) ---- */
 .proc-arkloader { display: inline-flex; flex: none; }
 .proc-arkloader svg { display: block; overflow: visible; }
-.proc-arkloader .ak { fill: var(--accent); animation: proc-ark 1.5s ease-in-out infinite; }
+/* White mark, blue light cascading down it: each band sits white and lights up
+   blue in turn (top -> bottom) as the cascade passes. */
+.proc-arkloader .ak { fill: var(--text-strong); animation: proc-ark 1.5s ease-in-out infinite; }
 .proc-arkloader .ak:nth-child(1) { animation-delay: 0s; }
 .proc-arkloader .ak:nth-child(2) { animation-delay: 0.18s; }
 .proc-arkloader .ak:nth-child(3) { animation-delay: 0.36s; }
 .proc-arkloader .ak:nth-child(4) { animation-delay: 0.54s; }
-@keyframes proc-ark { 0%, 100% { opacity: 0.18; } 45% { opacity: 1; } }
+@keyframes proc-ark { 0%, 100% { fill: var(--text-strong); } 42% { fill: var(--accent); } }
 @media (prefers-reduced-motion: reduce) {
-  .proc-arkloader .ak { animation: none; opacity: 0.85; }
+  .proc-arkloader .ak { animation: none; fill: var(--text-strong); }
 }
