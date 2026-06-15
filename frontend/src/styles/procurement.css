@@ -247,10 +247,19 @@
 .o-tag[data-kind="equiv"] { color: var(--st-progress); border-color: transparent; background: var(--st-progress-fill); }
 .o-tag[data-kind="stock"] { color: var(--text); background: var(--surface-2); }
 .saving-badge { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 999px; color: var(--st-done); background: var(--st-done-fill); }
-.proc-opt .o-price { text-align: right; min-width: 110px; }
+/* Cap the price column so a wrapping label (e.g. "price unverified") can't widen it
+   and push the action block (Order/Why?) below — the row keeps its side-by-side shape. */
+.proc-opt .o-price { text-align: right; min-width: 110px; max-width: 172px; }
 .proc-opt .o-num { font-size: 22px; font-weight: 300; letter-spacing: -0.5px; color: var(--text-strong); font-variant-numeric: tabular-nums; }
 .proc-opt .o-num .q { font-size: 13.5px; font-weight: 600; color: var(--muted); letter-spacing: 0; }
 .proc-opt .o-ships { font-size: 12px; color: var(--muted); margin-top: 3px; }
+/* Unverified-price affordance: short label + info icon; tooltip on hover/focus/tap. */
+.proc-opt .o-unv { position: relative; display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px; margin-top: 4px; color: var(--st-overdue); font-size: 12px; }
+.proc-opt .o-unv-l { white-space: nowrap; }
+.proc-opt .o-unv-i { display: inline-flex; align-items: center; justify-content: center; padding: 1px; border: none; background: none; color: var(--st-overdue); cursor: pointer; line-height: 0; border-radius: 50%; }
+.proc-opt .o-unv-i:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.proc-opt .o-unv-tip { position: absolute; top: calc(100% + 7px); right: 0; z-index: 40; width: 232px; max-width: 76vw; padding: 10px 12px; border-radius: var(--r); background: var(--surface-hi); border: 1px solid var(--border); color: var(--text); font-size: 12px; font-weight: 500; line-height: 1.5; text-align: left; box-shadow: 0 14px 32px -10px rgba(0,0,0,0.55); visibility: hidden; opacity: 0; transition: opacity 0.12s ease; pointer-events: none; }
+.proc-opt .o-unv-tip[data-open="true"], .proc-opt .o-unv:hover .o-unv-tip, .proc-opt .o-unv:focus-within .o-unv-tip { visibility: visible; opacity: 1; pointer-events: auto; }
 .proc-opt .o-act { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; }
 .proc-opt .o-why { background: none; border: none; font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--muted-2); cursor: pointer; display: inline-flex; align-items: center; gap: 4px; padding: 2px; }
 .proc-opt .o-why:hover { color: var(--accent-text); }

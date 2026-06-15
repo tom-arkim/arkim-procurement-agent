@@ -11,7 +11,7 @@
  * this screen is the read-and-decide surface.
  */
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRunLive } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
@@ -139,8 +139,8 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {c.price != null
                         ? (c.priceUnverified
                             ? <>
-                                <div className="o-num" style={{ opacity: 0.8 }}>≈{procMoney(c.price)}</div>
-                                <div className="o-ships" style={{ color: "var(--st-overdue)" }}>price unverified — confirm with vendor</div>
+                                <div className="o-num" style={{ opacity: 0.85 }}>≈{procMoney(c.price)}</div>
+                                <UnverifiedNote />
                               </>
                             : <div className="o-num">{procMoney(c.price)}</div>)
                         : <div className="o-num"><span className="q">Get a quote</span></div>}
@@ -219,6 +219,38 @@ function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin
       <div>
         <div className="w-t">{label}</div>
         {sub && <div className="w-s">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+/** Low-confidence price affordance: short "price unverified" label + an info icon
+ *  whose tooltip explains it. Shows on hover, keyboard focus, and tap (toggles). */
+function UnverifiedNote() {
+  const [open, setOpen] = useState(false);
+  const tipId = useId();
+  return (
+    <div className="o-unv">
+      <span className="o-unv-l">price unverified</span>
+      <button
+        type="button"
+        className="o-unv-i"
+        aria-label="Why is this price unverified?"
+        aria-describedby={tipId}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
+      >
+        <svg viewBox="0 0 24 24" width={13} height={13} fill="none" stroke="currentColor"
+             strokeWidth={1.8} strokeLinecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" /><path d="M12 11v5" /><path d="M12 8h.01" />
+        </svg>
+      </button>
+      <div id={tipId} role="tooltip" className="o-unv-tip" data-open={open}>
+        We read this price from the listing but couldn&apos;t verify it with confidence.
+        You&apos;ll be charged the supplier&apos;s actual price when the order is confirmed —
+        not this estimate.
       </div>
     </div>
   );
