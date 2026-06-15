@@ -51,7 +51,9 @@ function whyBullets(c: Candidate, manufacturer?: string): string[] {
     return out;
   }
   // Priced — a real listing backs the claim.
-  if (c.purchaseChannel === "marketplace") out.push(`Available to buy directly at ${c.vendorName} at this price — no quote needed.`);
+  // State M: framed as speed/certainty + Arkim fulfils — NOT "go buy at {marketplace}".
+  // The marketplace is Arkim's supply source (operational), not the customer's destination.
+  if (c.purchaseChannel === "marketplace") out.push("Available immediately at this price — Arkim can order it for you now, no quote needed.");
   out.push(isExact(c)
     ? "Matches the exact part number on your equipment record."
     : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
@@ -139,8 +141,11 @@ export function OptionsScreen({ runId }: { runId: string }) {
                   )}
                   <div className="o-body">
                     <div className="o-tt">
-                      <div className="o-name">{c.vendorName}</div>
-                      {c.loc && <div className="o-part">{c.loc}</div>}
+                      {/* State M: don't headline the marketplace name — it's Arkim's supply
+                          source, not a customer destination. Frame as an Arkim-fulfilled
+                          in-stock option; price + match tag differentiate the rows. */}
+                      <div className="o-name">{isMkt ? "Available through Arkim" : c.vendorName}</div>
+                      {!isMkt && c.loc && <div className="o-part">{c.loc}</div>}
                       <div className="o-tags">
                         <span className="o-tag" data-kind={exact ? "exact" : "equiv"}>
                           {exact
@@ -162,8 +167,8 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {/* Lead time shown only when a listing backs it; on uncontacted rows
                           it's a hardcoded default, so it's omitted (not shown as fact). */}
                       {!isUncontacted(c) && c.leadTime && <div className="o-ships">{c.leadTime}</div>}
-                      {/* State M: a buyable price at a registered marketplace — buy directly. */}
-                      {isMkt && <div className="o-mkt">Available now · buy direct</div>}
+                      {/* State M: in stock now, Arkim orders it — speed/certainty, not channel. */}
+                      {isMkt && <div className="o-mkt">Available now · no quote needed</div>}
                     </div>
                     <div className="o-act">
                       <button
@@ -171,13 +176,13 @@ export function OptionsScreen({ runId }: { runId: string }) {
                         data-kind="primary"
                         onClick={() => fire(
                           isMkt
-                            ? "Buy now — coming in the next build"
+                            ? "Order through Arkim — coming in the next build"
                             : c.price != null
                               ? "Ordering — coming in the next build"
                               : "Quote request — coming in the next build",
                         )}
                       >
-                        {isMkt ? "Buy now" : c.price != null ? "Order" : "Get quote"}
+                        {isMkt ? "Order through Arkim" : c.price != null ? "Order" : "Get quote"}
                       </button>
                       <button className="o-why" onClick={() => setWhyOpen((s) => ({ ...s, [c.id]: !s[c.id] }))}>
                         Why?<ProcIcon name={whyOpen[c.id] ? "chevD" : "chevR"} size={12} />
@@ -189,7 +194,10 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {whyBullets(c, specs?.manufacturer).map((w, i) => (
                         <div key={i} className="wb-row"><span className="d" /><span>{w}</span></div>
                       ))}
-                      {!isUncontacted(c) && c.url && (
+                      {/* Reference rows link out to verify the price; marketplace (State M)
+                          rows do NOT — sending the customer to the marketplace is the
+                          disintermediation we're avoiding (Arkim is buyer-of-record). */}
+                      {!isUncontacted(c) && !isMkt && c.url && (
                         <div className="wb-row"><span className="d" /><span>
                           <a href={c.url} target="_blank" rel="noopener noreferrer"
                              style={{ color: "var(--accent)", textDecoration: "underline" }}>View listing ↗</a>

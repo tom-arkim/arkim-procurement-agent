@@ -66,10 +66,10 @@ export function ProcShell({ children }: { children: ReactNode }) {
         <div className="proc-dash">
           {/* left nav */}
           <nav className="proc-dnav">
-            <div className="proc-brand">
+            <button type="button" className="proc-brand" onClick={() => router.push("/")} aria-label="Arkim — go to home">
               <span className="bm"><ArkimMark size={20} /></span>
               <span className="bn">arkim</span>
-            </div>
+            </button>
 
             <div className="proc-navsite">
               <span className="sd" />
