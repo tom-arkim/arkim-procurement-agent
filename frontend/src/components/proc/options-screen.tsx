@@ -73,7 +73,7 @@ function recReason(c: Candidate): string {
 export function OptionsScreen({ runId }: { runId: string }) {
   const router = useRouter();
   const fire = useProcToast();
-  const { data: run, isLoading, isError } = useRunLive(runId);
+  const { data: run, isLoading, isError, refetch, isFetching } = useRunLive(runId);
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
 
   if (isLoading) return <Shell><Working label="Loading…" sub="Fetching your request." /></Shell>;
@@ -86,7 +86,16 @@ export function OptionsScreen({ runId }: { runId: string }) {
   if (WORKING_PHASES.includes(phase)) {
     return (
       <Shell sub={partLabel} onHome={() => router.push("/")}>
-        <Working label="Finding your best options…" sub="Checking the Arkim network, marketplaces, and specialist suppliers." spin />
+        <Working label="Finding your best options…" sub="Checking the Arkim network, marketplaces, and specialist suppliers — this can take a minute or two." spin />
+        <button
+          className="proc-btn"
+          data-kind="quiet"
+          style={{ marginTop: 14 }}
+          onClick={() => refetch()}
+          disabled={isFetching}
+        >
+          {isFetching ? "Checking…" : "Check for results now"}
+        </button>
       </Shell>
     );
   }

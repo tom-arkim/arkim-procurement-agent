@@ -95,12 +95,15 @@ export function useRunLive(runId: string) {
     refetchInterval: (query) => {
       const phase = query.state.data?.phase;
       const activePhases = ["sourcing", "executing", "fulfilling", "inventory", "comparison"];
-      return phase && activePhases.includes(phase) ? 5_000 : false;
+      // Poll while the phase is still in progress OR not yet known (undefined) — so a
+      // transient/first-render gap never stops the interval before the run advances.
+      return !phase || activePhases.includes(phase) ? 5_000 : false;
     },
     // Sourcing takes 1–2 min of real provider calls; users often tab away while
-    // waiting. Keep polling in the background so the run advances to its options
-    // view without a manual refresh when they return.
+    // waiting. Keep polling in the background, and refetch on window focus, so the
+    // run advances to its options view without a manual refresh.
     refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
 }
 
