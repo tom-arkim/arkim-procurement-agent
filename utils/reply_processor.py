@@ -14,7 +14,9 @@ A human then applies or discards:
   reject(item_id)          -> discard (status="rejected")
 
 Conservative (wrong-attribution / no-auto-update caution):
-  - unmatched reply        -> queued NOTHING; flagged for human (never guess the RFQ).
+  - unmatched reply        -> queued as kind="unmatched_reply", needs_human_review, with
+                              NO run/candidate attribution (never guess the RFQ). It is
+                              recorded, not dropped — a supplier reply must not vanish.
   - junk / no quote        -> no quote queued (extractor returns None, no hallucination).
   - low-confidence extract -> queued as "needs_human_review" (not "pending"), never
                               applied without a human.
@@ -69,20 +71,45 @@ def process_replies(
     rows = supplier_registry.get_sent_messages()
 
     summary: dict = {"processed": 0, "queued_quotes": 0, "queued_contacts": 0,
-                     "needs_review": 0, "unmatched": []}
+                     "needs_review": 0, "queued_unmatched": 0, "unmatched": []}
 
     for notice in notices:
         summary["processed"] += 1
         row = match_reply(notice, rows)
         if not row:
+            # GAP FIX (State C 3a): a reply we cannot confidently match (sender domain we
+            # never emailed) used to be logged-and-dropped. Queue it for human review
+            # instead — a supplier reply must not silently vanish once sends are live —
+            # but DO NOT auto-attribute it to a run/candidate (it has no verified thread).
             print(f"[ReplyProcessor] UNMATCHED reply from {notice.sender!r} -> human review")
             summary["unmatched"].append(notice.sender)
+            sender = notice.sender or ""
+            sender_domain = (supplier_registry._normalize_domain(sender.rsplit("@", 1)[-1])
+                             if "@" in sender else "")
+            supplier_registry.record_review_item(
+                "unmatched_reply",
+                {"sender": notice.sender, "sender_domain": sender_domain,
+                 "thread_id": notice.thread_id, "message_id": notice.message_id,
+                 "in_reply_to": notice.in_reply_to, "subject": notice.subject,
+                 "body": notice.body},
+                status="needs_human_review",
+                run_id=None, supplier_domain=None, vendor_name=None,  # NOT attributed
+                raw_source="reply",
+                thread_id=notice.thread_id, message_id=notice.message_id,
+            )
+            summary["queued_unmatched"] += 1
+            summary["needs_review"] += 1
             continue
 
         run_id = row.get("run_id")
         domain = row.get("supplier_domain")
         vendor = row.get("vendor_name")
         specs = specs_lookup(run_id) or {}
+        # Deterministic-join keys carried from the matched outbound (State C 3a) — the data
+        # is in hand at the match; previously it was dropped at the forward below.
+        thread_id = row.get("thread_id")
+        sent_message_id = row.get("id")
+        message_id = row.get("message_id")
 
         quote = extract_quote(notice, complete=complete, ocr_text=ocr_text)
         if quote is not None:
@@ -92,6 +119,7 @@ def process_replies(
                 supplier_domain=domain, vendor_name=vendor,
                 manufacturer=specs.get("manufacturer"), part_number=specs.get("part_number"),
                 confidence=quote.confidence, raw_source=quote.raw_source,
+                thread_id=thread_id, sent_message_id=sent_message_id, message_id=message_id,
             )
             summary["queued_quotes"] += 1
             if status == "needs_human_review":
@@ -104,6 +132,7 @@ def process_replies(
                 "contact", asdict(contact), status=status, run_id=run_id,
                 supplier_domain=domain, vendor_name=vendor,
                 confidence=contact.confidence, raw_source="reply",
+                thread_id=thread_id, sent_message_id=sent_message_id, message_id=message_id,
             )
             summary["queued_contacts"] += 1
             if status == "needs_human_review":

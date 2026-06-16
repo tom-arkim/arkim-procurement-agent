@@ -195,6 +195,19 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 
 ---
 
+### 5.4 State C (3a) — deterministic-join keys on `review_items`; 3b consumer pending
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/supplier_registry.py` (`review_items` DDL + `_migrate` + `record_review_item`); `utils/reply_processor.py` (`process_replies`) |
+| **Kind** | Increment landed (3a, the prerequisite); the consumer (3b) is not built yet — recorded so the half-wired state is visible. |
+| **What landed** | `review_items` gained nullable `thread_id` / `sent_message_id` / `message_id`. `process_replies` now carries the matched `sent_messages` row's keys onto the queued quote/contact (previously dropped at the forward), so a returned quote ties to the **exact** outbound, not just the supplier domain. An unmatched reply (domain we never emailed) is now queued as `kind="unmatched_reply"`, `needs_human_review`, **un-attributed** (was logged-and-dropped). |
+| **Back-compat (create_all-only, §3.2)** | No Alembic. Fresh DBs get the columns from the DDL; existing DBs get them via the idempotent `ALTER TABLE ADD COLUMN` in `_migrate` (mirrors the suppliers columns). **Pre-3a quote rows have NULL link keys** and must fall back to the `(run_id + normalized supplier_domain)` domain join — the 3b assembly step has to handle both (thread key primary, domain fallback). |
+| **Risk / impact** | None today — the keys are carried and stored but **nothing consumes them yet**. The quote→candidate overlay (`evidenceState="quoted"`, supplier-confirmed claim, `quoteUnverified` on the 0–1 confidence scale) is 3b. |
+| **Recommended action** | Build 3b in the run GET path: fetch `get_review_items(run_id, kind="quote")` filtered to `status="confirmed"`, index by `thread_id` (primary) then normalized domain (fallback), and overlay onto the candidate in a pre-`_transform_option` assembly step. The unmatched-reply queue now needs a human-review surface in the admin UI. |
+
+---
+
 ## 6. Documentation
 
 ### 6.1 `WHATS_NEXT.md` — stale Streamlit-era document, superseded by this file

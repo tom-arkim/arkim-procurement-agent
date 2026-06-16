@@ -131,9 +131,24 @@ CREATE TABLE IF NOT EXISTS review_items (
     confidence      REAL,
     raw_source      TEXT,
     created_at      TEXT NOT NULL,
-    resolved_at     TEXT
+    resolved_at     TEXT,
+    thread_id       TEXT,
+    sent_message_id TEXT,
+    message_id      TEXT
 );
 """
+
+# Deterministic-join keys (State C, increment 3a) carried from the matched sent_messages
+# row onto an inbound quote so a returned quote ties back to the EXACT outbound we sent
+# (thread_id is the reliable live key; sent_message_id is the row id; message_id the
+# original outbound id). All nullable — legacy + out-of-thread rows lack them and fall
+# back to the (run_id + supplier_domain) domain join. Added to existing tables by
+# _migrate (ALTER TABLE ADD COLUMN), like the suppliers columns above.
+_REVIEW_ITEM_LINK_COLUMNS: dict[str, str] = {
+    "thread_id":       "TEXT",
+    "sent_message_id": "TEXT",
+    "message_id":      "TEXT",
+}
 
 # Apollo enrichment columns added by _migrate(). All nullable so the migration is
 # a safe ALTER TABLE ADD COLUMN on existing rows (no default backfill needed).
@@ -235,6 +250,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if col not in existing:
             conn.execute(f"ALTER TABLE suppliers ADD COLUMN {col} {coltype}")
             added.append(col)
+
+    # review_items deterministic-join keys (State C 3a) — same idempotent ADD COLUMN.
+    ri_existing = {row[1] for row in conn.execute("PRAGMA table_info(review_items)").fetchall()}
+    for col, coltype in _REVIEW_ITEM_LINK_COLUMNS.items():
+        if col not in ri_existing:
+            conn.execute(f"ALTER TABLE review_items ADD COLUMN {col} {coltype}")
+            added.append(f"review_items.{col}")
+
     if added:
         conn.commit()
         print(f"[SupplierRegistry] Migration added {len(added)} column(s): {', '.join(added)}")
@@ -781,26 +804,37 @@ def record_review_item(
     part_number: Optional[str] = None,
     confidence: Optional[float] = None,
     raw_source: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    sent_message_id: Optional[str] = None,
+    message_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Queue one inbound-extracted item (kind="quote"|"contact") for human review.
+    """Queue one inbound-extracted item (kind="quote"|"contact"|"unmatched_reply") for
+    human review.
 
     NOTHING is applied to the platform here — this only records the extracted payload
     so a human can confirm/reject later. Returns the new row id, or None on failure
-    (fail-soft)."""
+    (fail-soft).
+
+    thread_id/sent_message_id/message_id are the deterministic-join keys (State C 3a)
+    copied from the matched sent_messages row so a quote ties back to the EXACT outbound
+    (not merely the supplier domain). All optional/nullable — legacy + out-of-thread
+    rows omit them and the caller falls back to the domain join."""
     domain = _normalize_domain(supplier_domain) if supplier_domain else None
     now = datetime.utcnow().isoformat()
     row = (
         str(uuid.uuid4()), kind, status, run_id, domain, vendor_name,
         manufacturer, part_number, json.dumps(payload or {}),
         confidence, raw_source, now, None,
+        thread_id, sent_message_id, message_id,
     )
     try:
         with closing(_get_conn()) as conn:
             conn.execute(
                 """INSERT INTO review_items
                    (id, kind, status, run_id, supplier_domain, vendor_name, manufacturer,
-                    part_number, payload_json, confidence, raw_source, created_at, resolved_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    part_number, payload_json, confidence, raw_source, created_at, resolved_at,
+                    thread_id, sent_message_id, message_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             conn.commit()

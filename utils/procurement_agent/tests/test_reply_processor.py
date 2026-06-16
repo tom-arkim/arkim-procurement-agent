@@ -149,14 +149,93 @@ class TestQueueingNoAutoUpdate:
         items = sr.get_review_items(kind="quote")
         assert items[0]["status"] == "needs_human_review"
 
-    def test_unmatched_reply_queues_nothing(self, isolated_stores):
+    def test_unmatched_reply_queued_for_human_review(self, isolated_stores):
+        # GAP FIX (State-C 3a, item 2): a reply from a domain we never emailed used to be
+        # logged-and-DROPPED. It is now QUEUED as needs_human_review (a supplier reply must
+        # not silently vanish once sends are live) — but NOT auto-attributed to a run.
         sr = isolated_stores
         _seed_rfq(sr)
-        summary = process_replies(_FakeReader([ReplyNotice(sender="x@unrelated.com",
-                                                           body=FREE_TEXT_QUOTE)]),
+        reply = ReplyNotice(sender="x@unrelated.com", thread_id="other-thread",
+                            message_id="ext-1@unrelated.com", body=FREE_TEXT_QUOTE)
+        summary = process_replies(_FakeReader([reply]),
                                   complete=_mk_complete(quote=_QUOTE_JSON), specs_lookup=_specs)
+        # Still logged/counted...
         assert summary["unmatched"] == ["x@unrelated.com"]
-        assert sr.get_review_items() == []
+        assert summary["queued_unmatched"] == 1
+        # ...but no longer dropped: queued for review.
+        items = sr.get_review_items(kind="unmatched_reply")
+        assert len(items) == 1
+        it = items[0]
+        assert it["status"] == "needs_human_review"
+        assert it["run_id"] is None          # NOT auto-attributed to a run/candidate
+        assert it["supplier_domain"] is None  # the sender domain is unverified -> not a claim
+        assert it["payload"]["sender"] == "x@unrelated.com"
+        assert it["payload"]["sender_domain"] == "unrelated.com"
+        assert it["payload"]["thread_id"] == "other-thread"
+        assert it["payload"]["message_id"] == "ext-1@unrelated.com"
+        # No quote/contact was attributed to a candidate, and it is absent from run feeds.
+        assert sr.get_review_items(kind="quote") == []
+        assert sr.get_review_items(run_id="run1") == []
+
+
+# ---------------------------------------------------------------------------
+# State-C prerequisite (3a): carry the deterministic thread-join key onto the quote
+# ---------------------------------------------------------------------------
+
+class TestDeterministicKeyCarry:
+    def _seed_threaded_rfq(self, sr):
+        """A sent RFQ carrying a real thread_id + message_id, plus a generic contact so a
+        same-domain reply also matches. Returns the persisted sent_messages row."""
+        sr.record_sent_message(run_id="run1", supplier_domain="baypower.com",
+                               vendor_name="Bay Power", to=["sales@baypower.com"],
+                               message_id="rfq-abc@arkim.ai", thread_id="thread-1")
+        sr.upsert_contact("baypower.com", {"contact_email": "sales@baypower.com",
+                                           "contact_method": "generic_inbox",
+                                           "contact_status": "resolved"})
+        return sr.get_sent_messages(run_id="run1")[0]
+
+    def test_matched_quote_carries_thread_keys(self, isolated_stores):
+        # The matched sent_messages row's id/thread_id/message_id are CARRIED onto the
+        # quote review_item (previously dropped at the forward in process_replies).
+        sr = isolated_stores
+        sent = self._seed_threaded_rfq(sr)
+        reply = ReplyNotice(sender="someone@baypower.com", thread_id="thread-1",
+                            body=FREE_TEXT_QUOTE)
+        process_replies(_FakeReader([reply]),
+                        complete=_mk_complete(quote=_QUOTE_JSON), specs_lookup=_specs)
+        item = sr.get_review_items(kind="quote")[0]
+        assert item["thread_id"] == "thread-1"
+        assert item["sent_message_id"] == sent["id"]
+        assert item["message_id"] == "rfq-abc@arkim.ai"
+
+    def test_deterministic_key_round_trips_through_store(self, isolated_stores):
+        # Given a sent row with a known thread_id, a reply on that thread -> the queued
+        # quote round-trips that exact thread_id + sent_message_id back out of the store.
+        sr = isolated_stores
+        sent = self._seed_threaded_rfq(sr)
+        reply = ReplyNotice(sender="jeff@baypower.com", thread_id="thread-1",
+                            body=FREE_TEXT_QUOTE)
+        process_replies(_FakeReader([reply]),
+                        complete=_mk_complete(quote=_QUOTE_JSON), specs_lookup=_specs)
+        item = sr.get_review_items(kind="quote")[0]
+        # The key ties the quote to the EXACT outbound (not just the supplier domain).
+        assert item["thread_id"] == sent["thread_id"] == "thread-1"
+        assert item["sent_message_id"] == sent["id"]
+        assert item["supplier_domain"] == "baypower.com"  # domain still present as fallback
+
+    def test_legacy_quote_row_without_link_keys_reads_fine(self, isolated_stores):
+        # Back-compat: a quote recorded WITHOUT the new link fields (legacy / out-of-thread)
+        # still reads cleanly — the new columns are nullable and the domain join is intact.
+        sr = isolated_stores
+        item_id = sr.record_review_item(
+            "quote", {"unit_price": 50.0}, status="pending", run_id="run1",
+            supplier_domain="baypower.com", vendor_name="Bay Power",
+            manufacturer="Baldor", part_number="EM3770T")
+        it = sr.get_review_item(item_id)
+        assert it["thread_id"] is None
+        assert it["sent_message_id"] is None
+        assert it["message_id"] is None
+        assert it["supplier_domain"] == "baypower.com"  # domain-join fallback unaffected
 
 
 # ---------------------------------------------------------------------------
