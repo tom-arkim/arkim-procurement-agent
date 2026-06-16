@@ -102,6 +102,16 @@ def _set_run(client, run_id, **fields):
         session.commit()
 
 
+def _read_selected(client, run_id) -> dict:
+    """Read the raw selected_candidate_json (incl. _approval_path) straight from the
+    temp DB — RunDetail re-serializes it, so read the column to assert what was stored."""
+    SF = client._api_server._SessionFactory
+    ORM = client._api_server.SourcingRunORM
+    with SF() as session:
+        run = session.get(ORM, run_id)
+        return json.loads(run.selected_candidate_json) if run.selected_candidate_json else {}
+
+
 def _create_pending(client, submission_id="sub-1", facility_id="fac-stockton",
                     summary="Pump leaking at seal — needs replacement"):
     """Create a pending_intake run via /from-maintenance; return its run id."""
@@ -333,6 +343,63 @@ class TestApprove:
     def test_validation_missing_role_422(self, api):
         resp = api.post("/api/runs/any/approve", json={"approver_name": "Dana"})
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# H1 — threshold-driven approval routing (auth-independent half).
+# select-candidate persists the _approval_path from determine_approval_path; the
+# approve endpoint routes a >= 2-approver purchase through pending_second_approval
+# instead of jumping straight to approved. Mirrors the Orchestrator's logic.
+# (Distinct-approver enforcement — M1 — is the auth-dependent half, NOT here.)
+# ---------------------------------------------------------------------------
+
+class TestApprovalThresholdRouting:
+    def _select(self, api, price):
+        """Create a comparison-phase run with one priced candidate and select it."""
+        rid = _create_run(api)
+        raw = {"tier_2": {"results": [
+            {"vendor_name": "Acme", "base_price": price, "source_url": "https://acme.com/x"}]}}
+        _set_run(api, rid, sourcing_results_json=json.dumps(raw), current_phase="comparison")
+        resp = api.post(f"/api/runs/{rid}/select-candidate",
+                        json={"candidate_id": "Acme-t2-0", "tier": 2})
+        assert resp.status_code == 200
+        return rid
+
+    def test_select_persists_single_approver_path_below_threshold(self, api):
+        rid = self._select(api, 1000.0)
+        path = _read_selected(api, rid)["_approval_path"]
+        assert path["approvers_required"] == 1
+        assert path["grand_total_usd"] == 1000.0
+
+    def test_select_persists_dual_approver_path_at_threshold(self, api):
+        rid = self._select(api, 6000.0)  # >= $5k default rule -> 2 approvers
+        assert _read_selected(api, rid)["_approval_path"]["approvers_required"] == 2
+
+    def test_single_approver_one_approval_reaches_approved(self, api):
+        rid = self._select(api, 1000.0)
+        resp = api.post(f"/api/runs/{rid}/approve",
+                        json={"approver_name": "A", "approver_role": "Director"})
+        assert resp.json() == {"run_id": rid, "phase": "approved"}
+
+    def test_dual_approver_routes_through_second_then_approved(self, api):
+        rid = self._select(api, 6000.0)
+        r1 = api.post(f"/api/runs/{rid}/approve",
+                      json={"approver_name": "A", "approver_role": "Director"})
+        assert r1.json() == {"run_id": rid, "phase": "pending_second_approval"}
+        r2 = api.post(f"/api/runs/{rid}/approve",
+                      json={"approver_name": "B", "approver_role": "Ops Manager"})
+        assert r2.json() == {"run_id": rid, "phase": "approved"}
+
+    def test_price_tbd_candidate_routes_single_approver(self, api):
+        # A quote-required (price-hidden) selection has no known spend -> $0 -> 1 approver.
+        rid = _create_run(api)
+        raw = {"tier_3": {"results": [
+            {"vendor_name": "RFQ Co", "price_tbd": True, "requires_rfq": True,
+             "source_url": "https://rfqco.com/x"}]}}
+        _set_run(api, rid, sourcing_results_json=json.dumps(raw), current_phase="comparison")
+        api.post(f"/api/runs/{rid}/select-candidate",
+                 json={"candidate_id": "RFQ Co-t3-0", "tier": 3})
+        assert _read_selected(api, rid)["_approval_path"]["approvers_required"] == 1
 
 
 # ---------------------------------------------------------------------------

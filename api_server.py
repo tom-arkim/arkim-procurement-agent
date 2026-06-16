@@ -1301,18 +1301,62 @@ def request_confirmation(run_id: str, body: ConfirmationRequest, background_task
     }
 
 
+def _selected_candidate_total(sourcing_results_json: Optional[str], candidate_id: str, tier: int) -> float:
+    """Resolve the selected candidate's purchase total (USD) from the stored raw sourcing
+    results, by reconstructing its display id (`{vendor}-t{tier}-{idx}`, the same scheme
+    _transform_option uses). Mirrors the Orchestrator: grand_total_usd, else a buyable
+    base_price, else 0.0 (price-hidden / RFQ / not-found -> $0 -> single-approver path)."""
+    try:
+        raw = json.loads(sourcing_results_json) if sourcing_results_json else {}
+    except (ValueError, TypeError):
+        return 0.0
+    results = (raw.get(f"tier_{tier}") or {}).get("results", []) or []
+    for idx, opt in enumerate(results):
+        if f"{opt.get('vendor_name', '')}-t{tier}-{idx}" != candidate_id:
+            continue
+        if opt.get("grand_total_usd") is not None:
+            try:
+                return float(opt["grand_total_usd"])
+            except (TypeError, ValueError):
+                return 0.0
+        if opt.get("price_tbd") or opt.get("requires_rfq"):
+            return 0.0
+        base = opt.get("base_price")
+        try:
+            return float(base) if base is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 @app.post("/api/runs/{run_id}/select-candidate")
 def select_candidate(run_id: str, body: SelectCandidateRequest):
-    """Lock in a candidate and advance the run to pending_first_approval."""
+    """Lock in a candidate and advance the run to pending_first_approval.
+
+    H1: evaluate the facility's approval rules against the selected candidate's total and
+    persist the `_approval_path` (approvers_required + roles) on the selection, so the
+    approve endpoint can route the $5k/$25k dual-approver requirement (mirrors the
+    Orchestrator's select_candidate). Auth-independent — threshold routing only."""
+    from utils.procurement_agent.state.approval_rules import determine_approval_path
+
     with _SessionFactory() as session:
         run = session.get(SourcingRunORM, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
 
+        total_usd = _selected_candidate_total(run.sourcing_results_json, body.candidate_id, body.tier)
+        facility_id = run.facility_id or "00000000-0000-0000-0000-000000000000"
+        approvers_required, approver_roles = determine_approval_path(facility_id, total_usd)
+
         run.selected_candidate_json = json.dumps({
             "candidate_id": body.candidate_id,
             "tier": body.tier,
             "selected_at": datetime.now(timezone.utc).isoformat(),
+            "_approval_path": {
+                "approvers_required": approvers_required,
+                "approver_roles":     approver_roles,
+                "grand_total_usd":    total_usd,
+            },
         })
         run.current_phase = Phase.PENDING_FIRST_APPROVAL.value
         run.updated_at = datetime.now(timezone.utc)
@@ -1324,10 +1368,13 @@ def select_candidate(run_id: str, body: SelectCandidateRequest):
 @app.post("/api/runs/{run_id}/approve")
 def approve_run(run_id: str, body: ApproveRequest):
     """
-    Record an approval action.
+    Record an approval action and route by the persisted approval path (H1).
 
-    Advances: pending_first_approval → approved (single-approver path).
-    Phase 3 will implement the dual-approver routing.
+    A first approval on a run whose `_approval_path` requires >= 2 approvers advances
+    to pending_second_approval; the second approval (or any single-approver path)
+    advances to approved. Threshold routing only — distinct-approver enforcement (M1)
+    is the auth-dependent half and is NOT done here (the approver identity is still the
+    body-supplied display name/role until the auth layer is wired).
     """
     with _SessionFactory() as session:
         run = session.get(SourcingRunORM, run_id)
@@ -1348,11 +1395,26 @@ def approve_run(run_id: str, body: ApproveRequest):
             "acted_at": datetime.now(timezone.utc).isoformat(),
         })
         run.approval_history_json = json.dumps(history)
-        run.current_phase = Phase.APPROVED.value
+
+        # Route on the persisted approval path. A first approval that requires a second
+        # approver holds at pending_second_approval; everything else (the second approval,
+        # or a single-approver path / no path) reaches approved — preserving the prior
+        # single-approval behaviour when no dual-approver requirement was recorded.
+        selected = (
+            json.loads(run.selected_candidate_json)
+            if run.selected_candidate_json else {}
+        )
+        approvers_required = int((selected.get("_approval_path") or {}).get("approvers_required", 1))
+        if run.current_phase == Phase.PENDING_FIRST_APPROVAL.value and approvers_required >= 2:
+            next_phase = Phase.PENDING_SECOND_APPROVAL
+        else:
+            next_phase = Phase.APPROVED
+
+        run.current_phase = next_phase.value
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
-    return {"run_id": run_id, "phase": Phase.APPROVED.value}
+    return {"run_id": run_id, "phase": next_phase.value}
 
 
 @app.post("/api/runs/{run_id}/reject")
