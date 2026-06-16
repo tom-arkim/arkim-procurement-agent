@@ -117,7 +117,9 @@ export interface Candidate {
   vendorType: VendorType;
   tier: 1 | 2 | 3;
   price?: number;
-  evidenceState?: "priced" | "uncontacted";   // increment 1; "quoted" is a later increment
+  // increment 1 ("priced"/"uncontacted"); "quoted" = State C (increment 3): a
+  // human-confirmed RFQ quote — the strongest claim in the ladder.
+  evidenceState?: "priced" | "uncontacted" | "quoted";
   purchaseChannel?: "marketplace" | "reference";  // increment 2 (State M); marketplace = buyable price
   leadTime: string;
   url: string;
@@ -136,6 +138,11 @@ export interface Candidate {
   shipFrom?: string;
   priceVerified?: boolean;
   priceUnverified?: boolean;                   // extracted price below the confidence floor
+  // State C (increment 3, "quoted"): a human-confirmed RFQ quote overlaid on the candidate.
+  quoteConfirmed?: boolean;                    // a confirmed quote drives the display
+  quoteUnverified?: boolean;                   // the quote's extraction confidence was below the 0–1 floor
+  terms?: string;                              // quote payment/shipping terms, when stated
+  quoteCurrency?: string;                      // quote currency (default USD)
   contact?: string;
   relationship?: string;
   // Tier 1 two-mode display: true = show "Request Confirmation"; false = show "Buy Now".

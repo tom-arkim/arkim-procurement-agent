@@ -32,13 +32,34 @@ function isExact(c: Candidate): boolean {
 }
 
 /** Evidence state drives the claim. Prefer the backend's explicit evidenceState;
- *  fall back to price presence for older payloads. ("quoted" is a later increment.) */
+ *  fall back to price presence for older payloads. */
 function isUncontacted(c: Candidate): boolean {
   return (c.evidenceState ?? (c.price != null ? "priced" : "uncontacted")) === "uncontacted";
 }
 
+/** State C — a human-CONFIRMED RFQ quote, the strongest claim in the ladder. Only a
+ *  confirmed quote shows State C (the backend sets both on overlay). */
+function isQuoted(c: Candidate): boolean {
+  return c.evidenceState === "quoted" && Boolean(c.quoteConfirmed);
+}
+
 function whyBullets(c: Candidate, manufacturer?: string): string[] {
   const out: string[] = [];
+  if (isQuoted(c)) {
+    // State C: the supplier's actual commitment — the strongest claim. The signed-off
+    // claim line composes with (never masks) the unverified caveat: even when we read
+    // the figure with low confidence, "supplier-confirmed" holds AND the caveat coexists.
+    const supplier = c.vendorName || "The supplier";
+    out.push(c.quoteUnverified
+      ? `${supplier} sent a quote — we read the price with low confidence, so confirm the figure before ordering.`
+      : `${supplier} confirmed this price, lead time, and terms in a quote.`);
+    if (c.terms) out.push(`Terms: ${c.terms}.`);
+    out.push(isExact(c)
+      ? "Matches the exact part number on your equipment record."
+      : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
+    if (c.comparisonArtifact?.engineerNotes) out.push(c.comparisonArtifact.engineerNotes);
+    return out;
+  }
   if (isUncontacted(c)) {
     // No part-match / price / quote evidence for an uncontacted supplier — selection
     // rationale ONLY. Never assert an exact-PN or cross-reference match here.
@@ -65,6 +86,11 @@ function whyBullets(c: Candidate, manufacturer?: string): string[] {
 }
 
 function recReason(c: Candidate): string {
+  if (isQuoted(c)) {
+    const bits = ["supplier-confirmed"];
+    if (c.leadTime) bits.push(c.leadTime.toLowerCase());
+    return bits.join(", ") + ".";
+  }
   if (isUncontacted(c)) return "Best-matched supplier — request a quote.";
   const bits: string[] = [];
   if (c.stock?.toLowerCase().includes("stock")) bits.push("in stock");
@@ -130,6 +156,16 @@ export function OptionsScreen({ runId }: { runId: string }) {
               const rec = c.id === recId;
               const exact = isExact(c);
               const isMkt = c.purchaseChannel === "marketplace";  // State M: a buyable price now
+              const quoted = isQuoted(c);                          // State C: a confirmed quote
+              // Composition: the CLAIM ladder (C > M) vs the ACTION (channel) are orthogonal.
+              // A marketplace+quote row shows "Supplier-confirmed" (claim) but keeps "Order
+              // through Arkim" (action). The unverified qualifier is the QUOTE's confidence
+              // when quoted, the listing's otherwise — composes, never masked.
+              const unverified = quoted ? Boolean(c.quoteUnverified) : Boolean(c.priceUnverified);
+              // Name the supplier on a quoted row (the claim names them, and there's no
+              // outbound link to bypass Arkim); keep State-M's "Available through Arkim"
+              // only for non-quoted marketplace rows.
+              const namesSupplier = quoted || !isMkt;
               return (
                 <div key={c.id} className="proc-opt" data-rec={rec}>
                   {rec && (
@@ -144,9 +180,15 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {/* State M: don't headline the marketplace name — it's Arkim's supply
                           source, not a customer destination. Frame as an Arkim-fulfilled
                           in-stock option; price + match tag differentiate the rows. */}
-                      <div className="o-name">{isMkt ? "Available through Arkim" : c.vendorName}</div>
-                      {!isMkt && c.loc && <div className="o-part">{c.loc}</div>}
+                      <div className="o-name">{namesSupplier ? c.vendorName : "Available through Arkim"}</div>
+                      {namesSupplier && c.loc && <div className="o-part">{c.loc}</div>}
                       <div className="o-tags">
+                        {/* State C is the strongest claim — lead the tags with it (C > M). */}
+                        {quoted && (
+                          <span className="o-tag" data-kind="quote">
+                            <ProcIcon name="checkCircle" size={12} />Supplier-confirmed
+                          </span>
+                        )}
                         <span className="o-tag" data-kind={exact ? "exact" : "equiv"}>
                           {exact
                             ? <><ProcIcon name="checkCircle" size={12} />Exact replacement</>
@@ -157,18 +199,20 @@ export function OptionsScreen({ runId }: { runId: string }) {
                     </div>
                     <div className="o-price">
                       {c.price != null
-                        ? (c.priceUnverified
+                        ? (unverified
                             ? <>
                                 <div className="o-num" style={{ opacity: 0.85 }}>≈{procMoney(c.price)}</div>
-                                <UnverifiedNote />
+                                <UnverifiedNote reason={quoted ? "quote" : "listing"} />
                               </>
                             : <div className="o-num">{procMoney(c.price)}</div>)
                         : <div className="o-num"><span className="q">Get a quote</span></div>}
-                      {/* Lead time shown only when a listing backs it; on uncontacted rows
-                          it's a hardcoded default, so it's omitted (not shown as fact). */}
+                      {/* Lead time shown only when a listing/quote backs it; on uncontacted
+                          rows it's a hardcoded default, so it's omitted (not shown as fact). */}
                       {!isUncontacted(c) && c.leadTime && <div className="o-ships">{c.leadTime}</div>}
+                      {/* State C: surface the quote's terms alongside price + lead time. */}
+                      {quoted && c.terms && <div className="o-terms">{c.terms}</div>}
                       {/* State M: in stock now, Arkim orders it — speed/certainty, not channel. */}
-                      {isMkt && <div className="o-mkt">Available now · no quote needed</div>}
+                      {isMkt && !quoted && <div className="o-mkt">Available now · no quote needed</div>}
                     </div>
                     <div className="o-act">
                       <button
@@ -196,8 +240,10 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       ))}
                       {/* Reference rows link out to verify the price; marketplace (State M)
                           rows do NOT — sending the customer to the marketplace is the
-                          disintermediation we're avoiding (Arkim is buyer-of-record). */}
-                      {!isUncontacted(c) && !isMkt && c.url && (
+                          disintermediation we're avoiding (Arkim is buyer-of-record).
+                          Quoted (State C) rows also don't — the shown figure is the
+                          supplier's quote, not that listing's price. */}
+                      {!isUncontacted(c) && !isMkt && !quoted && c.url && (
                         <div className="wb-row"><span className="d" /><span>
                           <a href={c.url} target="_blank" rel="noopener noreferrer"
                              style={{ color: "var(--accent)", textDecoration: "underline" }}>View listing ↗</a>
@@ -256,8 +302,10 @@ function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin
 }
 
 /** Low-confidence price affordance: short "price unverified" label + an info icon
- *  whose tooltip explains it. Shows on hover, keyboard focus, and tap (toggles). */
-function UnverifiedNote() {
+ *  whose tooltip explains it. Shows on hover, keyboard focus, and tap (toggles).
+ *  `reason` distinguishes a low-confidence LISTING read from a low-confidence QUOTE
+ *  extraction (State C) — the figure source differs, so the explanation does too. */
+function UnverifiedNote({ reason = "listing" }: { reason?: "listing" | "quote" }) {
   const [open, setOpen] = useState(false);
   const tipId = useId();
   return (
@@ -279,9 +327,13 @@ function UnverifiedNote() {
         </svg>
       </button>
       <div id={tipId} role="tooltip" className="o-unv-tip" data-open={open}>
-        We read this price from the listing but couldn&apos;t verify it with confidence.
-        You&apos;ll be charged the supplier&apos;s actual price when the order is confirmed —
-        not this estimate.
+        {reason === "quote"
+          ? <>The supplier confirmed this quote, but we read the price figure with low
+              confidence. Confirm the figure with the supplier — you&apos;ll be charged
+              their actual price when the order is placed, not this estimate.</>
+          : <>We read this price from the listing but couldn&apos;t verify it with confidence.
+              You&apos;ll be charged the supplier&apos;s actual price when the order is confirmed —
+              not this estimate.</>}
       </div>
     </div>
   );
