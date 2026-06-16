@@ -16,6 +16,10 @@ dependencies = [
     "google-api-python-client>=2.197.0",
     "google-auth>=2.53.0",
     "pypdf>=6.13.1",
+    # Auth: Cognito JWT (RS256) validation + JWKS fetch. Ported from core's
+    # app/middleware/auth_middleware.py (no shared auth library exists).
+    "python-jose[cryptography]>=3.3.0",
+    "httpx>=0.27.0",
 ]
 
 [dependency-groups]
