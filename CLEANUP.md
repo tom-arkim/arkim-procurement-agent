@@ -195,16 +195,17 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 
 ---
 
-### 5.4 State C (3a) — deterministic-join keys on `review_items`; 3b consumer pending
+### 5.4 State C — backend landed (3a key-carry + 3b quote overlay); frontend rendering pending
 
 | Field | Detail |
 |---|---|
-| **File** | `utils/supplier_registry.py` (`review_items` DDL + `_migrate` + `record_review_item`); `utils/reply_processor.py` (`process_replies`) |
-| **Kind** | Increment landed (3a, the prerequisite); the consumer (3b) is not built yet — recorded so the half-wired state is visible. |
-| **What landed** | `review_items` gained nullable `thread_id` / `sent_message_id` / `message_id`. `process_replies` now carries the matched `sent_messages` row's keys onto the queued quote/contact (previously dropped at the forward), so a returned quote ties to the **exact** outbound, not just the supplier domain. An unmatched reply (domain we never emailed) is now queued as `kind="unmatched_reply"`, `needs_human_review`, **un-attributed** (was logged-and-dropped). |
-| **Back-compat (create_all-only, §3.2)** | No Alembic. Fresh DBs get the columns from the DDL; existing DBs get them via the idempotent `ALTER TABLE ADD COLUMN` in `_migrate` (mirrors the suppliers columns). **Pre-3a quote rows have NULL link keys** and must fall back to the `(run_id + normalized supplier_domain)` domain join — the 3b assembly step has to handle both (thread key primary, domain fallback). |
-| **Risk / impact** | None today — the keys are carried and stored but **nothing consumes them yet**. The quote→candidate overlay (`evidenceState="quoted"`, supplier-confirmed claim, `quoteUnverified` on the 0–1 confidence scale) is 3b. |
-| **Recommended action** | Build 3b in the run GET path: fetch `get_review_items(run_id, kind="quote")` filtered to `status="confirmed"`, index by `thread_id` (primary) then normalized domain (fallback), and overlay onto the candidate in a pre-`_transform_option` assembly step. The unmatched-reply queue now needs a human-review surface in the admin UI. |
+| **File** | `utils/supplier_registry.py` (`review_items` DDL + `_migrate` + `record_review_item`); `utils/reply_processor.py` (`process_replies`); `api_server.py` (`_index_quotes` / `_build_quote_index` / `_resolve_quote` / `_quote_overlay` / `_transform_sourcing_results` / `_orm_to_detail`) |
+| **Kind** | Increment landed (3a prerequisite + 3b backend assembly/overlay). The **frontend rendering** of State C is the remaining half — recorded so the half-wired state is visible. |
+| **What landed (3a)** | `review_items` gained nullable `thread_id` / `sent_message_id` / `message_id`. `process_replies` carries the matched `sent_messages` row's keys onto the queued quote/contact (previously dropped), so a returned quote ties to the **exact** outbound, not just the domain. An unmatched reply (domain never emailed) is queued `kind="unmatched_reply"`, `needs_human_review`, **un-attributed** (was logged-and-dropped). |
+| **What landed (3b)** | The run-GET path (`_orm_to_detail`) builds a quote index from **confirmed** quotes for the run and overlays each candidate: thread-precise join (3a key) with a domain fallback for legacy/NULL-thread quotes. A matched candidate gets `evidenceState="quoted"`, `quoteConfirmed`, `supplierConfirmed`, the quote's price/lead/terms (override the listing), and `quoteUnverified` on the **0–1** `Quote.confidence` scale (`_QUOTE_CONFIDENCE_FLOOR=0.4`, NOT the 0–100 `_PRICE_CONFIDENCE_FLOOR`) — so a shaky extraction stays flagged. Fail-soft: a registry error degrades to no overlay, never breaks the read. |
+| **Back-compat (create_all-only, §3.2)** | No Alembic. Fresh DBs get the columns from the DDL; existing DBs get them via the idempotent `ALTER TABLE ADD COLUMN` in `_migrate`. Pre-3a quote rows have NULL link keys → resolved by the domain fallback. |
+| **Risk / impact** | Low today: `evidenceState="quoted"` only arises after a real RFQ→reply→confirm cycle, which needs `EMAIL_SEND_ENABLED` (False) + live Gmail — so no live candidate is "quoted" in the current demo. The candidate dict now carries the State-C fields; the React `options-screen` does **not** yet branch on them (a "quoted" row would render via the priced path, showing the quote price without the supplier-confirmed framing/badge). |
+| **Recommended action** | Build the frontend half: extend the `Candidate` type (`evidenceState` gains `"quoted"`; add `quoteConfirmed`/`quoteUnverified`/`terms`/`quoteCurrency`), and render State C in `options-screen` — the supplier-confirmed claim + quote price/lead/terms, with `quoteUnverified` composing alongside the existing marketplace/`priceUnverified` treatments. Also add a human-review surface for the `unmatched_reply` queue in the admin UI. |
 
 ---
 

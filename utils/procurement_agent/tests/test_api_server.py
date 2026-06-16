@@ -58,6 +58,12 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(persistence, "_engine", engine)
     monkeypatch.setattr(persistence, "_SessionFactory", TestSession)
 
+    # Isolate supplier_registry too — the run-detail path (State C 3b) now reads it for
+    # confirmed quotes, so point its store at the temp dir (seed still runs into tmp).
+    from utils import supplier_registry
+    monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(supplier_registry, "_DB_PATH", str(tmp_path / "supplier_registry.sqlite"))
+
     import api_server
 
     # Redirect the names api_server bound at its own import time too (covers the
@@ -822,6 +828,129 @@ class TestTransformOptionEvidenceState:
         resp = api.post(f"/api/runs/{rid}/reject-submission")
         assert resp.status_code == 409
         assert isinstance(resp.json()["detail"], dict)
+
+
+# ---------------------------------------------------------------------------
+# State C (increment 3b): a human-CONFIRMED quote overlays its candidate with the
+# strongest "supplier-confirmed" claim. The join is the deterministic thread key
+# (3a) with a domain fallback for legacy/out-of-thread quotes; the quote's
+# price/lead/terms override the listing, and the extraction-quality honesty
+# (quoteUnverified, 0–1 scale) COMPOSES — "supplier-confirmed" never masks a shaky
+# extraction. Only confirmed quotes drive it; unmatched replies are never joined.
+# ---------------------------------------------------------------------------
+
+class TestStateCQuoteOverlay:
+    def _quote(self, *, domain, thread_id=None, unit_price=120.0, confidence=0.9,
+               status="confirmed", lead_time="2 weeks", terms="Net 30"):
+        return {"kind": "quote", "status": status, "supplier_domain": domain,
+                "thread_id": thread_id, "sent_message_id": "sm-1", "message_id": "m-1",
+                "confidence": confidence,
+                "payload": {"unit_price": unit_price, "currency": "USD",
+                            "lead_time": lead_time, "terms": terms, "confidence": confidence}}
+
+    def _sent(self, *, domain, thread_id):
+        return {"supplier_domain": domain, "thread_id": thread_id, "id": "sm-1"}
+
+    def _raw(self, *candidates):
+        return {"tier_3": {"results": list(candidates)}}
+
+    def test_thread_join_overlays_correct_candidate_only(self):
+        # Two outbounds (two domains, same run); one confirmed quote on thread B ->
+        # overlays candidate B ONLY; candidate A is untouched.
+        from api_server import _index_quotes, _transform_sourcing_results
+        sent = [self._sent(domain="aco.com", thread_id="tA"),
+                self._sent(domain="bco.com", thread_id="tB")]
+        index = _index_quotes([self._quote(domain="bco.com", thread_id="tB", unit_price=200.0)], sent)
+        raw = self._raw(
+            {"vendor_name": "A Co", "base_price": 50.0, "source_url": "https://aco.com/x"},
+            {"vendor_name": "B Co", "base_price": 75.0, "source_url": "https://bco.com/x"},
+        )
+        a, b = _transform_sourcing_results(raw, index)["tier3"]
+        assert a["vendorName"] == "A Co" and a["evidenceState"] == "priced"
+        assert "quoteConfirmed" not in a                       # not crossed onto A
+        assert b["evidenceState"] == "quoted" and b["quoteConfirmed"] is True
+        assert b["price"] == 200.0                             # quote overrides listing 75.0
+        assert b["leadTime"] == "2 weeks" and b["terms"] == "Net 30"
+
+    def test_domain_fallback_when_thread_absent(self):
+        # A legacy/out-of-thread confirmed quote (NULL thread_id) joins by domain only,
+        # and must not cross to a different domain.
+        from api_server import _index_quotes, _transform_sourcing_results
+        index = _index_quotes([self._quote(domain="bco.com", thread_id=None, unit_price=200.0)], sent=[])
+        raw = self._raw(
+            {"vendor_name": "A Co", "base_price": 50.0, "source_url": "https://aco.com/x"},
+            {"vendor_name": "B Co", "base_price": 75.0, "source_url": "https://bco.com/x"},
+        )
+        a, b = _transform_sourcing_results(raw, index)["tier3"]
+        assert a["evidenceState"] == "priced"                  # not crossed
+        assert b["evidenceState"] == "quoted" and b["price"] == 200.0
+
+    def test_low_confidence_confirmed_quote_composes_unverified(self):
+        from api_server import _index_quotes, _transform_sourcing_results, _QUOTE_CONFIDENCE_FLOOR
+        assert _QUOTE_CONFIDENCE_FLOOR == 0.4   # 0–1 scale (Quote.confidence), NOT the 0–100 floor
+        index = _index_quotes([self._quote(domain="bco.com", thread_id="tB", confidence=0.3)],
+                              [self._sent(domain="bco.com", thread_id="tB")])
+        raw = self._raw({"vendor_name": "B Co", "base_price": 75.0, "source_url": "https://bco.com/x"})
+        b = _transform_sourcing_results(raw, index)["tier3"][0]
+        assert b["evidenceState"] == "quoted"        # still the strongest state...
+        assert b["quoteUnverified"] is True          # ...but a shaky extraction stays flagged
+
+    def test_high_confidence_quote_not_unverified(self):
+        from api_server import _index_quotes, _transform_sourcing_results
+        index = _index_quotes([self._quote(domain="bco.com", thread_id="tB", confidence=0.99)],
+                              [self._sent(domain="bco.com", thread_id="tB")])
+        raw = self._raw({"vendor_name": "B Co", "base_price": 75.0, "source_url": "https://bco.com/x"})
+        b = _transform_sourcing_results(raw, index)["tier3"][0]
+        assert b["quoteUnverified"] is False
+
+    def test_only_confirmed_quotes_drive_state_c(self):
+        # A pending (un-reviewed) quote must NOT flip a candidate to "quoted".
+        from api_server import _index_quotes, _transform_sourcing_results
+        index = _index_quotes([self._quote(domain="bco.com", thread_id="tB", status="pending")],
+                              [self._sent(domain="bco.com", thread_id="tB")])
+        raw = self._raw({"vendor_name": "B Co", "base_price": 75.0, "source_url": "https://bco.com/x"})
+        b = _transform_sourcing_results(raw, index)["tier3"][0]
+        assert b["evidenceState"] == "priced" and "quoteConfirmed" not in b
+
+    def test_quote_with_no_matching_candidate_leaves_set_unchanged(self):
+        from api_server import _index_quotes, _transform_sourcing_results
+        index = _index_quotes([self._quote(domain="zzz.com", thread_id="tZ")],
+                              [self._sent(domain="zzz.com", thread_id="tZ")])
+        raw = self._raw({"vendor_name": "B Co", "base_price": 75.0, "source_url": "https://bco.com/x"})
+        out = _transform_sourcing_results(raw, index)["tier3"]
+        assert len(out) == 1 and out[0]["evidenceState"] == "priced"   # no overlay, no crash
+
+    def test_no_index_is_backcompat_noop(self):
+        from api_server import _transform_sourcing_results
+        raw = self._raw({"vendor_name": "B Co", "base_price": 75.0, "source_url": "https://bco.com/x"})
+        b = _transform_sourcing_results(raw)["tier3"][0]   # quote_index defaults None
+        assert b["evidenceState"] == "priced" and "quoteConfirmed" not in b
+
+    def test_run_detail_overlays_confirmed_quote_end_to_end(self, api):
+        # Full wiring: a confirmed quote (carrying the 3a thread key) overlays its
+        # candidate through GET /api/runs/{id}; an unmatched reply is never joined.
+        from utils import supplier_registry
+        rid = _create_run(api)
+        raw = {"tier_3": {"results": [{"vendor_name": "B Co", "base_price": 75.0,
+                                       "source_url": "https://bco.com/x"}]}}
+        _set_run(api, rid, sourcing_results_json=json.dumps(raw),
+                 asset_specs_json=json.dumps({"manufacturer": "Acme", "part_number": "PN-1"}))
+        sm_id = supplier_registry.record_sent_message(
+            run_id=rid, supplier_domain="bco.com", vendor_name="B Co",
+            to=["sales@bco.com"], message_id="m-1", thread_id="t-1")
+        supplier_registry.record_review_item(
+            "quote", {"unit_price": 222.0, "currency": "USD", "lead_time": "1 week"},
+            status="confirmed", run_id=rid, supplier_domain="bco.com", vendor_name="B Co",
+            manufacturer="Acme", part_number="PN-1", confidence=0.95,
+            thread_id="t-1", sent_message_id=sm_id, message_id="m-1")
+        supplier_registry.record_review_item(   # un-attributed unmatched reply -> never joined
+            "unmatched_reply", {"sender": "x@nope.com"}, status="needs_human_review",
+            run_id=None, raw_source="reply")
+
+        cand = api.get(f"/api/runs/{rid}").json()["sourcing_results"]["tier3"][0]
+        assert cand["evidenceState"] == "quoted" and cand["quoteConfirmed"] is True
+        assert cand["price"] == 222.0            # quote overrode the listing 75.0
+        assert cand["quoteUnverified"] is False
 
 
 class TestSaveOutreach:

@@ -306,6 +306,12 @@ _URGENCY_FACTORS: Dict[str, float] = {
 # as UNVERIFIED rather than a firm figure (the number is kept, but labelled). Tunable.
 _PRICE_CONFIDENCE_FLOOR: float = 40.0
 
+# State C: a CONFIRMED quote's extraction confidence floor — on the Quote.confidence
+# 0.0–1.0 scale (NOT the 0–100 _PRICE_CONFIDENCE_FLOOR above). Below this a quote is
+# shown supplier-confirmed but with the unverified treatment (a shaky extraction is not
+# masked by the confirm). Tunable.
+_QUOTE_CONFIDENCE_FLOOR: float = 0.4
+
 
 def _lead_time_label(days: int) -> str:
     if days <= 1:  return "Next day"
@@ -357,18 +363,19 @@ def _camel_artifact(art: Optional[dict]) -> Optional[dict]:
     }
 
 
-def _transform_option(opt: dict, tier: int, idx: int) -> dict:
+def _transform_option(opt: dict, tier: int, idx: int, quote: Optional[dict] = None) -> dict:
     price_hidden = opt.get("price_tbd", False) or opt.get("requires_rfq", False)
     price = None if price_hidden else opt.get("base_price")
-    return {
+    out = {
         "id":                    f"{opt.get('vendor_name','')}-t{tier}-{idx}",
         "vendorName":            opt.get("vendor_name") or "Unknown",
         "vendorType":            _vendor_type(opt.get("merchant_type") or ""),
         "tier":                  tier,
         "price":                 price,
-        # Evidence state (increment 1): "priced" = a real listing price exists; "uncontacted"
-        # = no price/quote, so the UI must NOT assert a part match. ("quoted" — the
-        # review_items join — is a later increment and is NOT faked here.)
+        # Evidence state: "priced" = a real listing price exists; "uncontacted" = no
+        # price/quote, so the UI must NOT assert a part match. "quoted" (the strongest
+        # state — a human-confirmed RFQ quote) is applied by _quote_overlay below when a
+        # matched confirmed quote is passed in (State C, increment 3b).
         "evidenceState":         "priced" if price is not None else "uncontacted",
         # Purchase channel (increment 2, State M): "marketplace" = a buyable price at a
         # curated transactable marketplace (buy directly); any other priced row =
@@ -411,16 +418,125 @@ def _transform_option(opt: dict, tier: int, idx: int) -> dict:
         # causing the frontend card to switch from "Request Confirmation" to "Buy Now".
         "confirmationPending":   tier == 1 and bool(opt.get("confirmation_needed", True)),
     }
+    if quote:
+        out.update(_quote_overlay(quote))
+    return out
 
 
-def _transform_sourcing_results(raw: dict) -> dict:
-    """Convert SourcingAgent output dict to the shape expected by the React frontend."""
+# ---------------------------------------------------------------------------
+# State C (increment 3b): join CONFIRMED quotes back to the candidate we emailed and
+# overlay the supplier-confirmed claim. The deterministic join is the thread key carried
+# in 3a (reply -> thread -> the exact outbound); a domain fallback covers legacy /
+# out-of-thread quotes (NULL thread_id). Candidate identity within a run is its
+# normalized source_url domain (the candidate set is domain-deduped), which is also how
+# the quote's supplier_domain was recorded — so domain is the operative candidate-level
+# key, and thread disambiguates when several outbounds went to one domain in a run.
+# ---------------------------------------------------------------------------
+
+def _index_quotes(quotes: list[dict], sent: list[dict]) -> dict:
+    """Build the lookup used to overlay confirmed quotes onto candidates.
+
+    Only status=="confirmed" quotes participate (a human-confirmed quote earns the
+    supplier-confirmed claim; pending / needs_human_review stay in the review queue).
+    `quotes`/`sent` come newest-first (get_review_items / get_sent_messages order), so a
+    setdefault keeps the most recent per key. Returns {by_thread, by_domain,
+    domain_threads}: by_thread/by_domain index the quotes; domain_threads maps a supplier
+    domain -> the thread_ids we sent it (to resolve a candidate's outbound thread)."""
+    confirmed = [q for q in quotes if q.get("status") == "confirmed"]
+    domain_threads: dict[str, set] = {}
+    for s in sent:
+        dom, tid = s.get("supplier_domain"), s.get("thread_id")
+        if dom and tid:
+            domain_threads.setdefault(dom, set()).add(tid)
+    by_thread: dict[str, dict] = {}
+    by_domain: dict[str, dict] = {}
+    for q in confirmed:
+        if q.get("thread_id"):
+            by_thread.setdefault(q["thread_id"], q)
+        if q.get("supplier_domain"):
+            by_domain.setdefault(q["supplier_domain"], q)
+    return {"by_thread": by_thread, "by_domain": by_domain, "domain_threads": domain_threads}
+
+
+def _build_quote_index(run_id: str) -> dict:
+    """Assemble the quote index for a run from the registry (confirmed quotes + sent
+    rows). Fail-soft: any registry error degrades to an empty index (no overlay), never
+    breaks the run-detail read."""
+    try:
+        from utils import supplier_registry
+        quotes = supplier_registry.get_review_items(run_id=run_id, kind="quote")
+        sent = supplier_registry.get_sent_messages(run_id=run_id)
+        return _index_quotes(quotes, sent)
+    except Exception as exc:  # never let a quote-store hiccup break the run view
+        import logging
+        logging.getLogger(__name__).warning(
+            "[%s] _build_quote_index failed, no quote overlay: %s", run_id, exc)
+        return {"by_thread": {}, "by_domain": {}, "domain_threads": {}}
+
+
+def _resolve_quote(opt: dict, index: dict) -> Optional[dict]:
+    """Find the confirmed quote for a candidate: thread-precise first (a quote on a thread
+    we sent to this candidate's domain), domain fallback second (legacy / NULL-thread).
+    None when the candidate has no domain or no confirmed quote matches."""
+    if not index:
+        return None
+    from utils.supplier_registry import _normalize_domain
+    url = opt.get("source_url")
+    dom = _normalize_domain(url) if url else ""
+    if not dom:
+        return None
+    for tid in index.get("domain_threads", {}).get(dom, ()):   # thread-primary
+        q = index.get("by_thread", {}).get(tid)
+        if q:
+            return q
+    return index.get("by_domain", {}).get(dom)                 # domain fallback
+
+
+def _quote_overlay(quote: dict) -> dict:
+    """The State-C overlay applied to a candidate with a matched confirmed quote: the
+    quote's price/lead/terms OVERRIDE the listing/discovery values and the row claims
+    supplier-confirmed (evidenceState="quoted"). The extraction-quality honesty COMPOSES:
+    a confirmed-but-shaky extraction (0 < confidence < floor, 0–1 scale) still carries
+    quoteUnverified, so "supplier-confirmed" never masks a weak extraction. A 0/absent
+    confidence is "no signal" (not flagged), mirroring the priceUnverified discipline."""
+    payload = quote.get("payload") or {}
+    conf = quote.get("confidence")
+    if conf is None:
+        conf = payload.get("confidence")
+    conf = float(conf) if conf is not None else None
+    overlay: dict = {
+        "evidenceState":     "quoted",
+        "quoteConfirmed":    True,
+        "supplierConfirmed": True,
+        "quoteUnverified":   conf is not None and 0 < conf < _QUOTE_CONFIDENCE_FLOOR,
+        "quoteThreadId":     quote.get("thread_id"),   # provenance: the exact outbound
+        "quoteCurrency":     payload.get("currency") or "USD",
+    }
+    price = payload.get("unit_price")
+    if price is not None:
+        try:
+            overlay["price"] = float(price)
+        except (TypeError, ValueError):
+            pass
+    if payload.get("lead_time"):
+        overlay["leadTime"] = payload["lead_time"]   # quote free-text lead overrides label
+    if payload.get("terms"):
+        overlay["terms"] = payload["terms"]
+    return overlay
+
+
+def _transform_sourcing_results(raw: dict, quote_index: Optional[dict] = None) -> dict:
+    """Convert SourcingAgent output dict to the shape expected by the React frontend.
+    When `quote_index` is given (the run's confirmed quotes), a matched candidate is
+    overlaid with the State-C supplier-confirmed claim; without it the transform is
+    unchanged (back-compat)."""
     def _tier(key: str, n: int) -> list:
-        return [
-            _transform_option(o, n, i)
-            for i, o in enumerate(raw.get(key, {}).get("results", []))
-            if not o.get("rejection_reason")
-        ]
+        out = []
+        for i, o in enumerate(raw.get(key, {}).get("results", [])):
+            if o.get("rejection_reason"):
+                continue
+            out.append(_transform_option(o, n, i, quote=_resolve_quote(o, quote_index)))
+        return out
     return {
         "tier1":               _tier("tier_1", 1),
         "tier2":               _tier("tier_2", 2),
@@ -664,10 +780,12 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
     def _parse(col): return json.loads(col) if col else None
 
     raw_sourcing = _parse(run.sourcing_results_json)
-    # Transform if we have real sourcing data (not an error stub)
+    # Transform if we have real sourcing data (not an error stub). State C (3b): overlay
+    # any human-confirmed quotes for this run onto their candidates (deterministic thread
+    # join, domain fallback) — the assembly step that has run_id in scope.
     sourcing: Optional[Dict[str, Any]] = None
     if raw_sourcing and "error" not in raw_sourcing:
-        sourcing = _transform_sourcing_results(raw_sourcing)
+        sourcing = _transform_sourcing_results(raw_sourcing, _build_quote_index(run.id))
     elif raw_sourcing:
         sourcing = raw_sourcing  # pass through error dict so frontend can surface it
 
