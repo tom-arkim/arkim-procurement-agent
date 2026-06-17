@@ -1846,10 +1846,68 @@ def admin_sent_messages(role: str = Depends(require_admin)):
 @app.get("/api/admin/review-queue")
 def admin_review_queue(role: str = Depends(require_admin)):
     """review_items — extracted quotes/contacts, confidence, status (incl.
-    needs_human_review), raw source, the matched RFQ's run/domain/vendor."""
+    needs_human_review), raw source, the matched RFQ's run/domain/vendor.
+
+    Excludes kind="unmatched_reply": those now have their own operator surface
+    (/api/admin/unmatched-replies) and shouldn't be double-surfaced here."""
     from utils import supplier_registry
-    rows = supplier_registry.get_review_items()
+    rows = [r for r in supplier_registry.get_review_items() if r.get("kind") != "unmatched_reply"]
     return {"count": len(rows), "review_items": rows}
+
+
+# Body snippet length for the unmatched-reply LIST (full body stays in payload for view).
+_UNMATCHED_SNIPPET_LEN = 200
+
+
+@app.get("/api/admin/unmatched-replies")
+def admin_unmatched_replies(role: str = Depends(require_admin)):
+    """Open inbound replies that did NOT auto-match an outbound RFQ
+    (kind="unmatched_reply", status="needs_human_review") — the operator triage list.
+
+    OPERATOR-ONLY: these rows have no tenant attribution (run_id / company_id absent),
+    so they can't be customer-scoped. V1 is list + view + dismiss; manual attribution
+    (linking to a run/candidate) is a later increment. Each item flattens the payload's
+    sender/subject for the list and carries the FULL payload for the raw-JSON view."""
+    from utils import supplier_registry
+    rows = supplier_registry.get_review_items(kind="unmatched_reply", status="needs_human_review")
+    items = []
+    for r in rows:
+        p = r.get("payload") or {}
+        body = p.get("body") or ""
+        snippet = (body[:_UNMATCHED_SNIPPET_LEN] + "…") if len(body) > _UNMATCHED_SNIPPET_LEN else body
+        items.append({
+            "id":            r.get("id"),
+            "created_at":    r.get("created_at"),
+            "thread_id":     r.get("thread_id"),
+            "message_id":    r.get("message_id"),
+            "sender":        p.get("sender"),
+            "sender_domain": p.get("sender_domain"),
+            "subject":       p.get("subject"),
+            "snippet":       snippet,
+            "status":        r.get("status"),
+            "payload":       p,        # full payload -> the raw-JSON expand renders the body
+        })
+    return {"count": len(items), "unmatched_replies": items}
+
+
+@app.post("/api/admin/unmatched-replies/{item_id}/dismiss")
+def admin_dismiss_unmatched_reply(item_id: str, role: str = Depends(require_admin)):
+    """Operator dismiss of an unmatched reply -> status "dismissed" + resolved_at.
+
+    Status flip only — NO hard delete (the row stays in review_items, auditable).
+    "dismissed" is distinct from "rejected" (which means an operator discarded an
+    extracted quote/contact). 404 unknown; 422 if the row is not an unmatched_reply
+    (this path must never touch quote/contact rows); 409 if already resolved."""
+    from utils import supplier_registry
+    item = supplier_registry.get_review_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Review item not found")
+    if item.get("kind") != "unmatched_reply":
+        raise HTTPException(status_code=422, detail="Item is not an unmatched_reply")
+    if item.get("status") != "needs_human_review":
+        raise HTTPException(status_code=409, detail=f"Item already {item.get('status')}")
+    supplier_registry.set_review_item_status(item_id, "dismissed")
+    return supplier_registry.get_review_item(item_id)
 
 
 @app.get("/api/admin/orders")

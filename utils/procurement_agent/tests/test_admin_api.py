@@ -522,3 +522,112 @@ class TestImpactEndpoints:
         assert "total_savings" in body and "savings_by_month" in body
         assert body["estimate_model_version"] == "v1"
         assert isinstance(body["contributing_order_ids"], list)
+
+
+# ---------------------------------------------------------------------------
+# Unmatched-reply operator surface (V1: list + view + dismiss). Operator-only —
+# these rows have NO tenant attribution (run_id / company_id absent).
+# ---------------------------------------------------------------------------
+
+def _seed_unmatched(sr, *, sender="x@nobody.com", subject="Re: your RFQ", body="We can supply that part."):
+    """Queue an unmatched_reply exactly as process_replies' no-match branch does."""
+    return sr.record_review_item(
+        "unmatched_reply",
+        {"sender": sender, "sender_domain": sender.split("@")[-1], "thread_id": "t-x",
+         "message_id": "m-x", "in_reply_to": None, "subject": subject, "body": body},
+        status="needs_human_review", run_id=None, supplier_domain=None, vendor_name=None,
+        raw_source="reply", thread_id="t-x", message_id="m-x")
+
+
+class TestUnmatchedReplies:
+    _GET = "/api/admin/unmatched-replies"
+
+    def _dismiss(self, item_id):
+        return f"/api/admin/unmatched-replies/{item_id}/dismiss"
+
+    def test_both_endpoints_require_admin(self, admin_api, stores):
+        sr, *_ = stores
+        item_id = _seed_unmatched(sr)
+        # GET gate
+        assert admin_api.get(self._GET).status_code == 401                       # no header
+        assert admin_api.get(self._GET, headers=_auth("nope")).status_code == 403  # non-admin
+        # POST dismiss gate
+        assert admin_api.post(self._dismiss(item_id)).status_code == 401
+        assert admin_api.post(self._dismiss(item_id), headers=_auth("nope")).status_code == 403
+
+    def test_secret_unset_disables_both(self, admin_api, stores, monkeypatch):
+        sr, *_ = stores
+        item_id = _seed_unmatched(sr)
+        monkeypatch.delenv("ARKIM_ADMIN_TOKEN", raising=False)
+        assert admin_api.get(self._GET, headers=_auth("anything")).status_code == 503
+        assert admin_api.post(self._dismiss(item_id), headers=_auth("anything")).status_code == 503
+
+    def test_reader_returns_only_unmatched_replies(self, admin_api, stores):
+        # A quote + a contact (run-scoped) MUST NOT appear; only the unmatched_reply does.
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        sr.record_review_item("quote", {"unit_price": 85.0}, status="needs_human_review",
+                              run_id=run["id"], vendor_name="V", manufacturer="Baldor",
+                              part_number="EM3770T")
+        sr.record_review_item("contact", {"email": "a@b.com"}, status="needs_human_review",
+                              run_id=run["id"], supplier_domain="b.com")
+        item_id = _seed_unmatched(sr, sender="jo@acme.io", subject="quote attached")
+
+        body = admin_api.get(self._GET, headers=_auth(_TOKEN)).json()
+        assert body["count"] == 1
+        row = body["unmatched_replies"][0]
+        assert row["id"] == item_id
+        # Flattened list fields + the full payload for the raw-JSON "view".
+        assert row["sender"] == "jo@acme.io" and row["sender_domain"] == "acme.io"
+        assert row["subject"] == "quote attached"
+        assert row["thread_id"] == "t-x" and row["message_id"] == "m-x"
+        assert "snippet" in row and row["payload"]["body"] == "We can supply that part."
+
+    def test_list_snippet_truncates_long_body(self, admin_api, stores):
+        sr, *_ = stores
+        _seed_unmatched(sr, body="A" * 500)
+        row = admin_api.get(self._GET, headers=_auth(_TOKEN)).json()["unmatched_replies"][0]
+        assert len(row["snippet"]) <= 201 and row["snippet"].endswith("…")  # truncated
+        assert len(row["payload"]["body"]) == 500                            # full body kept
+
+    def test_dismiss_flips_status_and_drops_from_open_list(self, admin_api, stores):
+        sr, *_ = stores
+        item_id = _seed_unmatched(sr)
+        r = admin_api.post(self._dismiss(item_id), headers=_auth(_TOKEN))
+        assert r.status_code == 200
+        assert r.json()["status"] == "dismissed"
+        assert r.json()["resolved_at"] is not None                  # stamped
+        # Drops out of the open list...
+        assert admin_api.get(self._GET, headers=_auth(_TOKEN)).json()["count"] == 0
+        # ...but the row STILL EXISTS (no hard delete).
+        assert sr.get_review_item(item_id)["status"] == "dismissed"
+
+    def test_dismiss_unknown_404(self, admin_api):
+        assert admin_api.post(self._dismiss("nope"), headers=_auth(_TOKEN)).status_code == 404
+
+    def test_dismiss_non_unmatched_is_422_and_untouched(self, admin_api, stores):
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        quote_id = sr.record_review_item("quote", {"unit_price": 85.0},
+                                         status="needs_human_review", run_id=run["id"],
+                                         vendor_name="V", manufacturer="Baldor", part_number="EM3770T")
+        assert admin_api.post(self._dismiss(quote_id), headers=_auth(_TOKEN)).status_code == 422
+        assert sr.get_review_item(quote_id)["status"] == "needs_human_review"   # untouched
+
+    def test_dismiss_already_resolved_409(self, admin_api, stores):
+        sr, *_ = stores
+        item_id = _seed_unmatched(sr)
+        assert admin_api.post(self._dismiss(item_id), headers=_auth(_TOKEN)).status_code == 200
+        assert admin_api.post(self._dismiss(item_id), headers=_auth(_TOKEN)).status_code == 409  # no re-dismiss
+
+    def test_review_queue_excludes_unmatched_replies(self, admin_api, stores):
+        # De-dupe: now that unmatched replies have their own surface, the general
+        # review-queue feed no longer double-surfaces them.
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)
+        sr.record_review_item("quote", {"unit_price": 85.0}, run_id=run["id"],
+                              vendor_name="V", manufacturer="Baldor", part_number="EM3770T")
+        _seed_unmatched(sr)
+        rq = admin_api.get("/api/admin/review-queue", headers=_auth(_TOKEN)).json()
+        assert rq["count"] == 1
+        assert all(r["kind"] != "unmatched_reply" for r in rq["review_items"])
