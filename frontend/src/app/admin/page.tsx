@@ -24,13 +24,16 @@ const API_BASE =
 
 const TOKEN_KEY = "arkim_admin_token";
 
-type Tab = "runs" | "suppliers" | "sent-messages" | "review-queue" | "orders" | "prices";
+type Tab =
+  | "runs" | "suppliers" | "sent-messages" | "review-queue" | "orders" | "prices"
+  | "unmatched-replies";
 
 const TABS: { id: Tab; label: string; path: string; listKey: string }[] = [
   { id: "runs", label: "Runs", path: "/runs", listKey: "runs" },
   { id: "suppliers", label: "Suppliers", path: "/suppliers", listKey: "suppliers" },
   { id: "sent-messages", label: "Sent Messages", path: "/sent-messages", listKey: "sent_messages" },
   { id: "review-queue", label: "Review Queue", path: "/review-queue", listKey: "review_items" },
+  { id: "unmatched-replies", label: "Unmatched Replies", path: "/unmatched-replies", listKey: "unmatched_replies" },
   { id: "orders", label: "Orders", path: "/orders", listKey: "orders" },
   { id: "prices", label: "Prices", path: "/prices", listKey: "prices" },
 ];
@@ -39,6 +42,21 @@ type FetchResult = { ok: boolean; status: number; body: unknown };
 
 async function fetchAdmin(path: string, token: string): Promise<FetchResult> {
   const res = await fetch(`${API_BASE}/api/admin${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const text = await res.text();
+  let body: unknown;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = text;
+  }
+  return { ok: res.ok, status: res.status, body };
+}
+
+async function postAdmin(path: string, token: string): Promise<FetchResult> {
+  const res = await fetch(`${API_BASE}/api/admin${path}`, {
+    method: "POST",
     headers: { Authorization: `Bearer ${token}` },
   });
   const text = await res.text();
@@ -113,6 +131,12 @@ export default function AdminInspectorPage() {
 
   async function openRun(id: string) {
     setDetail(await fetchAdmin(`/runs/${id}`, token));
+  }
+
+  async function dismissUnmatched(id: string) {
+    const r = await postAdmin(`/unmatched-replies/${id}/dismiss`, token);
+    if (r.ok) load(tab);        // refresh — a dismissed row drops out of the open list
+    else setResult(r);          // surface a gate/guard error in the existing error panel
   }
 
   // Token gate (UI-side convenience; the API is the real gate).
@@ -216,6 +240,9 @@ export default function AdminInspectorPage() {
                         {c}
                       </th>
                     ))}
+                    {tab === "unmatched-replies" && (
+                      <th className="py-1 pr-3 font-normal">action</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -243,10 +270,23 @@ export default function AdminInspectorPage() {
                             )}
                           </td>
                         ))}
+                        {tab === "unmatched-replies" && (
+                          <td className="py-1 pr-3">
+                            <button
+                              className="rounded border border-hr-2 px-2 py-0.5 text-fg-2 hover:bg-bg-4"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                dismissUnmatched(String(row.id));
+                              }}
+                            >
+                              Dismiss
+                            </button>
+                          </td>
+                        )}
                       </tr>
                       {expanded === i && (
                         <tr key={`${i}-raw`} className="bg-bg-3">
-                          <td colSpan={cols.length + 1} className="p-3">
+                          <td colSpan={cols.length + 1 + (tab === "unmatched-replies" ? 1 : 0)} className="p-3">
                             <pre className="whitespace-pre-wrap text-[10.5px] text-fg-2">
                               {JSON.stringify(row, null, 2)}
                             </pre>

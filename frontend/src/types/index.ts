@@ -310,7 +310,10 @@ export interface OutreachRequest {
 // ---------------------------------------------------------------------------
 
 export type ReviewItemKind = "quote" | "contact";
-export type ReviewItemStatus = "pending" | "needs_human_review" | "confirmed" | "rejected";
+export type ReviewItemStatus =
+  | "pending" | "needs_human_review" | "confirmed" | "rejected"
+  // operator dismiss of an unmatched_reply (distinct from "rejected" = discarded quote/contact)
+  | "dismissed";
 
 export interface ReviewItem {
   id: string;
