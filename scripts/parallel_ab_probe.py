@@ -31,6 +31,15 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+# Load .env into os.environ (same as the app does at import) so a standalone `uv run`
+# of this script picks up TAVILY_API_KEY / PARALLEL_API_KEY. We only ever read
+# os.environ — load_dotenv just populates the process env from the .env you control.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 from utils.search_providers import ParallelProvider, TavilyProvider  # noqa: E402
 
 # A small fixed set of sourcing-style queries (used when none is given on the CLI).
