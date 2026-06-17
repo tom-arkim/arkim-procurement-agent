@@ -13,7 +13,7 @@
 
 import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRunLive } from "@/lib/queries";
+import { useRunLive, useMarketplaceOrder } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
@@ -104,6 +104,29 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const fire = useProcToast();
   const { data: run, isLoading, isError, refetch } = useRunLive(runId);
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
+  // State-M "Order through Arkim": an UNCONDITIONAL confirm step (so a click can't
+  // accidentally select/buy), then the marketplace-order call. Buying ⇒ selecting; the
+  // spend still routes through approval server-side (not exempt).
+  const marketplaceOrder = useMarketplaceOrder(runId);
+  const [confirmMktId, setConfirmMktId] = useState<string | null>(null);
+
+  function placeMarketplace(c: Candidate) {
+    marketplaceOrder.mutate(
+      { candidate_id: c.id, tier: c.tier, quantity: 1 },
+      {
+        onSuccess: (res) => {
+          fire(res.pending_approval
+            ? "Submitted for approval — you'll be able to track it once approved."
+            : "Arkim is purchasing this for you — track it in Order.");
+          setConfirmMktId(null);
+        },
+        onError: () => {
+          fire("Couldn't submit the order — please try again.");
+          setConfirmMktId(null);
+        },
+      },
+    );
+  }
 
   // Reliable auto-advance: while the run is still being prepared (or phase unknown),
   // poll via the query's own refetch() on a plain interval. This drives the view
@@ -215,19 +238,37 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {isMkt && !quoted && <div className="o-mkt">Available now · no quote needed</div>}
                     </div>
                     <div className="o-act">
-                      <button
-                        className="proc-btn"
-                        data-kind="primary"
-                        onClick={() => fire(
-                          isMkt
-                            ? "Order through Arkim — coming in the next build"
-                            : c.price != null
-                              ? "Ordering — coming in the next build"
-                              : "Quote request — coming in the next build",
-                        )}
-                      >
-                        {isMkt ? "Order through Arkim" : c.price != null ? "Order" : "Get quote"}
-                      </button>
+                      {isMkt ? (
+                        confirmMktId === c.id ? (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+                            <span style={{ fontSize: 11.5, color: "var(--muted)", maxWidth: 210, textAlign: "right", lineHeight: 1.4 }}>
+                              This selects this part for your run and starts the purchase through Arkim.
+                            </span>
+                            <div style={{ display: "flex", gap: 6 }}>
+                              <button className="proc-btn" data-kind="quiet" disabled={marketplaceOrder.isPending}
+                                      onClick={() => setConfirmMktId(null)}>Cancel</button>
+                              <button className="proc-btn" data-kind="primary" disabled={marketplaceOrder.isPending}
+                                      onClick={() => placeMarketplace(c)}>
+                                {marketplaceOrder.isPending ? "Submitting…" : "Confirm order"}
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button className="proc-btn" data-kind="primary" onClick={() => setConfirmMktId(c.id)}>
+                            Order through Arkim
+                          </button>
+                        )
+                      ) : (
+                        <button
+                          className="proc-btn"
+                          data-kind="primary"
+                          onClick={() => fire(c.price != null
+                            ? "Ordering — coming in the next build"
+                            : "Quote request — coming in the next build")}
+                        >
+                          {c.price != null ? "Order" : "Get quote"}
+                        </button>
+                      )}
                       <button className="o-why" onClick={() => setWhyOpen((s) => ({ ...s, [c.id]: !s[c.id] }))}>
                         Why?<ProcIcon name={whyOpen[c.id] ? "chevD" : "chevR"} size={12} />
                       </button>

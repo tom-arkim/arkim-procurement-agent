@@ -219,6 +219,7 @@ class SourcingRun:
     # Identity
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     facility_id: str = "00000000-0000-0000-0000-000000000000"  # placeholder for prototype
+    company_id: Optional[str] = None  # tenant PIN (D2 prereq #1); None until identity lands
     initiated_by_user_id: Optional[str] = None
 
     # Workflow state

@@ -1383,6 +1383,126 @@ def select_candidate(run_id: str, body: SelectCandidateRequest):
     return {"run_id": run_id, "phase": Phase.PENDING_FIRST_APPROVAL.value}
 
 
+class MarketplaceOrderRequest(BaseModel):
+    candidate_id: str
+    tier: int
+    quantity: int = 1
+
+
+def _reconstruct_candidate(sourcing_results_json: Optional[str], candidate_id: str, tier: int) -> Optional[dict]:
+    """Return the raw candidate dict from a run's stored sourcing results by rebuilding
+    its positional display id (`{vendor}-t{tier}-{idx}`) — the AUTHORITATIVE source
+    (never a client-supplied candidate/price). None if not found."""
+    try:
+        raw = json.loads(sourcing_results_json) if sourcing_results_json else {}
+    except (ValueError, TypeError):
+        return None
+    results = (raw.get(f"tier_{tier}") or {}).get("results", []) or []
+    for idx, opt in enumerate(results):
+        if f"{opt.get('vendor_name', '')}-t{tier}-{idx}" == candidate_id:
+            return opt
+    return None
+
+
+@app.post("/api/runs/{run_id}/marketplace-order")
+def create_marketplace_order(run_id: str, body: MarketplaceOrderRequest):
+    """Manual marketplace fulfilment (increment 1): "Order through Arkim" on a State-M
+    candidate. Buying => selecting — the candidate becomes the run's selection — and the
+    spend routes through the SAME approval path as everything else (NOT exempt:
+    "available immediately" is speed, not spend authority).
+
+    - sub-threshold (0 approvers): the order is created immediately in
+      pending_manual_fulfilment (an operator buys it next — increment 2).
+    - at/above threshold (>=1): NO order yet; the run goes to PENDING_FIRST_APPROVAL and
+      the existing approve flow (H1/M1) runs unchanged; the order materialises
+      post-approval via /execute (the one new marketplace branch).
+
+    The candidate + price are reconstructed server-side from the stored sourcing results
+    and the marketplace nature is re-derived server-side — the client supplies neither
+    price nor channel. 404 unknown run/candidate; 422 non-marketplace or price-less."""
+    from utils import orders
+    from utils.marketplace_registry import is_marketplace
+    from utils.procurement_agent.state.approval_rules import determine_approval_path
+
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        cand = _reconstruct_candidate(run.sourcing_results_json, body.candidate_id, body.tier)
+        if cand is None:
+            raise HTTPException(status_code=404, detail="Candidate not found in this run")
+
+        # Server-side marketplace verification — never trust client channel/price.
+        price_hidden = cand.get("price_tbd") or cand.get("requires_rfq")
+        raw_price = None if price_hidden else cand.get("base_price")
+        source_url = cand.get("source_url")
+        if not (source_url and is_marketplace(source_url) and raw_price is not None):
+            raise HTTPException(
+                status_code=422,
+                detail="Not a marketplace candidate (needs a registered marketplace URL and a buyable price)",
+            )
+        try:
+            unit_price = float(raw_price)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Candidate price is not a number")
+
+        qty = body.quantity or 1
+        total_usd = unit_price * qty
+        facility_id = run.facility_id or "00000000-0000-0000-0000-000000000000"
+        approvers_required, approver_roles = determine_approval_path(facility_id, total_usd)
+
+        now = datetime.now(timezone.utc)
+        # Buying => selecting: record the marketplace candidate as the run's selection
+        # (mirrors select_candidate; the source="marketplace" tag drives the execute branch).
+        selected = {
+            "candidate_id": body.candidate_id,
+            "tier": body.tier,
+            "selected_at": now.isoformat(),
+            "source": "marketplace",
+            "quantity": qty,
+            "_approval_path": {
+                "approvers_required": approvers_required,
+                "approver_roles":     approver_roles,
+                "grand_total_usd":    total_usd,
+            },
+        }
+
+        if approvers_required >= 1:
+            # At/above threshold: run-phase approval; NO order yet (Model A).
+            run.selected_candidate_json = json.dumps(selected)
+            run.current_phase = Phase.PENDING_FIRST_APPROVAL.value
+            run.updated_at = now
+            session.commit()
+            return {"pending_approval": True, "order": None,
+                    "phase": Phase.PENDING_FIRST_APPROVAL.value}
+
+        # Sub-threshold (auto-approved): create the order now, operator-fulfillable.
+        run.selected_candidate_json = json.dumps(selected)
+        run.updated_at = now
+        company_id = run.company_id
+        specs = json.loads(run.asset_specs_json) if run.asset_specs_json else {}
+        phase = run.current_phase
+        session.commit()
+
+    selection = {
+        "run_id":        run_id,
+        "manufacturer":  specs.get("manufacturer"),
+        "part_number":   specs.get("part_number"),
+        "vendor_name":   cand.get("vendor_name"),
+        "source_url":    source_url,
+        "unit_price":    unit_price,
+        "currency":      cand.get("currency") or "USD",
+        "source":        "marketplace",
+        "quantity":      qty,
+    }
+    order = orders.create_order(selection, quantity=qty, company_id=company_id,
+                                initial_status=orders.STATUS_PENDING_FULFILMENT)
+    if not order:
+        raise HTTPException(status_code=500, detail="Order capture failed")
+    _persist_order_on_run(run_id, order)
+    return {"pending_approval": False, "order": order, "phase": phase}
+
+
 @app.post("/api/runs/{run_id}/approve")
 def approve_run(run_id: str, body: ApproveRequest, caller: Optional[Caller] = Depends(get_caller)):
     """

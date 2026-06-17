@@ -25,6 +25,7 @@ import type {
   Facility,
   ReorderItem,
   ApprovalRule,
+  Order,
   OrderActionResult,
   OrdersResponse,
   OutreachRequest,
@@ -180,6 +181,20 @@ export async function rejectSubmission(
   runId: string,
 ): Promise<{ run_id: string; phase: string }> {
   return request(`/runs/${runId}/reject-submission`, { method: "POST" });
+}
+
+/** State-M "Order through Arkim": buying ⇒ selecting + routes through approval.
+ *  Server reconstructs the candidate + price authoritatively (no client price/channel).
+ *  pending_approval=true → at/above threshold (no order yet); false → sub-threshold
+ *  (order created in pending_manual_fulfilment). */
+export async function createMarketplaceOrder(
+  runId: string,
+  body: { candidate_id: string; tier: number; quantity?: number },
+): Promise<{ pending_approval: boolean; order: Order | null; phase: string }> {
+  return request(`/runs/${runId}/marketplace-order`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function initiateOutreach(
