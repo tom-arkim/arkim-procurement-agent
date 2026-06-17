@@ -39,7 +39,7 @@ import {
   placeOrderFromQuote,
   executeOrder,
   markDelivered,
-  createMarketplaceOrder,
+  createOrderNow,
   getOrders,
   getAllOrders,
   getImpact,
@@ -195,11 +195,11 @@ export function useApproveRun(runId: string) {
   });
 }
 
-export function useMarketplaceOrder(runId: string) {
+export function useOrderNow(runId: string) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (body: { candidate_id: string; tier: number; quantity?: number }) =>
-      createMarketplaceOrder(runId, body),
+      createOrderNow(runId, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
       qc.invalidateQueries({ queryKey: queryKeys.runs.all() });

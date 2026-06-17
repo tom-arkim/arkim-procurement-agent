@@ -1383,7 +1383,7 @@ def select_candidate(run_id: str, body: SelectCandidateRequest):
     return {"run_id": run_id, "phase": Phase.PENDING_FIRST_APPROVAL.value}
 
 
-class MarketplaceOrderRequest(BaseModel):
+class OrderNowRequest(BaseModel):
     candidate_id: str
     tier: int
     quantity: int = 1
@@ -1404,22 +1404,27 @@ def _reconstruct_candidate(sourcing_results_json: Optional[str], candidate_id: s
     return None
 
 
-@app.post("/api/runs/{run_id}/marketplace-order")
-def create_marketplace_order(run_id: str, body: MarketplaceOrderRequest):
-    """Manual marketplace fulfilment (increment 1): "Order through Arkim" on a State-M
-    candidate. Buying => selecting — the candidate becomes the run's selection — and the
-    spend routes through the SAME approval path as everything else (NOT exempt:
-    "available immediately" is speed, not spend authority).
+@app.post("/api/runs/{run_id}/order-now")
+def create_order_now(run_id: str, body: OrderNowRequest):
+    """Manual fulfilment "Order" / "Order through Arkim" on ANY PRICED candidate. Buying
+    => selecting — the candidate becomes the run's selection — and the spend routes
+    through the SAME approval path as everything else (NOT exempt: "available
+    immediately" is speed, not spend authority).
+
+    Works for marketplace (source="marketplace") and reference (source="buy") candidates
+    alike; only a PRICE-LESS (quote-required) candidate is rejected (422 — get a quote
+    first). The order is manually fulfilled either way (an operator buys/sources it —
+    increment 2), so it is tagged fulfilment="manual" on the selection.
 
     - sub-threshold (0 approvers): the order is created immediately in
-      pending_manual_fulfilment (an operator buys it next — increment 2).
+      pending_manual_fulfilment.
     - at/above threshold (>=1): NO order yet; the run goes to PENDING_FIRST_APPROVAL and
       the existing approve flow (H1/M1) runs unchanged; the order materialises
-      post-approval via /execute (the one new marketplace branch).
+      post-approval via /execute (the manual-fulfilment branch).
 
     The candidate + price are reconstructed server-side from the stored sourcing results
-    and the marketplace nature is re-derived server-side — the client supplies neither
-    price nor channel. 404 unknown run/candidate; 422 non-marketplace or price-less."""
+    and the channel re-derived server-side — the client supplies neither price nor
+    channel. 404 unknown run/candidate; 422 price-less."""
     from utils import orders
     from utils.marketplace_registry import is_marketplace
     from utils.procurement_agent.state.approval_rules import determine_approval_path
@@ -1432,19 +1437,19 @@ def create_marketplace_order(run_id: str, body: MarketplaceOrderRequest):
         if cand is None:
             raise HTTPException(status_code=404, detail="Candidate not found in this run")
 
-        # Server-side marketplace verification — never trust client channel/price.
+        # A real, buyable price is required (a quote-required row goes via "Get quote",
+        # not here). Channel is re-derived server-side — never trust client price/channel.
         price_hidden = cand.get("price_tbd") or cand.get("requires_rfq")
         raw_price = None if price_hidden else cand.get("base_price")
-        source_url = cand.get("source_url")
-        if not (source_url and is_marketplace(source_url) and raw_price is not None):
-            raise HTTPException(
-                status_code=422,
-                detail="Not a marketplace candidate (needs a registered marketplace URL and a buyable price)",
-            )
+        if raw_price is None:
+            raise HTTPException(status_code=422,
+                                detail="Candidate has no buyable price — request a quote instead")
         try:
             unit_price = float(raw_price)
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="Candidate price is not a number")
+        source_url = cand.get("source_url")
+        channel = "marketplace" if (source_url and is_marketplace(source_url)) else "buy"
 
         qty = body.quantity or 1
         total_usd = unit_price * qty
@@ -1452,13 +1457,15 @@ def create_marketplace_order(run_id: str, body: MarketplaceOrderRequest):
         approvers_required, approver_roles = determine_approval_path(facility_id, total_usd)
 
         now = datetime.now(timezone.utc)
-        # Buying => selecting: record the marketplace candidate as the run's selection
-        # (mirrors select_candidate; the source="marketplace" tag drives the execute branch).
+        # Buying => selecting: record the candidate as the run's selection. fulfilment=
+        # "manual" routes the post-approval execute to pending_manual_fulfilment (vs the
+        # existing place flow); source carries the channel for the operator.
         selected = {
             "candidate_id": body.candidate_id,
             "tier": body.tier,
             "selected_at": now.isoformat(),
-            "source": "marketplace",
+            "source": channel,
+            "fulfilment": "manual",
             "quantity": qty,
             "_approval_path": {
                 "approvers_required": approvers_required,
@@ -1492,7 +1499,7 @@ def create_marketplace_order(run_id: str, body: MarketplaceOrderRequest):
         "source_url":    source_url,
         "unit_price":    unit_price,
         "currency":      cand.get("currency") or "USD",
-        "source":        "marketplace",
+        "source":        channel,
         "quantity":      qty,
     }
     order = orders.create_order(selection, quantity=qty, company_id=company_id,

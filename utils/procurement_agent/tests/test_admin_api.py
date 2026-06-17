@@ -543,12 +543,16 @@ _MKTPL_RAW = {"tier_2": {"results": [
     {"vendor_name": "Grainger", "base_price": 40.0, "source_url": "https://grainger.com/p/x"}]}}
 _MKTPL_RAW_HIGH = {"tier_2": {"results": [
     {"vendor_name": "Grainger", "base_price": 12000.0, "source_url": "https://grainger.com/p/x"}]}}
+_REF_RAW = {"tier_2": {"results": [
+    {"vendor_name": "MROSupply", "base_price": 40.0, "source_url": "https://mrosupply.com/p/x"}]}}
 
 
-class TestMarketplaceOrder:
-    """Increment 1: 'Order through Arkim' → create order through the SAME approval path.
-    Buying ⇒ selecting; sub-threshold creates pending_manual_fulfilment immediately;
-    at/above routes to approval and the order materialises post-approval."""
+class TestOrderNow:
+    """'Order' / 'Order through Arkim' → order through the SAME approval path, for ANY
+    PRICED candidate: marketplace (source=marketplace) and reference (source=buy). Buying
+    ⇒ selecting; manual fulfilment (status pending_manual_fulfilment). Price-less → 422
+    (must get a quote first). Sub-threshold creates the order now; at/above routes to
+    approval and the order materialises post-approval."""
 
     def _setup(self, persistence, raw, *, facility_id="fac-mp", company_id="PIN-1"):
         run = persistence.create_run(facility_id=facility_id, company_id=company_id,
@@ -557,21 +561,28 @@ class TestMarketplaceOrder:
         return run["id"]
 
     def _order(self, rid):
-        return f"/api/runs/{rid}/marketplace-order"
+        return f"/api/runs/{rid}/order-now"
 
-    def test_sub_threshold_creates_pending_order_immediately(self, admin_api, stores):
+    def test_sub_threshold_marketplace_creates_pending_immediately(self, admin_api, stores):
         _sr, orders, _p, persistence = stores
         persistence.upsert_approval_rule("fac-mp", 0, 0, [])     # auto-approve tier
         rid = self._setup(persistence, _MKTPL_RAW)
-        body = admin_api.post(self._order(rid),
-                              json={"candidate_id": "Grainger-t2-0", "tier": 2, "quantity": 1}).json()
-        assert body["pending_approval"] is False
-        o = body["order"]
+        o = admin_api.post(self._order(rid),
+                           json={"candidate_id": "Grainger-t2-0", "tier": 2, "quantity": 1}).json()["order"]
         assert o["status"] == "pending_manual_fulfilment" and o["source"] == "marketplace"
         assert o["unit_price"] == 40.0 and o["company_id"] == "PIN-1"
-        # buying ⇒ selecting
-        sc = persistence.get_run(rid)["selected_candidate_json"]
-        assert sc["candidate_id"] == "Grainger-t2-0" and sc["source"] == "marketplace"
+        sc = persistence.get_run(rid)["selected_candidate_json"]   # buying ⇒ selecting
+        assert sc["candidate_id"] == "Grainger-t2-0" and sc["fulfilment"] == "manual"
+
+    def test_sub_threshold_reference_creates_pending_buy_order(self, admin_api, stores):
+        # NEW: a priced NON-marketplace candidate ('Order') now orders through the same
+        # flow, tagged source="buy" (the operator sources it from that supplier).
+        _sr, _o, _p, persistence = stores
+        persistence.upsert_approval_rule("fac-mp", 0, 0, [])
+        rid = self._setup(persistence, _REF_RAW)
+        o = admin_api.post(self._order(rid), json={"candidate_id": "MROSupply-t2-0", "tier": 2}).json()["order"]
+        assert o["status"] == "pending_manual_fulfilment" and o["source"] == "buy"
+        assert o["unit_price"] == 40.0
 
     def test_at_or_above_routes_to_approval_no_order_yet(self, admin_api, stores):
         _sr, orders, _p, persistence = stores
@@ -593,20 +604,12 @@ class TestMarketplaceOrder:
                               json={"approver_name": "A", "approver_role": "Dir"}).json()["phase"] == "pending_second_approval"
         assert admin_api.post(f"/api/runs/{rid}/approve",
                               json={"approver_name": "B", "approver_role": "Ops"}).json()["phase"] == "approved"
-        # execute (existing post-approval order creation) → the marketplace branch.
+        # execute (existing post-approval order creation) → the manual-fulfilment branch.
         res = admin_api.post(f"/api/runs/{rid}/execute").json()
         assert res["success"] is True and res["placed"] is False     # NOT auto-placed
         rows = orders.get_orders(run_id=rid)
         assert len(rows) == 1
         assert rows[0]["status"] == "pending_manual_fulfilment" and rows[0]["source"] == "marketplace"
-
-    def test_non_marketplace_candidate_422(self, admin_api, stores):
-        _sr, orders, _p, persistence = stores
-        raw = {"tier_2": {"results": [
-            {"vendor_name": "RandoShop", "base_price": 40.0, "source_url": "https://randoshop.com/p"}]}}
-        rid = self._setup(persistence, raw)
-        assert admin_api.post(self._order(rid), json={"candidate_id": "RandoShop-t2-0", "tier": 2}).status_code == 422
-        assert orders.get_orders(run_id=rid) == []
 
     def test_priceless_candidate_422(self, admin_api, stores):
         _sr, _o, _p, persistence = stores
@@ -617,7 +620,7 @@ class TestMarketplaceOrder:
         assert admin_api.post(self._order(rid), json={"candidate_id": "Grainger-t2-0", "tier": 2}).status_code == 422
 
     def test_unknown_run_404(self, admin_api):
-        assert admin_api.post("/api/runs/nope/marketplace-order",
+        assert admin_api.post("/api/runs/nope/order-now",
                               json={"candidate_id": "x-t2-0", "tier": 2}).status_code == 404
 
     def test_unknown_candidate_404(self, admin_api, stores):

@@ -84,25 +84,27 @@ class ProcurementAgent:
                     "message": "No selected candidate to order.", "next_phase": None}
 
         placed_by = self._latest_approver(run)
-        # Marketplace selection: the order is captured POST-approval in
-        # pending_manual_fulfilment and is NOT auto-placed — an operator buys it on the
-        # marketplace and "marks purchased" (increment 2). Everything else keeps the
-        # existing capture->place behaviour.
-        is_marketplace = selection.get("source") == "marketplace"
+        # Manual-fulfilment selection (the "order-now" button, marketplace OR reference):
+        # the order is captured POST-approval in pending_manual_fulfilment and is NOT
+        # auto-placed — an operator buys/sources it and "marks purchased" (increment 2).
+        # Everything else (the existing place flow) keeps capture->place. The marker lives
+        # on the run's selection wrapper, not the resolved candidate.
+        sc_wrap = getattr(run, "selected_candidate_json", None) or {}
+        is_manual = isinstance(sc_wrap, dict) and sc_wrap.get("fulfilment") == "manual"
         # D2 prereq #1: carry the run's tenant key (company PIN) onto the order. getattr-
         # safe — None until identity populates run.company_id (keys only, no enforcement).
         order = orders.create_order(
             selection, quantity=selection.get("quantity", 1), placed_by=placed_by,
             company_id=getattr(run, "company_id", None),
-            initial_status=(orders.STATUS_PENDING_FULFILMENT if is_marketplace else orders.STATUS_DRAFT),
+            initial_status=(orders.STATUS_PENDING_FULFILMENT if is_manual else orders.STATUS_DRAFT),
         )
         if not order:
             return {"success": False, "action": "execute", "order": None, "placed": False,
                     "message": "Order capture failed.", "next_phase": None}
 
-        if is_marketplace:
+        if is_manual:
             return {"success": True, "action": "execute", "order": order, "placed": False,
-                    "message": f"Order {order['id']} awaiting operator marketplace purchase.",
+                    "message": f"Order {order['id']} awaiting operator fulfilment.",
                     "next_phase": None}
 
         # Deliberate placement (the confirmed commit). place_order refuses without a
@@ -194,10 +196,11 @@ class ProcurementAgent:
         if lt is None:
             lt = candidate.get("leadTime")
         is_rfq = bool(candidate.get("requires_rfq") or candidate.get("price_tbd"))
-        # Marketplace selection is tagged on the run's selected_candidate wrapper (set by
-        # the marketplace-order endpoint, "buying => selecting"). It drives source="marketplace".
+        # The order-now endpoint ("buying => selecting") tags the run's selected_candidate
+        # wrapper with an explicit channel (source) + fulfilment="manual". Honor that
+        # channel when present; otherwise derive it as before.
         sc_wrap = getattr(run, "selected_candidate_json", None) or {}
-        is_marketplace = isinstance(sc_wrap, dict) and sc_wrap.get("source") == "marketplace"
+        wrap_source = sc_wrap.get("source") if isinstance(sc_wrap, dict) else None
         return {
             "run_id": getattr(run, "id", None),
             "manufacturer": specs.get("manufacturer"),
@@ -206,6 +209,6 @@ class ProcurementAgent:
             "source_url": candidate.get("source_url") or candidate.get("sourceUrl"),
             "unit_price": price,
             "lead_time": str(lt) if lt is not None else None,
-            "source": "marketplace" if is_marketplace else ("rfq" if is_rfq else "buy"),
+            "source": wrap_source or ("rfq" if is_rfq else "buy"),
             "quantity": 1,
         }

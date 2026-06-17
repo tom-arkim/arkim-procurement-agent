@@ -13,7 +13,7 @@
 
 import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRunLive, useMarketplaceOrder } from "@/lib/queries";
+import { useRunLive, useOrderNow } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
@@ -104,14 +104,14 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const fire = useProcToast();
   const { data: run, isLoading, isError, refetch } = useRunLive(runId);
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
-  // State-M "Order through Arkim": an UNCONDITIONAL confirm step (so a click can't
-  // accidentally select/buy), then the marketplace-order call. Buying ⇒ selecting; the
-  // spend still routes through approval server-side (not exempt).
-  const marketplaceOrder = useMarketplaceOrder(runId);
+  // "Order" / "Order through Arkim" on any priced candidate: an UNCONDITIONAL confirm
+  // step (so a click can't accidentally select/buy), then the order-now call. Buying ⇒
+  // selecting; the spend still routes through approval server-side (not exempt).
+  const orderNow = useOrderNow(runId);
   const [confirmMktId, setConfirmMktId] = useState<string | null>(null);
 
-  function placeMarketplace(c: Candidate) {
-    marketplaceOrder.mutate(
+  function placeOrderNow(c: Candidate) {
+    orderNow.mutate(
       { candidate_id: c.id, tier: c.tier, quantity: 1 },
       {
         onSuccess: (res) => {
@@ -238,35 +238,35 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {isMkt && !quoted && <div className="o-mkt">Available now · no quote needed</div>}
                     </div>
                     <div className="o-act">
-                      {isMkt ? (
+                      {c.price != null ? (
+                        // Any PRICED candidate orders through Arkim (marketplace OR reference)
+                        // via an unconditional confirm step. Price-less rows below → Get quote.
                         confirmMktId === c.id ? (
                           <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
                             <span style={{ fontSize: 11.5, color: "var(--muted)", maxWidth: 210, textAlign: "right", lineHeight: 1.4 }}>
                               This selects this part for your run and starts the purchase through Arkim.
                             </span>
                             <div style={{ display: "flex", gap: 6 }}>
-                              <button className="proc-btn" data-kind="quiet" disabled={marketplaceOrder.isPending}
+                              <button className="proc-btn" data-kind="quiet" disabled={orderNow.isPending}
                                       onClick={() => setConfirmMktId(null)}>Cancel</button>
-                              <button className="proc-btn" data-kind="primary" disabled={marketplaceOrder.isPending}
-                                      onClick={() => placeMarketplace(c)}>
-                                {marketplaceOrder.isPending ? "Submitting…" : "Confirm order"}
+                              <button className="proc-btn" data-kind="primary" disabled={orderNow.isPending}
+                                      onClick={() => placeOrderNow(c)}>
+                                {orderNow.isPending ? "Submitting…" : "Confirm order"}
                               </button>
                             </div>
                           </div>
                         ) : (
                           <button className="proc-btn" data-kind="primary" onClick={() => setConfirmMktId(c.id)}>
-                            Order through Arkim
+                            {isMkt ? "Order through Arkim" : "Order"}
                           </button>
                         )
                       ) : (
                         <button
                           className="proc-btn"
                           data-kind="primary"
-                          onClick={() => fire(c.price != null
-                            ? "Ordering — coming in the next build"
-                            : "Quote request — coming in the next build")}
+                          onClick={() => fire("Quote request — coming in the next build")}
                         >
-                          {c.price != null ? "Order" : "Get quote"}
+                          Get quote
                         </button>
                       )}
                       <button className="o-why" onClick={() => setWhyOpen((s) => ({ ...s, [c.id]: !s[c.id] }))}>

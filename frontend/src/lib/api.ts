@@ -183,15 +183,15 @@ export async function rejectSubmission(
   return request(`/runs/${runId}/reject-submission`, { method: "POST" });
 }
 
-/** State-M "Order through Arkim": buying ⇒ selecting + routes through approval.
- *  Server reconstructs the candidate + price authoritatively (no client price/channel).
- *  pending_approval=true → at/above threshold (no order yet); false → sub-threshold
- *  (order created in pending_manual_fulfilment). */
-export async function createMarketplaceOrder(
+/** "Order" / "Order through Arkim" on any PRICED candidate: buying ⇒ selecting + routes
+ *  through approval. Server reconstructs the candidate + price authoritatively and
+ *  re-derives the channel (no client price/channel). pending_approval=true → at/above
+ *  threshold (no order yet); false → sub-threshold (order in pending_manual_fulfilment). */
+export async function createOrderNow(
   runId: string,
   body: { candidate_id: string; tier: number; quantity?: number },
 ): Promise<{ pending_approval: boolean; order: Order | null; phase: string }> {
-  return request(`/runs/${runId}/marketplace-order`, {
+  return request(`/runs/${runId}/order-now`, {
     method: "POST",
     body: JSON.stringify(body),
   });
