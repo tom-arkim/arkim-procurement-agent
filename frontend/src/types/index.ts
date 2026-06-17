@@ -378,7 +378,9 @@ export interface RejectReviewItemResponse {
 }
 
 export type OrderStatus =
-  | "draft" | "placed" | "confirmed" | "shipped" | "received" | "cancelled";
+  // pending_manual_fulfilment = an approved order awaiting an operator to buy/source it
+  // (manual marketplace fulfilment) before it advances to placed.
+  | "draft" | "pending_manual_fulfilment" | "placed" | "confirmed" | "shipped" | "received" | "cancelled";
 
 export interface Order {
   id: string;

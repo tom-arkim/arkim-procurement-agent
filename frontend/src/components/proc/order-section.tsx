@@ -42,12 +42,16 @@ export function OrderSection({ runId }: { runId: string }) {
 
   const orders = ordersData?.orders ?? [];
   const placed = orders.find((o) => isFlow(o.status));
+  // Manual marketplace fulfilment: an approved order Arkim is buying on the customer's
+  // behalf, before it's placed with the supplier. Shown as its own pending state — not
+  // the place-order card (it's already ordered), not hidden.
+  const pendingManual = orders.find((o) => o.status === "pending_manual_fulfilment");
   const draft = orders.find((o) => o.status === "draft");
   const cancelled = orders.find((o) => o.status === "cancelled");
   const phase = (run?.phase ?? "") as Phase;
   const canPlace = ["approved", "executing"].includes(phase);
 
-  if (!placed && !draft && !cancelled && !canPlace) return null;
+  if (!placed && !pendingManual && !draft && !cancelled && !canPlace) return null;
 
   const noPrice = Boolean(draft) || execute.data?.placed === false;
 
@@ -58,6 +62,8 @@ export function OrderSection({ runId }: { runId: string }) {
       </div>
       {placed ? (
         <OrderTracking runId={runId} order={placed} />
+      ) : pendingManual ? (
+        <BeingPurchased order={pendingManual} />
       ) : cancelled && !canPlace ? (
         <div className="rc-note">This order was cancelled.</div>
       ) : (
@@ -149,6 +155,31 @@ function PlaceOrderCard({
             </button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function BeingPurchased({ order }: { order: Order }) {
+  // Manual marketplace fulfilment, customer view: honest pending state. No placed/
+  // shipped steps yet — Arkim hasn't bought it; we don't imply progress that hasn't
+  // happened. Once an operator marks it purchased it becomes "placed" and the full
+  // OrderTracking timeline takes over.
+  return (
+    <div className="proc-track">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{order.vendor_name ?? "Supplier"}</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
+            {order.unit_price != null ? procMoney(order.unit_price) : "—"}
+            {order.quantity ? ` · qty ${order.quantity}` : ""}
+          </div>
+        </div>
+        <span className="proc-pill" data-tone="progress"><span className="d" />Being purchased</span>
+      </div>
+      <div className="rc-note">
+        Arkim is purchasing this on your behalf. You&apos;ll see delivery tracking here once
+        it&apos;s placed with the supplier.
       </div>
     </div>
   );
