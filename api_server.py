@@ -28,6 +28,13 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Up
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+# Auth (ported Cognito identity). get_caller is an OPTIONAL dependency on the customer
+# endpoints: it returns None when no token is presented (the current no-auth demo path)
+# and a verified Caller when one is. M1 (distinct-approver) enforces ONLY on a verified
+# identity — never on a body-supplied name — so it is real when identity is present and
+# inert (today's behaviour) when it is not.
+from utils.auth import Caller, get_caller
+
 # Import the existing persistence layer
 from utils.procurement_agent.state.persistence import (
     SourcingRunORM,
@@ -1366,16 +1373,25 @@ def select_candidate(run_id: str, body: SelectCandidateRequest):
 
 
 @app.post("/api/runs/{run_id}/approve")
-def approve_run(run_id: str, body: ApproveRequest):
+def approve_run(run_id: str, body: ApproveRequest, caller: Optional[Caller] = Depends(get_caller)):
     """
-    Record an approval action and route by the persisted approval path (H1).
+    Record an approval action and route by the persisted approval path (H1) with
+    distinct-approver enforcement (M1).
 
-    A first approval on a run whose `_approval_path` requires >= 2 approvers advances
+    H1: a first approval on a run whose `_approval_path` requires >= 2 approvers advances
     to pending_second_approval; the second approval (or any single-approver path)
-    advances to approved. Threshold routing only — distinct-approver enforcement (M1)
-    is the auth-dependent half and is NOT done here (the approver identity is still the
-    body-supplied display name/role until the auth layer is wired).
+    advances to approved.
+
+    M1: when the request carries a verified identity (Cognito JWT -> Caller), the
+    authenticated `sub` is recorded as `approver_id` and a second approval from the SAME
+    identity is rejected (409) — the two approvals must come from DISTINCT people. This
+    enforces on the verified `sub` only, NEVER on the body-supplied approver_name/role
+    (which a caller could spoof). With no token (the current no-auth demo), approver_id
+    is null and distinctness is not enforced — behaviour is unchanged until the frontend
+    forwards identity. D2 tenant-scoping is deferred (no tenant key in the stores yet;
+    needs core's assigned_sites — see CLEANUP §4.1).
     """
+    approver_id = caller.user_id if caller else None
     with _SessionFactory() as session:
         run = session.get(SourcingRunORM, run_id)
         if not run:
@@ -1386,8 +1402,22 @@ def approve_run(run_id: str, body: ApproveRequest):
             if isinstance(run.approval_history_json, str) and run.approval_history_json
             else (run.approval_history_json or [])
         )
+
+        # M1: a verified approver may not approve the same run twice (distinct-approver).
+        # Enforced only on the authenticated sub — body identity is never trusted for this.
+        if approver_id is not None:
+            prior_approvers = {
+                h.get("approver_id") for h in history if h.get("action") == "approved"
+            }
+            if approver_id in prior_approvers:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A second, distinct approver is required — you have already approved this run.",
+                )
+
         history.append({
             "sequence": len(history) + 1,
+            "approver_id": approver_id,
             "approver_name": body.approver_name,
             "approver_role": body.approver_role,
             "action": "approved",

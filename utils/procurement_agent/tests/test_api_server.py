@@ -112,6 +112,26 @@ def _read_selected(client, run_id) -> dict:
         return json.loads(run.selected_candidate_json) if run.selected_candidate_json else {}
 
 
+def _read_history(client, run_id) -> list:
+    """Read the raw approval_history_json rows (incl. approver_id) from the temp DB."""
+    SF = client._api_server._SessionFactory
+    ORM = client._api_server.SourcingRunORM
+    with SF() as session:
+        run = session.get(ORM, run_id)
+        return json.loads(run.approval_history_json) if run.approval_history_json else []
+
+
+def _mk_caller(user_id, company="PIN1"):
+    """A minimal authenticated Caller for injecting identity via dependency_overrides
+    (no JWT/JWKS needed to exercise the endpoint's M1 behaviour)."""
+    from utils.auth import Caller, parse_cognito_user_from_claims
+    return Caller(
+        user_id=user_id, email=f"{user_id}@x.com", company_id=company,
+        roles=frozenset(), is_admin=False, service_authenticated=False,
+        service_name=None, cognito_user=parse_cognito_user_from_claims({"sub": user_id}),
+    )
+
+
 def _create_pending(client, submission_id="sub-1", facility_id="fac-stockton",
                     summary="Pump leaking at seal — needs replacement"):
     """Create a pending_intake run via /from-maintenance; return its run id."""
@@ -400,6 +420,80 @@ class TestApprovalThresholdRouting:
         api.post(f"/api/runs/{rid}/select-candidate",
                  json={"candidate_id": "RFQ Co-t3-0", "tier": 3})
         assert _read_selected(api, rid)["_approval_path"]["approvers_required"] == 1
+
+
+# ---------------------------------------------------------------------------
+# M1 — distinct-approver enforcement on the AUTHENTICATED identity (never the body).
+# Wired via the optional get_caller dependency: real when a verified Caller is present
+# (injected here through dependency_overrides), inert in the no-token demo path.
+# ---------------------------------------------------------------------------
+
+class TestDistinctApprover:
+    def _dual(self, api):
+        """Seed a >= $5k selected run sitting at pending_first_approval (2 approvers)."""
+        rid = _create_run(api)
+        raw = {"tier_2": {"results": [
+            {"vendor_name": "Acme", "base_price": 6000.0, "source_url": "https://acme.com/x"}]}}
+        _set_run(api, rid, sourcing_results_json=json.dumps(raw), current_phase="comparison")
+        assert api.post(f"/api/runs/{rid}/select-candidate",
+                        json={"candidate_id": "Acme-t2-0", "tier": 2}).status_code == 200
+        return rid
+
+    def _override(self, api, user_id):
+        from utils.auth import get_caller
+        api._api_server.app.dependency_overrides[get_caller] = lambda: _mk_caller(user_id)
+
+    def _clear(self, api):
+        from utils.auth import get_caller
+        api._api_server.app.dependency_overrides.pop(get_caller, None)
+
+    def test_same_identity_blocked_on_second_approval(self, api):
+        rid = self._dual(api)
+        self._override(api, "alice")
+        try:
+            r1 = api.post(f"/api/runs/{rid}/approve",
+                          json={"approver_name": "Alice", "approver_role": "Director"})
+            assert r1.json()["phase"] == "pending_second_approval"
+            # Same authenticated sub tries the second approval -> rejected.
+            r2 = api.post(f"/api/runs/{rid}/approve",
+                          json={"approver_name": "Alice", "approver_role": "Director"})
+            assert r2.status_code == 409
+        finally:
+            self._clear(api)
+
+    def test_distinct_identities_reach_approved(self, api):
+        rid = self._dual(api)
+        try:
+            self._override(api, "alice")
+            r1 = api.post(f"/api/runs/{rid}/approve",
+                          json={"approver_name": "Alice", "approver_role": "Director"})
+            assert r1.json()["phase"] == "pending_second_approval"
+            self._override(api, "bob")  # a DISTINCT authenticated approver
+            r2 = api.post(f"/api/runs/{rid}/approve",
+                          json={"approver_name": "Bob", "approver_role": "Ops Manager"})
+            assert r2.json()["phase"] == "approved"
+        finally:
+            self._clear(api)
+
+    def test_authenticated_sub_persisted_as_approver_id(self, api):
+        rid = self._dual(api)
+        self._override(api, "alice")
+        try:
+            api.post(f"/api/runs/{rid}/approve",
+                     json={"approver_name": "Alice", "approver_role": "Director"})
+            assert _read_history(api, rid)[0]["approver_id"] == "alice"
+        finally:
+            self._clear(api)
+
+    def test_no_token_demo_distinctness_not_enforced(self, api):
+        # No override -> get_caller returns None (no token). Demo path is unchanged: two
+        # approvals advance the run, approver_id is null, no distinctness check fires.
+        rid = self._dual(api)
+        r1 = api.post(f"/api/runs/{rid}/approve", json={"approver_name": "X", "approver_role": "D"})
+        assert r1.json()["phase"] == "pending_second_approval"
+        r2 = api.post(f"/api/runs/{rid}/approve", json={"approver_name": "X", "approver_role": "D"})
+        assert r2.json()["phase"] == "approved"
+        assert _read_history(api, rid)[0]["approver_id"] is None
 
 
 # ---------------------------------------------------------------------------
