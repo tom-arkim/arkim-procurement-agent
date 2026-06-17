@@ -4,7 +4,10 @@ import { type ReactNode } from "react";
 import { ProcIcon } from "./proc-icon";
 import { ArkimMark } from "./arkim-mark";
 
-export const procMoney = (n: number) => "$" + Number(n).toFixed(2);
+// Thousands-separated, 2-decimal currency: $13,528.89 (not $13528.89). Keeps cents —
+// a price is a price — and groups so large figures read cleanly.
+export const procMoney = (n: number) =>
+  "$" + Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export type ProcTone = "open" | "progress" | "done" | "overdue" | "muted";
 
