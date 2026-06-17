@@ -731,3 +731,88 @@ class TestUnmatchedReplies:
         rq = admin_api.get("/api/admin/review-queue", headers=_auth(_TOKEN)).json()
         assert rq["count"] == 1
         assert all(r["kind"] != "unmatched_reply" for r in rq["review_items"])
+
+
+# ---------------------------------------------------------------------------
+# Operator fulfilment queue (increment 2): list pending_manual_fulfilment orders +
+# "mark purchased" (operator buys/sources it, records the ref, pending -> placed).
+# Operator-only / global (require_admin) — NOT tenant-scoped.
+# ---------------------------------------------------------------------------
+
+class TestFulfilmentQueue:
+    _Q = "/api/admin/fulfilment-queue"
+
+    def _mp(self, oid):
+        return f"/api/admin/orders/{oid}/mark-purchased"
+
+    def _pending(self, orders, **over):
+        sel = {"run_id": "r1", "manufacturer": "Acme", "part_number": "PN-1",
+               "vendor_name": "Grainger", "unit_price": 40.0, "source": "marketplace"}
+        sel.update(over)
+        return orders.create_order(sel, initial_status="pending_manual_fulfilment")
+
+    def test_both_endpoints_require_admin(self, admin_api, stores):
+        _sr, orders, _p, _pe = stores
+        o = self._pending(orders)
+        assert admin_api.get(self._Q).status_code == 401
+        assert admin_api.get(self._Q, headers=_auth("nope")).status_code == 403
+        assert admin_api.post(self._mp(o["id"])).status_code == 401
+        assert admin_api.post(self._mp(o["id"]), headers=_auth("nope")).status_code == 403
+
+    def test_secret_unset_disables_both(self, admin_api, stores, monkeypatch):
+        _sr, orders, _p, _pe = stores
+        o = self._pending(orders)
+        monkeypatch.delenv("ARKIM_ADMIN_TOKEN", raising=False)
+        assert admin_api.get(self._Q, headers=_auth("x")).status_code == 503
+        assert admin_api.post(self._mp(o["id"]), headers=_auth("x")).status_code == 503
+
+    def test_reader_returns_only_pending(self, admin_api, stores):
+        _sr, orders, _p, _pe = stores
+        pend = self._pending(orders)
+        placed = orders.create_order({"run_id": "r2", "vendor_name": "V", "unit_price": 5.0})  # draft
+        orders.place_order(placed["id"], placed_by="A")   # -> placed
+        body = admin_api.get(self._Q, headers=_auth(_TOKEN)).json()
+        assert body["count"] == 1
+        assert [o["id"] for o in body["orders"]] == [pend["id"]]
+        assert body["orders"][0]["status"] == "pending_manual_fulfilment"
+
+    def test_mark_purchased_advances_and_appends_ref(self, admin_api, stores):
+        _sr, orders, _p, _pe = stores
+        o = self._pending(orders, notes="captured via order-now")   # existing notes
+        r = admin_api.post(self._mp(o["id"]), headers=_auth(_TOKEN), json={"reference": "GRA-99821"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "placed" and body["placed_by"] == "operator"
+        # appended, not clobbered
+        assert "captured via order-now" in body["notes"] and "GRA-99821" in body["notes"]
+        # drops out of the queue, but still exists
+        assert admin_api.get(self._Q, headers=_auth(_TOKEN)).json()["count"] == 0
+        assert orders.get_order(o["id"])["status"] == "placed"
+
+    def test_mark_purchased_no_ref_still_advances(self, admin_api, stores):
+        _sr, orders, _p, _pe = stores
+        o = self._pending(orders)
+        r = admin_api.post(self._mp(o["id"]), headers=_auth(_TOKEN), json={})
+        assert r.status_code == 200 and r.json()["status"] == "placed"
+
+    def test_mark_purchased_unknown_404(self, admin_api):
+        assert admin_api.post("/api/admin/orders/nope/mark-purchased",
+                              headers=_auth(_TOKEN), json={}).status_code == 404
+
+    def test_mark_purchased_non_pending_422_untouched(self, admin_api, stores):
+        _sr, orders, _p, _pe = stores
+        d = orders.create_order({"run_id": "r", "vendor_name": "V", "unit_price": 5.0})  # draft
+        assert admin_api.post(self._mp(d["id"]), headers=_auth(_TOKEN), json={}).status_code == 422
+        assert orders.get_order(d["id"])["status"] == "draft"   # untouched
+
+    def test_mark_purchased_already_placed_422(self, admin_api, stores):
+        _sr, orders, _p, _pe = stores
+        o = self._pending(orders)
+        assert admin_api.post(self._mp(o["id"]), headers=_auth(_TOKEN), json={"reference": "X"}).status_code == 200
+        assert admin_api.post(self._mp(o["id"]), headers=_auth(_TOKEN), json={}).status_code == 422  # now placed
+
+    def test_mark_purchased_priceless_409(self, admin_api, stores):
+        _sr, orders, _p, _pe = stores
+        o = orders.create_order({"run_id": "r", "vendor_name": "V"},   # no price
+                                initial_status="pending_manual_fulfilment")
+        assert admin_api.post(self._mp(o["id"]), headers=_auth(_TOKEN), json={}).status_code == 409

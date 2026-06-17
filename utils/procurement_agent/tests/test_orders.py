@@ -136,6 +136,19 @@ class TestPendingManualFulfilment:
         o = create_order(_buy_selection(), initial_status=STATUS_PENDING_FULFILMENT)
         assert update_order_status(o["id"], STATUS_SHIPPED) is None   # illegal transition rejected
 
+    def test_place_order_records_note(self, isolated):
+        # "mark purchased" path: place_order's new optional note records the marketplace ref.
+        from utils.orders import STATUS_PENDING_FULFILMENT
+        o = create_order(_buy_selection(), initial_status=STATUS_PENDING_FULFILMENT)
+        placed = place_order(o["id"], placed_by="operator", note="marketplace ref: ABC123")
+        assert placed["status"] == STATUS_PLACED and placed["placed_by"] == "operator"
+        assert placed["notes"] == "marketplace ref: ABC123"
+
+    def test_place_order_note_optional_backcompat(self, isolated):
+        o = create_order(_buy_selection())          # draft, no notes
+        placed = place_order(o["id"], placed_by="A")  # existing 2-arg call — note defaults None
+        assert placed["status"] == STATUS_PLACED and placed["notes"] is None
+
 
 # ---------------------------------------------------------------------------
 # Placement — deliberate, price-gated, once

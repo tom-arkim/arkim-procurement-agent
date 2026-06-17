@@ -267,13 +267,16 @@ def _set_status(order_id: str, new_status: str, *, placed_by: Optional[str] = No
     return get_order(order_id)
 
 
-def place_order(order_id: str, placed_by: Optional[str] = None) -> Optional[dict]:
+def place_order(order_id: str, placed_by: Optional[str] = None,
+                note: Optional[str] = None) -> Optional[dict]:
     """The deliberate HITL commitment: draft|pending_manual_fulfilment -> placed. The
     ONLY path to 'placed'.
 
     Refuses if the order isn't pre-placed (draft or pending_manual_fulfilment — no
     re-placing) or has no price (an order can't be placed without a price). Records
-    placed_by + timestamp. Returns the placed order, or None on rejection.
+    placed_by + timestamp, and an optional `note` (e.g. the marketplace order ref the
+    operator records when marking purchased). Returns the placed order, or None on
+    rejection. `note` defaults None so existing callers are unchanged.
 
     The pending_manual_fulfilment source is the marketplace path: an operator buys it
     on the marketplace, then "marks purchased" (increment 2) which calls this.
@@ -288,7 +291,7 @@ def place_order(order_id: str, placed_by: Optional[str] = None) -> Optional[dict
     if order.get("unit_price") is None:
         print(f"[Orders] place_order rejected: {order_id} has no price (cannot place)")
         return None
-    return _set_status(order_id, STATUS_PLACED, placed_by=placed_by)
+    return _set_status(order_id, STATUS_PLACED, placed_by=placed_by, note=note)
 
 
 def update_order_status(order_id: str, new_status: str) -> Optional[dict]:

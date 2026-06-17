@@ -2045,6 +2045,55 @@ def admin_orders(role: str = Depends(require_admin)):
     return {"count": len(rows), "orders": rows}
 
 
+@app.get("/api/admin/fulfilment-queue")
+def admin_fulfilment_queue(role: str = Depends(require_admin)):
+    """The operator fulfilment queue: orders awaiting a manual marketplace/supplier
+    purchase (status="pending_manual_fulfilment"). Operator-only / global (require_admin),
+    not tenant-scoped — admin is a cross-tenant ops surface. Mark one purchased via
+    POST /api/admin/orders/{id}/mark-purchased (it then drops out of this list)."""
+    from utils import orders
+    rows = orders.get_orders(status=orders.STATUS_PENDING_FULFILMENT)
+    return {"count": len(rows), "orders": rows}
+
+
+class MarkPurchasedRequest(BaseModel):
+    reference: Optional[str] = None
+
+
+@app.post("/api/admin/orders/{order_id}/mark-purchased")
+def admin_mark_purchased(order_id: str, body: MarkPurchasedRequest,
+                         role: str = Depends(require_admin)):
+    """Operator records that a pending_manual_fulfilment order was bought on the
+    marketplace/supplier: appends the reference to notes and advances pending -> placed
+    (the widened, price-gated place_order). Forward-only, auditable, no delete.
+
+    A dedicated path because /api/admin/orders/{id}/status refuses the 'placed' target by
+    design. placed_by is the constant "operator" — the admin surface has no authenticated
+    per-user identity (bearer only), so we don't accept a body-supplied operator name.
+    404 unknown; 422 if not pending_manual_fulfilment (won't touch drafts/placed/etc.);
+    409 if place_order rejects (e.g. no price)."""
+    from utils import orders
+    order = orders.get_order(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if order.get("status") != orders.STATUS_PENDING_FULFILMENT:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Order is '{order.get('status')}', not pending_manual_fulfilment",
+        )
+    # Compose-don't-clobber: append the ref to any existing notes (mirror cancel_order).
+    note = order.get("notes")
+    ref = (body.reference or "").strip()
+    if ref:
+        ref_note = f"marketplace ref: {ref}"
+        note = f"{note} | {ref_note}" if note else ref_note
+    placed = orders.place_order(order_id, placed_by="operator", note=note)
+    if placed is None:
+        raise HTTPException(status_code=409,
+                            detail="Cannot mark purchased (order has no price)")
+    return placed
+
+
 @app.get("/api/admin/prices")
 def admin_prices(role: str = Depends(require_admin)):
     """price_db entries flattened (key, vendor, price, source live|rfq, lead, ...),
