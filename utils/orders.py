@@ -64,6 +64,7 @@ _DDL = """
 CREATE TABLE IF NOT EXISTS orders (
     id              TEXT PRIMARY KEY,
     run_id          TEXT,
+    company_id      TEXT,
     manufacturer    TEXT,
     part_number     TEXT,
     vendor_name     TEXT,
@@ -82,11 +83,29 @@ CREATE TABLE IF NOT EXISTS orders (
 """
 
 
+# Columns added after the initial DDL. Nullable + idempotent ADD COLUMN, mirroring
+# supplier_registry._migrate (the 3a review_items link-keys pattern). create_all-only
+# per CLEANUP §3.2 — a fresh DB gets these from _DDL; an existing one via _migrate.
+_ADDED_COLUMNS: dict[str, str] = {
+    "company_id": "TEXT",   # D2 prereq #1 — tenant key (company PIN); NULL until identity lands
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotently add post-DDL columns if missing (PRAGMA-guarded; safe every connect)."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
+    for col, coltype in _ADDED_COLUMNS.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {col} {coltype}")
+    conn.commit()
+
+
 def _get_conn() -> sqlite3.Connection:
     os.makedirs(_DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)
     conn.execute(_DDL)
     conn.commit()
+    _migrate(conn)
     return conn
 
 
@@ -151,16 +170,22 @@ def _resolve_price(selection: dict, manufacturer: Optional[str],
 
 
 def create_order(selection: dict, quantity: int = 1,
-                 placed_by: Optional[str] = None) -> Optional[dict]:
+                 placed_by: Optional[str] = None,
+                 company_id: Optional[str] = None) -> Optional[dict]:
     """CAPTURE an order from a selected candidate. status='draft' — NOT placed.
 
     Pulls price from the selection, else price_db (buy 'live' or rfq 'rfq'). A draft
     may be created even if no price resolves; place_order then refuses to place it
     (an order can't be PLACED without a price). placed_by is recorded but placement
     is a separate deliberate action. Returns the order dict, or None on write failure.
+
+    company_id is the tenant key (D2 prereq #1): the caller passes the run's company_id;
+    falls back to selection["company_id"]; NULL when neither is set (the current demo).
     """
     from utils import supplier_registry
 
+    if company_id is None:
+        company_id = selection.get("company_id")
     manufacturer = selection.get("manufacturer")
     part_number = selection.get("part_number")
     vendor = selection.get("vendor_name")
@@ -176,6 +201,7 @@ def create_order(selection: dict, quantity: int = 1,
     order = {
         "id": str(uuid.uuid4()),
         "run_id": selection.get("run_id"),
+        "company_id": company_id,
         "manufacturer": manufacturer,
         "part_number": part_number,
         "vendor_name": vendor,
@@ -195,10 +221,10 @@ def create_order(selection: dict, quantity: int = 1,
         with closing(_get_conn()) as conn:
             conn.execute(
                 """INSERT INTO orders
-                   (id, run_id, manufacturer, part_number, vendor_name, supplier_domain,
+                   (id, run_id, company_id, manufacturer, part_number, vendor_name, supplier_domain,
                     unit_price, currency, quantity, lead_time, source, status,
                     created_at, updated_at, placed_by, notes)
-                   VALUES (:id,:run_id,:manufacturer,:part_number,:vendor_name,:supplier_domain,
+                   VALUES (:id,:run_id,:company_id,:manufacturer,:part_number,:vendor_name,:supplier_domain,
                            :unit_price,:currency,:quantity,:lead_time,:source,:status,
                            :created_at,:updated_at,:placed_by,:notes)""",
                 order,

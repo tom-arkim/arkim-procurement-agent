@@ -84,8 +84,11 @@ class ProcurementAgent:
                     "message": "No selected candidate to order.", "next_phase": None}
 
         placed_by = self._latest_approver(run)
+        # D2 prereq #1: carry the run's tenant key (company PIN) onto the order. getattr-
+        # safe — None until identity populates run.company_id (keys only, no enforcement).
         order = orders.create_order(selection, quantity=selection.get("quantity", 1),
-                                    placed_by=placed_by)
+                                    placed_by=placed_by,
+                                    company_id=getattr(run, "company_id", None))
         if not order:
             return {"success": False, "action": "execute", "order": None, "placed": False,
                     "message": "Order capture failed.", "next_phase": None}

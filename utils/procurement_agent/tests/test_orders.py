@@ -67,6 +67,36 @@ class TestCreateOrder:
         assert o["unit_price"] is None and o["status"] == STATUS_DRAFT
 
 
+class TestCompanyIdKey:
+    """D2 prereq #1 — orders carry a nullable tenant key (company PIN). Keys only;
+    no enforcement. The caller passes the run's company_id; NULL in the demo."""
+
+    def test_company_id_column_exists_post_migrate(self, isolated):
+        conn = isolated._get_conn()
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()}
+        conn.close()
+        assert "company_id" in cols
+
+    def test_create_order_stores_company_id_param(self, isolated):
+        o = create_order(_buy_selection(), company_id="PIN-XYZ")
+        assert o["company_id"] == "PIN-XYZ"
+        assert get_order(o["id"])["company_id"] == "PIN-XYZ"   # round-trips on read
+
+    def test_create_order_company_id_from_selection_fallback(self, isolated):
+        o = create_order(_buy_selection(company_id="PIN-SEL"))   # no param, in selection
+        assert o["company_id"] == "PIN-SEL"
+
+    def test_create_order_company_id_null_when_absent(self, isolated):
+        o = create_order(_buy_selection())   # neither param nor selection -> NULL (demo)
+        assert o["company_id"] is None
+
+    def test_migrate_idempotent(self, isolated):
+        conn = isolated._get_conn()
+        isolated._migrate(conn)   # second + third runs must not raise (column-exists guard)
+        isolated._migrate(conn)
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Placement — deliberate, price-gated, once
 # ---------------------------------------------------------------------------

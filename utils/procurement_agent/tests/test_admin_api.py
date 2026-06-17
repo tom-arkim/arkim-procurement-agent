@@ -380,6 +380,27 @@ class TestBuyerLoopEndpoints:
         listed = admin_api.get(f"/api/runs/{run['id']}/orders").json()
         assert listed["count"] == 1 and listed["orders"][0]["status"] == "placed"
 
+    def test_place_order_copies_run_company_id(self, admin_api, stores):
+        # D2 prereq #1: the order is stamped with its run's tenant key (company PIN),
+        # transitively (run_id -> run.company_id). Keys only — no scoping yet.
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS, company_id="PIN-XYZ")
+        item_id = sr.record_review_item(
+            "quote", {"unit_price": 88.0, "currency": "USD"}, status="confirmed",
+            run_id=run["id"], supplier_domain="acme.com", vendor_name="Acme",
+            manufacturer="Baldor", part_number="EM3770T")
+        o = admin_api.post(f"/api/review-items/{item_id}/place-order").json()["order"]
+        assert o["company_id"] == "PIN-XYZ"
+
+    def test_place_order_run_without_company_id_null(self, admin_api, stores):
+        sr, _o, _p, persistence = stores
+        run = persistence.create_run(asset_specs=_SPECS)   # no company_id (demo run)
+        item_id = sr.record_review_item(
+            "quote", {"unit_price": 50.0, "currency": "USD"}, status="confirmed",
+            run_id=run["id"], vendor_name="X", manufacturer="Baldor", part_number="EM3770T")
+        o = admin_api.post(f"/api/review-items/{item_id}/place-order").json()["order"]
+        assert o["company_id"] is None
+
     def test_place_order_requires_confirmed_quote(self, admin_api, stores):
         sr, _o, _p, persistence = stores
         run = persistence.create_run(asset_specs=_SPECS)

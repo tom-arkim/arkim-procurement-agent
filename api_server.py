@@ -80,6 +80,8 @@ def _migrate_schema() -> None:
             "ALTER TABLE sourcing_runs ADD COLUMN tier3_selection_json TEXT",
             "ALTER TABLE sourcing_runs ADD COLUMN maintenance_handoff_json TEXT",
             "ALTER TABLE sourcing_runs ADD COLUMN tier3_outreach_sent_json TEXT",
+            # D2 prereq #1 — nullable tenant key (company PIN). Keys only, no enforcement.
+            "ALTER TABLE sourcing_runs ADD COLUMN company_id VARCHAR(36)",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -838,12 +840,16 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
 # ---------------------------------------------------------------------------
 
 @app.post("/api/runs", response_model=CreateRunResponse, status_code=201)
-def create_run(body: CreateRunRequest):
-    """Create a new sourcing run and return it in intake phase."""
+def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_caller)):
+    """Create a new sourcing run and return it in intake phase.
+
+    D2 prereq #1 (keys only): stamp the run's tenant key (company PIN) from the verified
+    Caller when one is present — NEVER from the body. No token (today's demo) -> NULL."""
     now = datetime.now(timezone.utc)
     run = SourcingRunORM(
         id=str(uuid.uuid4()),
         facility_id=body.facility_id,
+        company_id=caller.company_id if caller else None,
         current_phase=Phase.INTAKE.value,
         urgency_factor=body.urgency_factor,
         warranty_status=body.warranty_status,
@@ -880,14 +886,19 @@ def list_runs(
 
 
 @app.post("/api/runs/from-maintenance", status_code=201)
-def create_run_from_maintenance(body: MaintenanceSubmission):
-    """Create a sourcing run in pending_intake from a maintenance handoff payload."""
+def create_run_from_maintenance(body: MaintenanceSubmission, caller: Optional[Caller] = Depends(get_caller)):
+    """Create a sourcing run in pending_intake from a maintenance handoff payload.
+
+    D2 prereq #1 (keys only): the tenant key (company PIN) comes from the validated
+    X-Arkim-CompanyId via the Caller (core forwards the user JWT + company + service
+    signature) — NEVER from the body's facility_id. Header absent (today) -> NULL."""
     now = datetime.now(timezone.utc)
     urgency_factor = _URGENCY_FACTORS.get(body.context.urgency, 0.3)
     handoff_dict = body.model_dump()
     run = SourcingRunORM(
         id=str(uuid.uuid4()),
         facility_id=body.facility_id,
+        company_id=caller.company_id if caller else None,
         current_phase=Phase.PENDING_INTAKE.value,
         urgency_factor=urgency_factor,
         warranty_status="unknown",
@@ -2088,7 +2099,14 @@ def place_order_from_quote(item_id: str):
         "lead_time": payload.get("lead_time"),
         "source": "rfq",
     }
-    order = orders.create_order(selection, quantity=int(payload.get("quantity") or 1), placed_by="buyer")
+    # D2 prereq #1: stamp the order with its run's tenant key (company PIN), transitively.
+    order_company_id = None
+    if item.get("run_id"):
+        with _SessionFactory() as session:
+            _run = session.get(SourcingRunORM, item["run_id"])
+            order_company_id = _run.company_id if _run else None
+    order = orders.create_order(selection, quantity=int(payload.get("quantity") or 1),
+                                placed_by="buyer", company_id=order_company_id)
     if not order:
         raise HTTPException(status_code=500, detail="Order capture failed")
     placed = orders.place_order(order["id"], placed_by="buyer")

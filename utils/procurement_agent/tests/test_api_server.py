@@ -121,6 +121,15 @@ def _read_history(client, run_id) -> list:
         return json.loads(run.approval_history_json) if run.approval_history_json else []
 
 
+def _read_run_company(client, run_id):
+    """Read the run's company_id column straight from the temp DB."""
+    SF = client._api_server._SessionFactory
+    ORM = client._api_server.SourcingRunORM
+    with SF() as session:
+        run = session.get(ORM, run_id)
+        return run.company_id if run else "<<missing>>"
+
+
 def _mk_caller(user_id, company="PIN1"):
     """A minimal authenticated Caller for injecting identity via dependency_overrides
     (no JWT/JWKS needed to exercise the endpoint's M1 behaviour)."""
@@ -420,6 +429,42 @@ class TestApprovalThresholdRouting:
         api.post(f"/api/runs/{rid}/select-candidate",
                  json={"candidate_id": "RFQ Co-t3-0", "tier": 3})
         assert _read_selected(api, rid)["_approval_path"]["approvers_required"] == 1
+
+
+# ---------------------------------------------------------------------------
+# D2 prereq #1 — the tenant key (company PIN) is stamped on a run from the VERIFIED
+# Caller (never the body), and stays NULL in the no-auth demo. Keys only — no scoping.
+# ---------------------------------------------------------------------------
+
+class TestTenantKeyOnRuns:
+    def _override(self, api, company):
+        from utils.auth import get_caller
+        api._api_server.app.dependency_overrides[get_caller] = lambda: _mk_caller("u", company)
+
+    def _clear(self, api):
+        from utils.auth import get_caller
+        api._api_server.app.dependency_overrides.pop(get_caller, None)
+
+    def test_manual_create_no_identity_company_null(self, api):
+        # The current demo: no token -> get_caller None -> company_id NULL (unchanged).
+        assert _read_run_company(api, _create_run(api)) is None
+
+    def test_manual_create_with_caller_sets_company(self, api):
+        self._override(api, "PIN1")
+        try:
+            assert _read_run_company(api, _create_run(api)) == "PIN1"
+        finally:
+            self._clear(api)
+
+    def test_from_maintenance_no_header_company_null(self, api):
+        assert _read_run_company(api, _create_pending(api, submission_id="t-d2-1")) is None
+
+    def test_from_maintenance_with_caller_sets_company(self, api):
+        self._override(api, "PIN2")
+        try:
+            assert _read_run_company(api, _create_pending(api, submission_id="t-d2-2")) == "PIN2"
+        finally:
+            self._clear(api)
 
 
 # ---------------------------------------------------------------------------

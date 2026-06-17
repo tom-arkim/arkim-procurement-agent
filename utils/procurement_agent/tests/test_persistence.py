@@ -43,6 +43,19 @@ def test_get_run_missing_returns_none(db_url):
     assert result is None
 
 
+# D2 prereq #1 — nullable tenant key (company PIN), separate from facility_id.
+def test_create_run_persists_company_id(db_url):
+    run = create_run(company_id="PIN-9", facility_id="fac-001", db_url=db_url)
+    assert run["company_id"] == "PIN-9"
+    assert run["facility_id"] == "fac-001"          # site label stays separate
+    assert get_run(run["id"], db_url=db_url)["company_id"] == "PIN-9"   # round-trips
+
+
+def test_create_run_company_id_defaults_null(db_url):
+    run = create_run(db_url=db_url)
+    assert run["company_id"] is None                # NULL until identity forwards it
+
+
 def test_update_run_changes_phase(db_url):
     run = create_run(db_url=db_url)
     updated = update_run(run["id"], {"current_phase": Phase.INVENTORY.value}, db_url=db_url)

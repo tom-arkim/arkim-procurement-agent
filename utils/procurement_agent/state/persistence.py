@@ -67,6 +67,11 @@ class SourcingRunORM(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     facility_id = Column(String(36), nullable=False, index=True)
+    # Tenant key (company PIN) — D2 prereq #1. NULLABLE and unused for enforcement this
+    # increment: populated from the validated X-Arkim-CompanyId / Caller.company_id when
+    # identity lands, NULL in the current no-auth demo. facility_id stays the SEPARATE
+    # site-level label (no rename; facility_id != Site.id reconciliation still open).
+    company_id = Column(String(36), nullable=True, index=True)
     initiated_by_user_id = Column(String(36), nullable=True)
     initiated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -185,6 +190,7 @@ def _orm_to_dict(row: SourcingRunORM) -> dict:
     return {
         "id": row.id,
         "facility_id": row.facility_id,
+        "company_id": getattr(row, "company_id", None),
         "initiated_by_user_id": row.initiated_by_user_id,
         "initiated_at": row.initiated_at.isoformat() if row.initiated_at else None,
         "current_phase": row.current_phase,
@@ -220,14 +226,17 @@ def create_run(
     warranty_status: str = "unknown",
     asset_specs: Optional[dict] = None,
     agent_version: str = "2.0.0-phase1",
+    company_id: Optional[str] = None,
     db_url: Optional[str] = None,
 ) -> dict:
-    """Insert a new SourcingRun and return it as a dict."""
+    """Insert a new SourcingRun and return it as a dict. company_id is the tenant PIN
+    (nullable; NULL until identity forwards it — D2 prereq #1, keys only)."""
     session = _get_session(db_url)
     try:
         row = SourcingRunORM(
             id=str(uuid.uuid4()),
             facility_id=facility_id,
+            company_id=company_id,
             initiated_by_user_id=initiated_by_user_id,
             initiated_at=datetime.now(timezone.utc),
             current_phase=Phase.INTAKE.value,
