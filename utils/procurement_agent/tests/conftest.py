@@ -44,7 +44,7 @@ def _neutralize_external_api_keys(monkeypatch):
     needs a key sets it explicitly (its own setenv/api_key=... runs after this
     autouse setup and wins).
     """
-    for var in ("APOLLO_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY"):
+    for var in ("APOLLO_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "PARALLEL_API_KEY"):
         monkeypatch.setenv(var, "")
     # Gmail is an external call too: with the google libs now installed, a real
     # GMAIL_SERVICE_ACCOUNT_FILE in .env would let a test build a live service and hit
