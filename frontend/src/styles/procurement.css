@@ -82,7 +82,7 @@
 .proc-dnav { width: 232px; flex: none; height: 100%; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 18px 13px 14px; }
 .proc-brand { display: flex; align-items: center; gap: 11px; padding: 4px 8px 18px; background: none; border: none; cursor: pointer; font: inherit; text-align: left; }
 .proc-brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r); }
-.proc-brand .bm { width: 32px; height: 32px; flex: none; border-radius: var(--r); background: var(--accent); border: 1px solid transparent; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; }
+.proc-brand .bm { width: 32px; height: 32px; flex: none; border-radius: var(--r); background: #000; border: 1px solid transparent; color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; }
 .proc-brand .bn { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; color: var(--text-strong); }
 .proc-navsite { display: flex; align-items: center; gap: 10px; padding: 10px 11px; margin-bottom: 16px; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface-2); cursor: pointer; transition: border-color 0.15s; }
 .proc-navsite:hover { border-color: var(--accent-line); }
