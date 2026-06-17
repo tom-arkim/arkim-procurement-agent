@@ -41,6 +41,10 @@ _DB_PATH = os.path.join(_DATA_DIR, "orders.sqlite")
 
 # Order status vocabulary.
 STATUS_DRAFT = "draft"
+# Manual marketplace fulfilment: an APPROVED marketplace order awaiting an operator to
+# buy it on the marketplace (Arkim is buyer-of-record). The operator then moves it
+# pending_manual_fulfilment -> placed ("mark purchased", increment 2).
+STATUS_PENDING_FULFILMENT = "pending_manual_fulfilment"
 STATUS_PLACED = "placed"
 STATUS_CONFIRMED = "confirmed"
 STATUS_SHIPPED = "shipped"
@@ -52,10 +56,11 @@ STATUS_CANCELLED = "cancelled"
 # sets). This ENFORCES the machine — illegal transitions (skip-ahead, backward,
 # un-cancel, re-place) are rejected, not merely recorded.
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-    STATUS_DRAFT:     {STATUS_PLACED, STATUS_CANCELLED},
-    STATUS_PLACED:    {STATUS_CONFIRMED, STATUS_CANCELLED},
-    STATUS_CONFIRMED: {STATUS_SHIPPED, STATUS_CANCELLED},
-    STATUS_SHIPPED:   {STATUS_RECEIVED, STATUS_CANCELLED},
+    STATUS_DRAFT:               {STATUS_PLACED, STATUS_CANCELLED},
+    STATUS_PENDING_FULFILMENT:  {STATUS_PLACED, STATUS_CANCELLED},   # operator buys -> placed
+    STATUS_PLACED:              {STATUS_CONFIRMED, STATUS_CANCELLED},
+    STATUS_CONFIRMED:           {STATUS_SHIPPED, STATUS_CANCELLED},
+    STATUS_SHIPPED:             {STATUS_RECEIVED, STATUS_CANCELLED},
     STATUS_RECEIVED:  set(),   # terminal
     STATUS_CANCELLED: set(),   # terminal
 }
@@ -171,8 +176,10 @@ def _resolve_price(selection: dict, manufacturer: Optional[str],
 
 def create_order(selection: dict, quantity: int = 1,
                  placed_by: Optional[str] = None,
-                 company_id: Optional[str] = None) -> Optional[dict]:
-    """CAPTURE an order from a selected candidate. status='draft' — NOT placed.
+                 company_id: Optional[str] = None,
+                 initial_status: str = STATUS_DRAFT) -> Optional[dict]:
+    """CAPTURE an order from a selected candidate. status=initial_status (default
+    "draft" — back-compat for all existing callers). NOT placed.
 
     Pulls price from the selection, else price_db (buy 'live' or rfq 'rfq'). A draft
     may be created even if no price resolves; place_order then refuses to place it
@@ -211,7 +218,7 @@ def create_order(selection: dict, quantity: int = 1,
         "quantity": int(quantity) if quantity is not None else 1,
         "lead_time": lead_time,
         "source": source,
-        "status": STATUS_DRAFT,
+        "status": initial_status,
         "created_at": now,
         "updated_at": now,
         "placed_by": None,           # set on place_order, not on capture
@@ -261,18 +268,22 @@ def _set_status(order_id: str, new_status: str, *, placed_by: Optional[str] = No
 
 
 def place_order(order_id: str, placed_by: Optional[str] = None) -> Optional[dict]:
-    """The deliberate HITL commitment: draft -> placed. The ONLY path to 'placed'.
+    """The deliberate HITL commitment: draft|pending_manual_fulfilment -> placed. The
+    ONLY path to 'placed'.
 
-    Refuses if the order isn't a draft (no re-placing) or has no price (an order
-    can't be placed without a price). Records placed_by + timestamp. Returns the
-    placed order, or None on rejection.
+    Refuses if the order isn't pre-placed (draft or pending_manual_fulfilment — no
+    re-placing) or has no price (an order can't be placed without a price). Records
+    placed_by + timestamp. Returns the placed order, or None on rejection.
+
+    The pending_manual_fulfilment source is the marketplace path: an operator buys it
+    on the marketplace, then "marks purchased" (increment 2) which calls this.
     """
     order = get_order(order_id)
     if not order:
         print(f"[Orders] place_order: {order_id!r} not found")
         return None
-    if order["status"] != STATUS_DRAFT:
-        print(f"[Orders] place_order rejected: {order_id} is '{order['status']}', not draft")
+    if order["status"] not in (STATUS_DRAFT, STATUS_PENDING_FULFILMENT):
+        print(f"[Orders] place_order rejected: {order_id} is '{order['status']}', not pre-placed")
         return None
     if order.get("unit_price") is None:
         print(f"[Orders] place_order rejected: {order_id} has no price (cannot place)")

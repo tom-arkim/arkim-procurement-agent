@@ -97,6 +97,46 @@ class TestCompanyIdKey:
         conn.close()
 
 
+class TestPendingManualFulfilment:
+    """Increment 1 groundwork: a marketplace order is created POST-approval in
+    pending_manual_fulfilment; an operator later moves it pending -> placed (inc 2)."""
+
+    def test_create_order_defaults_draft_backcompat(self, isolated):
+        # Every existing caller (no initial_status) still gets a draft.
+        assert create_order(_buy_selection())["status"] == STATUS_DRAFT
+
+    def test_create_order_honors_initial_status(self, isolated):
+        from utils.orders import STATUS_PENDING_FULFILMENT
+        o = create_order(_buy_selection(), initial_status=STATUS_PENDING_FULFILMENT)
+        assert o["status"] == STATUS_PENDING_FULFILMENT
+
+    def test_transitions_table_has_pending(self, isolated):
+        from utils import orders as o
+        assert o.ALLOWED_TRANSITIONS[o.STATUS_PENDING_FULFILMENT] == {o.STATUS_PLACED, o.STATUS_CANCELLED}
+
+    def test_place_order_accepts_pending_manual_fulfilment(self, isolated):
+        from utils.orders import STATUS_PENDING_FULFILMENT
+        o = create_order(_buy_selection(), initial_status=STATUS_PENDING_FULFILMENT)
+        placed = place_order(o["id"], placed_by="Operator")   # inc-2 "mark purchased"
+        assert placed is not None and placed["status"] == STATUS_PLACED
+
+    def test_place_order_from_pending_still_price_gated(self, isolated):
+        from utils.orders import STATUS_PENDING_FULFILMENT
+        sel = {"run_id": "r", "manufacturer": "X", "part_number": "Y", "vendor_name": "V"}  # no price
+        o = create_order(sel, initial_status=STATUS_PENDING_FULFILMENT)
+        assert place_order(o["id"], placed_by="Op") is None   # no price -> cannot place
+
+    def test_pending_can_be_cancelled(self, isolated):
+        from utils.orders import STATUS_PENDING_FULFILMENT
+        o = create_order(_buy_selection(), initial_status=STATUS_PENDING_FULFILMENT)
+        assert cancel_order(o["id"], reason="changed mind")["status"] == STATUS_CANCELLED
+
+    def test_pending_cannot_skip_to_shipped(self, isolated):
+        from utils.orders import STATUS_PENDING_FULFILMENT, STATUS_SHIPPED
+        o = create_order(_buy_selection(), initial_status=STATUS_PENDING_FULFILMENT)
+        assert update_order_status(o["id"], STATUS_SHIPPED) is None   # illegal transition rejected
+
+
 # ---------------------------------------------------------------------------
 # Placement — deliberate, price-gated, once
 # ---------------------------------------------------------------------------
