@@ -210,6 +210,19 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 
 ---
 
+### 5.5 Search-provider interface + Parallel.ai adapter — built; live sourcing path NOT yet routed
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/search_providers.py` (`SearchProvider` / `TavilyProvider` / `ParallelProvider` / `get_search_provider`); `scripts/parallel_ab_probe.py` (opt-in live A/B) |
+| **Kind** | §9 search-provider foundation landed; the live sourcing-path rewire is a deliberate, **separately-reviewed** follow-up (touches §6 archived code). |
+| **What landed** | The swappable interface + a Tavily wrapper (behaviour-identical, late-bound to `_arch._tavily`) + the Parallel.ai `/v1/search` adapter (x-api-key, objective + search_queries, multi-excerpt results preserved, fail-soft/no-op without a key) + `get_search_provider(SEARCH_PROVIDER, default tavily)`. The opt-in probe runs both live for comparison. Unit suite fully mocked; `PARALLEL_API_KEY` added to the conftest key-neutralizer. |
+| **NOT done (the deferred bit)** | The live sourcing path still calls Tavily **directly** at **five sites in the §6 archived zone** — `tavily_client._search_vendor_prices` (×2), `enterprise_search.py:424` & `:701`, and `sourcing_agent._capability_search:1000` — each with per-site params (`search_depth="advanced"` on four, omitted on one; `max_results` 5/8/10/15; `include_domains` on one). Nothing routes through `get_search_provider()` yet, so **`SEARCH_PROVIDER=parallel` does NOT change real sourcing** — only the probe uses Parallel. |
+| **Risk / impact** | None today (additive; default Tavily; sourcing untouched, byte-identical). The gap: provider selection is real at the factory but not consumed by the pipeline. |
+| **Recommended action** | Route the five call sites through `get_search_provider().search(...)`, passing each site's existing params verbatim (so Tavily stays byte-identical) — a careful pass per §6 (audit `SourcingAgent` call sites; keep `test_tavily_client` / `test_sourcing_agent` green). Then `SEARCH_PROVIDER=parallel` switches real sourcing. Consider the §9 "query-both, route-by-quality" dual-run only after the single-swap lands. |
+
+---
+
 ## 6. Documentation
 
 ### 6.1 `WHATS_NEXT.md` — stale Streamlit-era document, superseded by this file

@@ -68,6 +68,15 @@ class TestParallelProvider:
         assert "Excerpt one." in r["content"] and "Excerpt two." in r["content"]  # joined parity field
         assert r["publish_date"] == "2024-01-02"
 
+    def test_captures_usage_meta_for_probe(self, monkeypatch):
+        monkeypatch.setattr(search_providers.httpx, "post", lambda *a, **k: _Resp(200, {
+            "search_id": "sid", "results": [], "usage": [{"name": "search", "count": 1}],
+            "warnings": None}))
+        p = ParallelProvider(api_key="k")
+        p.search("x")
+        assert p.last_meta["search_id"] == "sid"
+        assert p.last_meta["usage"] == [{"name": "search", "count": 1}]   # cost signal for the A/B probe
+
     def test_sends_mode_when_configured(self, monkeypatch):
         captured = {}
         monkeypatch.setattr(search_providers.httpx, "post",

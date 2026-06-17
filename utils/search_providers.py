@@ -115,6 +115,10 @@ class ParallelProvider:
                           or _PARALLEL_DEFAULT_BASE_URL).rstrip("/")
         self._mode = mode if mode is not None else os.environ.get(ENV_PARALLEL_MODE)
         self._timeout = timeout
+        # Diagnostics side-channel (usage/warnings/search_id from the last 200 response) —
+        # the normalized search() return is just results; the A/B probe reads this for the
+        # cost/usage signal. Per-instance, not used by the sourcing path.
+        self.last_meta: dict = {}
 
     def search(self, query: str, *, max_results: int = 10,
                search_depth: Optional[str] = None,   # accepted for interface parity; unused
@@ -152,6 +156,11 @@ class ParallelProvider:
             log.warning("[search.parallel] request failed: %s", exc)
             return []
 
+        self.last_meta = {
+            "search_id": data.get("search_id"),
+            "usage":     data.get("usage"),
+            "warnings":  data.get("warnings"),
+        }
         out: list[dict] = []
         for r in (data.get("results") or []):
             excerpts = [e for e in (r.get("excerpts") or []) if e]
