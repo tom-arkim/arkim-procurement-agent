@@ -26,7 +26,7 @@ const TOKEN_KEY = "arkim_admin_token";
 
 type Tab =
   | "runs" | "suppliers" | "sent-messages" | "review-queue" | "orders" | "prices"
-  | "unmatched-replies";
+  | "unmatched-replies" | "fulfilment";
 
 const TABS: { id: Tab; label: string; path: string; listKey: string }[] = [
   { id: "runs", label: "Runs", path: "/runs", listKey: "runs" },
@@ -34,6 +34,7 @@ const TABS: { id: Tab; label: string; path: string; listKey: string }[] = [
   { id: "sent-messages", label: "Sent Messages", path: "/sent-messages", listKey: "sent_messages" },
   { id: "review-queue", label: "Review Queue", path: "/review-queue", listKey: "review_items" },
   { id: "unmatched-replies", label: "Unmatched Replies", path: "/unmatched-replies", listKey: "unmatched_replies" },
+  { id: "fulfilment", label: "Fulfilment", path: "/fulfilment-queue", listKey: "orders" },
   { id: "orders", label: "Orders", path: "/orders", listKey: "orders" },
   { id: "prices", label: "Prices", path: "/prices", listKey: "prices" },
 ];
@@ -54,10 +55,14 @@ async function fetchAdmin(path: string, token: string): Promise<FetchResult> {
   return { ok: res.ok, status: res.status, body };
 }
 
-async function postAdmin(path: string, token: string): Promise<FetchResult> {
+async function postAdmin(path: string, token: string, payload?: unknown): Promise<FetchResult> {
   const res = await fetch(`${API_BASE}/api/admin${path}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(payload !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(payload !== undefined ? { body: JSON.stringify(payload) } : {}),
   });
   const text = await res.text();
   let body: unknown;
@@ -95,6 +100,8 @@ export default function AdminInspectorPage() {
   const [loading, setLoading] = useState(false);
   const [detail, setDetail] = useState<FetchResult | null>(null);
   const [expanded, setExpanded] = useState<number | null>(null);
+  // Per-row ref/tracking input for the Fulfilment "mark purchased" action.
+  const [refInputs, setRefInputs] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const saved = typeof window !== "undefined" ? window.localStorage.getItem(TOKEN_KEY) : null;
@@ -137,6 +144,17 @@ export default function AdminInspectorPage() {
     const r = await postAdmin(`/unmatched-replies/${id}/dismiss`, token);
     if (r.ok) load(tab);        // refresh — a dismissed row drops out of the open list
     else setResult(r);          // surface a gate/guard error in the existing error panel
+  }
+
+  async function markPurchased(id: string) {
+    const reference = (refInputs[id] ?? "").trim();
+    const r = await postAdmin(`/orders/${id}/mark-purchased`, token, { reference });
+    if (r.ok) {
+      setRefInputs((s) => { const n = { ...s }; delete n[id]; return n; });
+      load(tab);                // pending -> placed: the row drops out of the queue
+    } else {
+      setResult(r);             // surface a gate/guard error in the existing error panel
+    }
   }
 
   // Token gate (UI-side convenience; the API is the real gate).
@@ -240,7 +258,7 @@ export default function AdminInspectorPage() {
                         {c}
                       </th>
                     ))}
-                    {tab === "unmatched-replies" && (
+                    {(tab === "unmatched-replies" || tab === "fulfilment") && (
                       <th className="py-1 pr-3 font-normal">action</th>
                     )}
                   </tr>
@@ -283,10 +301,30 @@ export default function AdminInspectorPage() {
                             </button>
                           </td>
                         )}
+                        {tab === "fulfilment" && (
+                          <td className="py-1 pr-3" onClick={(e) => e.stopPropagation()}>
+                            <div className="flex items-center gap-2">
+                              <input
+                                value={refInputs[String(row.id)] ?? ""}
+                                onChange={(e) =>
+                                  setRefInputs((s) => ({ ...s, [String(row.id)]: e.target.value }))
+                                }
+                                placeholder="marketplace ref / tracking"
+                                className="rounded border border-hr-2 bg-bg-3 px-2 py-0.5 text-fg-1 w-[180px]"
+                              />
+                              <button
+                                className="rounded border border-hr-2 px-2 py-0.5 text-fg-2 hover:bg-bg-4 whitespace-nowrap"
+                                onClick={() => markPurchased(String(row.id))}
+                              >
+                                Mark purchased
+                              </button>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                       {expanded === i && (
                         <tr key={`${i}-raw`} className="bg-bg-3">
-                          <td colSpan={cols.length + 1 + (tab === "unmatched-replies" ? 1 : 0)} className="p-3">
+                          <td colSpan={cols.length + 1 + (tab === "unmatched-replies" || tab === "fulfilment" ? 1 : 0)} className="p-3">
                             <pre className="whitespace-pre-wrap text-[10.5px] text-fg-2">
                               {JSON.stringify(row, null, 2)}
                             </pre>
