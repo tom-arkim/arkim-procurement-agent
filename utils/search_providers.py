@@ -39,6 +39,32 @@ ENV_SEARCH_PROVIDER = "SEARCH_PROVIDER"
 _PARALLEL_DEFAULT_BASE_URL = "https://api.parallel.ai"
 _PARALLEL_TIMEOUT_S = 30.0   # Parallel can be slower than Tavily; sane upper bound.
 
+# Heuristic anti-bot / junk excerpt signatures (case-insensitive substring). An excerpt
+# matching any is DROPPED before it becomes `content` — these are page-block walls, not
+# document text, and would poison downstream authority scoring + price extraction (seen
+# live: Parallel returned a "Pardon Our Interruption" wall as the only excerpt for a
+# gouldspumps PDF). Tunable — extend as new phrasings appear. Drops the EXCERPT, NEVER
+# the URL (the candidate may still be valid; only the excerpt is noise).
+_BLOCKED_EXCERPT_SIGNATURES: tuple[str, ...] = (
+    "pardon our interruption",
+    "are you a robot",
+    "enable javascript and cookies",
+    "verify you are human",
+    "access denied",
+    "request blocked",
+)
+
+
+def _usable_excerpt(text: Optional[str]) -> bool:
+    """False for empty/whitespace/'...' or a known anti-bot wall; True for real text."""
+    if not text:
+        return False
+    t = str(text).strip()
+    if not t or t == "...":
+        return False
+    tl = t.lower()
+    return not any(sig in tl for sig in _BLOCKED_EXCERPT_SIGNATURES)
+
 
 class SearchProvider(Protocol):
     """The swappable contract. `search_depth` (Tavily) and `objective` (Parallel) are
@@ -163,16 +189,27 @@ class ParallelProvider:
         }
         out: list[dict] = []
         for r in (data.get("results") or []):
-            excerpts = [e for e in (r.get("excerpts") or []) if e]
+            raw_excerpts = r.get("excerpts") or []
+            # Drop anti-bot walls / empty excerpts so they never reach `content` (the
+            # field downstream authority-scoring + price-extraction read).
+            usable = [e for e in raw_excerpts if _usable_excerpt(e)]
+            # "Result present, excerpt unusable": keep the URL (a valid candidate) with
+            # EMPTY content — never fabricate text, never drop the URL over a bad excerpt.
+            unusable = bool(raw_excerpts) and not usable
+            if unusable:
+                log.info("[search.parallel] excerpt for %s was anti-bot/empty — content blanked",
+                         r.get("url"))
             out.append({
-                "url":          r.get("url"),
-                "title":        r.get("title"),
+                "url":            r.get("url"),
+                "title":          r.get("title"),
                 # Common field for parity with Tavily's single `content` (downstream
-                # authority scoring reads it) — joined from Parallel's markdown excerpts.
-                "content":      "\n\n".join(excerpts),
-                # Parallel's richer fields, PRESERVED (not flattened to one snippet).
-                "excerpts":     excerpts,
-                "publish_date": r.get("publish_date"),
+                # authority scoring reads it) — joined from the USABLE markdown excerpts.
+                "content":        "\n\n".join(usable),
+                # Parallel's richer fields, PRESERVED (not flattened to one snippet) —
+                # only the noise excerpts are removed.
+                "excerpts":       usable,
+                "publish_date":   r.get("publish_date"),
+                "excerpt_unusable": unusable,
             })
         return out
 

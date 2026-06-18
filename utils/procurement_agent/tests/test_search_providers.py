@@ -84,6 +84,42 @@ class TestParallelProvider:
         ParallelProvider(api_key="k", mode="base").search("x")
         assert captured["json"]["mode"] == "base"
 
+    def _post_results(self, monkeypatch, results):
+        monkeypatch.setattr(search_providers.httpx, "post",
+                            lambda *a, **k: _Resp(200, {"results": results}))
+
+    def test_drops_anti_bot_excerpt_keeps_url(self, monkeypatch):
+        # The live gouldspumps case: the ONLY excerpt is a bot wall. Keep the URL,
+        # blank the content, no wall text leaks into `content`.
+        self._post_results(monkeypatch, [
+            {"url": "https://goulds.com/iom.pdf", "title": "IOM",
+             "excerpts": ["# Pardon Our Interruption\nAs you were browsing..."]}])
+        r = ParallelProvider(api_key="k").search("x")[0]
+        assert r["url"] == "https://goulds.com/iom.pdf"   # URL preserved (valid candidate)
+        assert r["content"] == "" and r["excerpts"] == []
+        assert "pardon our interruption" not in r["content"].lower()
+        assert r["excerpt_unusable"] is True
+
+    def test_drops_empty_and_ellipsis_excerpts(self, monkeypatch):
+        self._post_results(monkeypatch, [{"url": "u", "title": "t", "excerpts": ["...", "   "]}])
+        r = ParallelProvider(api_key="k").search("x")[0]
+        assert r["content"] == "" and r["excerpt_unusable"] is True
+
+    def test_mixed_excerpts_keep_clean_drop_walls(self, monkeypatch):
+        self._post_results(monkeypatch, [
+            {"url": "u", "title": "t",
+             "excerpts": ["Real price $42.", "Access Denied", "In stock."]}])
+        r = ParallelProvider(api_key="k").search("x")[0]
+        assert r["excerpts"] == ["Real price $42.", "In stock."]   # only the wall dropped
+        assert "access denied" not in r["content"].lower()
+        assert r["excerpt_unusable"] is False                      # had usable excerpts
+
+    def test_clean_excerpts_unchanged(self, monkeypatch):
+        self._post_results(monkeypatch, [{"url": "u", "title": "t",
+                                          "excerpts": ["Clean one.", "Clean two."]}])
+        r = ParallelProvider(api_key="k").search("x")[0]
+        assert r["excerpts"] == ["Clean one.", "Clean two."] and r["excerpt_unusable"] is False
+
     def test_422_returns_empty(self, monkeypatch):
         monkeypatch.setattr(search_providers.httpx, "post",
                             lambda *a, **k: _Resp(422, {"type": "error"}, text='{"type":"error"}'))
