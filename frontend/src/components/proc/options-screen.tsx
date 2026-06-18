@@ -118,16 +118,11 @@ export function OptionsScreen({ runId }: { runId: string }) {
       {
         onSuccess: (res) => {
           setConfirmMktId(null);
-          if (res.pending_approval) {
-            // Above the approval threshold: there's nothing to track on this options
-            // page yet (the order materialises post-approval), so take the user to their
-            // dashboard where the run now shows as "Awaiting approval".
-            fire("Submitted for approval — track it on your dashboard.");
-            router.push("/");
-          } else {
-            // Sub-threshold: the order exists now and renders below as "Being purchased".
-            fire("Arkim is purchasing this for you — track it in Order.");
-          }
+          // Both paths now stay on the run page — OrderSection shows the status below
+          // ("Awaiting approval" pre-approval, "Being purchased" once the order exists).
+          fire(res.pending_approval
+            ? "Submitted for approval — see status below."
+            : "Arkim is purchasing this for you — see status below.");
         },
         onError: () => {
           fire("Couldn't submit the order — please try again.");
@@ -196,10 +191,9 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const selectedVendor = options.find((c) => c.id === selectedId)?.vendorName;
 
   function viewStatus() {
-    // No per-run view for the pre-order awaiting-approval state → dashboard (reusing the
-    // nav-fix destination); otherwise scroll to the OrderSection status/tracking view.
-    if (awaitingApproval) router.push("/");
-    else orderRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    // OrderSection now covers every committed state (awaiting approval → being purchased
+    // → placed → delivered), so the status view is always in-page — scroll to it.
+    orderRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   return (

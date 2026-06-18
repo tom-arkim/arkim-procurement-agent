@@ -17,7 +17,7 @@ import { useOrders, useExecuteOrder, useMarkDelivered, useRunLive, useSiteShipTo
 import { ProcIcon } from "./proc-icon";
 import { procMoney } from "./proc-ui";
 import { defaultShipTo, PRIMARY_SITE } from "@/lib/proc-config";
-import type { Order, OrderStatus, Phase } from "@/types";
+import type { Candidate, Order, OrderStatus, Phase, SourcingRunDetail } from "@/types";
 
 const FLOW = ["placed", "confirmed", "shipped", "received"] as const;
 type FlowStatus = (typeof FLOW)[number];
@@ -50,8 +50,13 @@ export function OrderSection({ runId }: { runId: string }) {
   const cancelled = orders.find((o) => o.status === "cancelled");
   const phase = (run?.phase ?? "") as Phase;
   const canPlace = ["approved", "executing"].includes(phase);
+  // Above-threshold order-now: the spend is in approval and NO order exists yet (the
+  // order materialises post-approval). This is the lifecycle step before "being
+  // purchased" — give it a status panel so /parts/[id] covers the whole lifecycle.
+  const awaiting = ["pending_first_approval", "pending_second_approval"].includes(phase)
+    && !placed && !pendingManual && !draft;
 
-  if (!placed && !pendingManual && !draft && !cancelled && !canPlace) return null;
+  if (!placed && !pendingManual && !draft && !cancelled && !canPlace && !awaiting) return null;
 
   const noPrice = Boolean(draft) || execute.data?.placed === false;
 
@@ -64,6 +69,8 @@ export function OrderSection({ runId }: { runId: string }) {
         <OrderTracking runId={runId} order={placed} />
       ) : pendingManual ? (
         <BeingPurchased order={pendingManual} />
+      ) : awaiting && run ? (
+        <AwaitingApproval run={run} />
       ) : cancelled && !canPlace ? (
         <div className="rc-note">This order was cancelled.</div>
       ) : (
@@ -155,6 +162,50 @@ function PlaceOrderCard({
             </button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+function AwaitingApproval({ run }: { run: SourcingRunDetail }) {
+  // Above-threshold pre-order state: the selection is in approval; no order exists yet.
+  // Same honest treatment as BeingPurchased — no placed/shipped steps (nothing's bought).
+  const sel = run.selected_candidate as
+    (Candidate & { candidate_id?: string; quantity?: number;
+      _approval_path?: { approvers_required?: number; grand_total_usd?: number } }) | undefined;
+  const ap = sel?._approval_path;
+  const required = ap?.approvers_required ?? 1;
+  const total = ap?.grand_total_usd;
+  const qty = sel?.quantity ?? 1;
+
+  // Vendor from the run's sourcing results, matched by the selection's candidate_id.
+  const all: Candidate[] = [
+    ...(run.sourcing_results?.tier1 ?? []),
+    ...(run.sourcing_results?.tier2 ?? []),
+    ...(run.sourcing_results?.tier3 ?? []),
+  ];
+  const selectedId = sel?.candidate_id ?? run.selected_candidate?.id;
+  const vendor = all.find((c) => c.id === selectedId)?.vendorName ?? "the selected supplier";
+
+  const secondPending = run.phase === "pending_second_approval";
+  const statusLine = secondPending
+    ? "Awaiting second approval."
+    : `Awaiting approval — ${required} approver${required === 1 ? "" : "s"} required.`;
+
+  return (
+    <div className="proc-track">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{vendor}</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
+            {total != null ? procMoney(total) : "—"}
+            {qty ? ` · qty ${qty}` : ""}
+          </div>
+        </div>
+        <span className="proc-pill" data-tone="open"><span className="d" />Awaiting approval</span>
+      </div>
+      <div className="rc-note">
+        {statusLine} You&apos;ll see purchasing and delivery tracking here once it&apos;s approved.
       </div>
     </div>
   );
