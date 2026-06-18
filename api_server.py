@@ -1389,6 +1389,42 @@ class OrderNowRequest(BaseModel):
     quantity: int = 1
 
 
+# Phases that mean the run's single selection/approval cycle is already committed
+# (past the options stage) — order-now is once per run ("buying => selecting").
+_COMMITTED_PHASES: set[str] = {
+    Phase.PENDING_FIRST_APPROVAL.value, Phase.PENDING_SECOND_APPROVAL.value,
+    Phase.APPROVED.value, Phase.EXECUTING.value, Phase.FULFILLING.value, Phase.COMPLETED.value,
+}
+
+
+def _transition_run(run: SourcingRunORM, target: Phase) -> bool:
+    """Apply a run phase transition THROUGH the state machine (never a direct set, so a
+    run can't be moved backwards illegally). Returns True if applied/already-there."""
+    from utils.procurement_agent.state.phases import Phase as _P, validate_transition
+    current = _P(run.current_phase)
+    if current == target:
+        return True
+    if validate_transition(current, target):
+        run.current_phase = target.value
+        return True
+    return False
+
+
+def _run_already_committed(run: SourcingRunORM, run_id: str, orders_mod) -> bool:
+    """True if the run already has a committed order/selection — the double-order guard.
+    Three independent signals (defence-in-depth): committed phase, an existing order, or
+    a manual-fulfilment selection already recorded."""
+    if run.current_phase in _COMMITTED_PHASES:
+        return True
+    if orders_mod.get_orders(run_id=run_id):
+        return True
+    try:
+        sel = json.loads(run.selected_candidate_json) if run.selected_candidate_json else {}
+    except (ValueError, TypeError):
+        sel = {}
+    return isinstance(sel, dict) and sel.get("fulfilment") == "manual"
+
+
 def _reconstruct_candidate(sourcing_results_json: Optional[str], candidate_id: str, tier: int) -> Optional[dict]:
     """Return the raw candidate dict from a run's stored sourcing results by rebuilding
     its positional display id (`{vendor}-t{tier}-{idx}`) — the AUTHORITATIVE source
@@ -1433,6 +1469,16 @@ def create_order_now(run_id: str, body: OrderNowRequest):
         run = session.get(SourcingRunORM, run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
+
+        # Committed-run guard (DOUBLE-ORDER safety): order-now is once per run. A repeat
+        # call would otherwise create a second order (sub-threshold) or clobber the
+        # selection + reset approval (at/above). Reject a run that's already committed.
+        if _run_already_committed(run, run_id, orders):
+            raise HTTPException(
+                status_code=409,
+                detail="This run already has a committed order — start a new request to order another part.",
+            )
+
         cand = _reconstruct_candidate(run.sourcing_results_json, body.candidate_id, body.tier)
         if cand is None:
             raise HTTPException(status_code=404, detail="Candidate not found in this run")
@@ -1475,16 +1521,22 @@ def create_order_now(run_id: str, body: OrderNowRequest):
         }
 
         if approvers_required >= 1:
-            # At/above threshold: run-phase approval; NO order yet (Model A).
+            # At/above threshold: run-phase approval; NO order yet (Model A). Route the
+            # transition THROUGH the state machine (no direct set / no backward move).
             run.selected_candidate_json = json.dumps(selected)
-            run.current_phase = Phase.PENDING_FIRST_APPROVAL.value
+            _transition_run(run, Phase.PENDING_FIRST_APPROVAL)
             run.updated_at = now
+            phase = run.current_phase
             session.commit()
-            return {"pending_approval": True, "order": None,
-                    "phase": Phase.PENDING_FIRST_APPROVAL.value}
+            return {"pending_approval": True, "order": None, "phase": phase}
 
-        # Sub-threshold (auto-approved): create the order now, operator-fulfillable.
+        # Sub-threshold (auto-approved, 0 approvers): advance the run THROUGH approval so
+        # "committed" is reflected by phase (comparison -> pending_first -> approved, both
+        # validated), then create the operator-fulfillable order. Safe with OrderSection,
+        # which renders BeingPurchased (the pending order) over the place-order card.
         run.selected_candidate_json = json.dumps(selected)
+        _transition_run(run, Phase.PENDING_FIRST_APPROVAL)
+        _transition_run(run, Phase.APPROVED)
         run.updated_at = now
         company_id = run.company_id
         specs = json.loads(run.asset_specs_json) if run.asset_specs_json else {}

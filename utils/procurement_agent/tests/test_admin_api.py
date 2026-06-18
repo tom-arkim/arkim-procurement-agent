@@ -638,6 +638,45 @@ class TestOrderNow:
                            json={"candidate_id": "Grainger-t2-0", "tier": 2, "unit_price": 1}).json()["order"]
         assert o["unit_price"] == 40.0     # from the stored candidate, not the body
 
+    # --- committed-run guard (double-order safety) ---
+
+    def test_double_order_sub_threshold_rejected(self, admin_api, stores):
+        _sr, orders, _p, persistence = stores
+        persistence.upsert_approval_rule("fac-mp", 0, 0, [])
+        rid = self._setup(persistence, _MKTPL_RAW)
+        assert admin_api.post(self._order(rid), json={"candidate_id": "Grainger-t2-0", "tier": 2}).status_code == 200
+        # Repeat -> 409, and NO second order is created.
+        assert admin_api.post(self._order(rid), json={"candidate_id": "Grainger-t2-0", "tier": 2}).status_code == 409
+        assert len(orders.get_orders(run_id=rid)) == 1
+
+    def test_repeat_at_or_above_rejected_no_state_change(self, admin_api, stores):
+        _sr, orders, _p, persistence = stores
+        rid = self._setup(persistence, _MKTPL_RAW_HIGH)
+        admin_api.post(self._order(rid), json={"candidate_id": "Grainger-t2-0", "tier": 2})
+        before = persistence.get_run(rid)
+        assert admin_api.post(self._order(rid), json={"candidate_id": "Grainger-t2-0", "tier": 2}).status_code == 409
+        after = persistence.get_run(rid)
+        # Selection + approval state NOT clobbered; phase NOT reset backwards.
+        assert after["current_phase"] == before["current_phase"] == "pending_first_approval"
+        assert after["selected_candidate_json"] == before["selected_candidate_json"]
+        assert orders.get_orders(run_id=rid) == []
+
+    def test_committed_by_phase_rejected(self, admin_api, stores):
+        _sr, _o, _p, persistence = stores
+        rid = self._setup(persistence, _MKTPL_RAW)
+        persistence.update_run(rid, {"current_phase": "approved"})   # committed by phase
+        assert admin_api.post(self._order(rid), json={"candidate_id": "Grainger-t2-0", "tier": 2}).status_code == 409
+
+    def test_sub_threshold_advances_to_approved_via_state_machine(self, admin_api, stores):
+        _sr, orders, _p, persistence = stores
+        persistence.upsert_approval_rule("fac-mp", 0, 0, [])
+        rid = self._setup(persistence, _MKTPL_RAW)
+        admin_api.post(self._order(rid), json={"candidate_id": "Grainger-t2-0", "tier": 2})
+        run = persistence.get_run(rid)
+        assert run["current_phase"] == "approved"        # comparison -> first -> approved (auto)
+        rows = orders.get_orders(run_id=rid)
+        assert len(rows) == 1 and rows[0]["status"] == "pending_manual_fulfilment"
+
 
 class TestUnmatchedReplies:
     _GET = "/api/admin/unmatched-replies"
