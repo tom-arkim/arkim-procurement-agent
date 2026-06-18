@@ -42,6 +42,9 @@ function phasePill(phase: Phase): { label: string; tone: ProcTone } {
 
 function decisionCard(phase: Phase): { title: string; cta: string; tone: "ready" | "act"; icon: "mail" | "box" } {
   if (phase === "comparison") return { title: "Quotes ready to review", cta: "Review", tone: "ready", icon: "mail" };
+  // Awaiting approval — NOT yet placeable (don't mislabel it "Place order"). View only.
+  if (phase === "pending_first_approval" || phase === "pending_second_approval")
+    return { title: "Awaiting approval", cta: "View", tone: "ready", icon: "box" };
   return { title: "Ready to place an order", cta: "Place order", tone: "act", icon: "box" };
 }
 

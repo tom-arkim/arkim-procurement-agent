@@ -11,9 +11,9 @@
  * this screen is the read-and-decide surface.
  */
 
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRunLive, useOrderNow } from "@/lib/queries";
+import { useRunLive, useOrderNow, useOrders } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
@@ -103,6 +103,8 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const router = useRouter();
   const fire = useProcToast();
   const { data: run, isLoading, isError, refetch } = useRunLive(runId);
+  const { data: ordersData } = useOrders(runId);
+  const orderRef = useRef<HTMLDivElement>(null);
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
   // "Order" / "Order through Arkim" on any priced candidate: an UNCONDITIONAL confirm
   // step (so a click can't accidentally select/buy), then the order-now call. Buying ⇒
@@ -115,10 +117,17 @@ export function OptionsScreen({ runId }: { runId: string }) {
       { candidate_id: c.id, tier: c.tier, quantity: 1 },
       {
         onSuccess: (res) => {
-          fire(res.pending_approval
-            ? "Submitted for approval — you'll be able to track it once approved."
-            : "Arkim is purchasing this for you — track it in Order.");
           setConfirmMktId(null);
+          if (res.pending_approval) {
+            // Above the approval threshold: there's nothing to track on this options
+            // page yet (the order materialises post-approval), so take the user to their
+            // dashboard where the run now shows as "Awaiting approval".
+            fire("Submitted for approval — track it on your dashboard.");
+            router.push("/");
+          } else {
+            // Sub-threshold: the order exists now and renders below as "Being purchased".
+            fire("Arkim is purchasing this for you — track it in Order.");
+          }
         },
         onError: () => {
           fire("Couldn't submit the order — please try again.");
@@ -168,8 +177,50 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const priced = options.filter((c) => c.price != null);
   const recId = run.selected_candidate?.id ?? priced[0]?.id ?? options[0]?.id;
 
+  // Committed = this run's single selection/order is locked in (buying ⇒ selecting), so
+  // the per-candidate order/quote actions must lock. Three signals (mirror the backend
+  // guard): a committed phase, an existing order, or a manual-fulfilment selection.
+  // The run's selected_candidate is the thin order-now wrapper ({candidate_id, source,
+  // fulfilment, ...}), so read those fields loosely.
+  const sel = run.selected_candidate as
+    (Candidate & { fulfilment?: string; candidate_id?: string }) | undefined;
+  const hasOrder = (ordersData?.orders?.length ?? 0) > 0;
+  const COMMITTED_PHASES: Phase[] = [
+    "pending_first_approval", "pending_second_approval", "approved", "executing",
+    "fulfilling", "completed",
+  ];
+  const committed = COMMITTED_PHASES.includes(phase) || hasOrder || sel?.fulfilment === "manual";
+  const awaitingApproval =
+    ["pending_first_approval", "pending_second_approval"].includes(phase) && !hasOrder;
+  const selectedId = sel?.candidate_id ?? run.selected_candidate?.id;
+  const selectedVendor = options.find((c) => c.id === selectedId)?.vendorName;
+
+  function viewStatus() {
+    // No per-run view for the pre-order awaiting-approval state → dashboard (reusing the
+    // nav-fix destination); otherwise scroll to the OrderSection status/tracking view.
+    if (awaitingApproval) router.push("/");
+    else orderRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
   return (
     <Shell sub={`${partLabel}${specs?.part_number ? ` · ${specs.part_number}` : ""}`} onHome={() => router.push("/")}>
+      {committed && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
+          flexWrap: "wrap", marginBottom: 16, padding: "12px 16px", borderRadius: "var(--r)",
+          border: "1px solid var(--accent-line)", background: "var(--accent-fill)",
+        }}>
+          <div style={{ fontSize: 13.5, color: "var(--text)" }}>
+            <ProcIcon name="checkCircle" size={14} />{" "}
+            <b>You&apos;ve selected {selectedVendor ?? "this part"}</b>
+            {" — "}{awaitingApproval ? "awaiting approval." : "Arkim is purchasing it for you."}
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+              A run sources one part — these options are locked. Start a new request to order another.
+            </div>
+          </div>
+          <button className="proc-btn" data-kind="primary" onClick={viewStatus}>View status</button>
+        </div>
+      )}
       {options.length === 0 ? (
         <Working label="No options found for this part." sub="We couldn't find suppliers for it — a direct call may be the fastest path." />
       ) : (
@@ -238,7 +289,16 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {isMkt && !quoted && <div className="o-mkt">Available now · no quote needed</div>}
                     </div>
                     <div className="o-act">
-                      {c.price != null ? (
+                      {committed ? (
+                        // Locked: the run's selection is committed. No order/quote actions;
+                        // just mark which candidate was chosen (others show nothing).
+                        c.id === selectedId ? (
+                          <span style={{ fontSize: 12, fontWeight: 600, color: "var(--accent-text)",
+                                         display: "inline-flex", alignItems: "center", gap: 4 }}>
+                            <ProcIcon name="checkCircle" size={12} />Selected
+                          </span>
+                        ) : null
+                      ) : c.price != null ? (
                         // Any PRICED candidate orders through Arkim (marketplace OR reference)
                         // via an unconditional confirm step. Price-less rows below → Get quote.
                         confirmMktId === c.id ? (
@@ -306,7 +366,9 @@ export function OptionsScreen({ runId }: { runId: string }) {
 
       {/* Quotes review → confirm, and order place → track (self-hide until relevant) */}
       <QuotesSection runId={runId} />
-      <OrderSection runId={runId} />
+      <div ref={orderRef}>
+        <OrderSection runId={runId} />
+      </div>
     </Shell>
   );
 }
