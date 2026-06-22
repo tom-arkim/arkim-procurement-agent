@@ -11,7 +11,7 @@
  * this screen is the read-and-decide surface.
  */
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useRunLive, useOrderNow, useOrders } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
@@ -104,8 +104,10 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const fire = useProcToast();
   const { data: run, isLoading, isError, refetch } = useRunLive(runId);
   const { data: ordersData } = useOrders(runId);
-  const orderRef = useRef<HTMLDivElement>(null);
   const [whyOpen, setWhyOpen] = useState<Record<string, boolean>>({});
+  // Default-closed accordion for the candidate list once the run is committed (the
+  // decision is made — foreground the status, keep the shortlist as a collapsible record).
+  const [optionsOpen, setOptionsOpen] = useState(false);
   // "Order" / "Order through Arkim" on any priced candidate: an UNCONDITIONAL confirm
   // step (so a click can't accidentally select/buy), then the order-now call. Buying ⇒
   // selecting; the spend still routes through approval server-side (not exempt).
@@ -185,41 +187,14 @@ export function OptionsScreen({ runId }: { runId: string }) {
     "fulfilling", "completed",
   ];
   const committed = COMMITTED_PHASES.includes(phase) || hasOrder || sel?.fulfilment === "manual";
-  const awaitingApproval =
-    ["pending_first_approval", "pending_second_approval"].includes(phase) && !hasOrder;
   const selectedId = sel?.candidate_id ?? run.selected_candidate?.id;
   const selectedVendor = options.find((c) => c.id === selectedId)?.vendorName;
 
-  function viewStatus() {
-    // OrderSection now covers every committed state (awaiting approval → being purchased
-    // → placed → delivered), so the status view is always in-page — scroll to it.
-    orderRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-
-  return (
-    <Shell sub={`${partLabel}${specs?.part_number ? ` · ${specs.part_number}` : ""}`} onHome={() => router.push("/")}>
-      {committed && (
-        <div style={{
-          display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
-          flexWrap: "wrap", marginBottom: 16, padding: "12px 16px", borderRadius: "var(--r)",
-          border: "1px solid var(--accent-line)", background: "var(--accent-fill)",
-        }}>
-          <div style={{ fontSize: 13.5, color: "var(--text)" }}>
-            <ProcIcon name="checkCircle" size={14} />{" "}
-            <b>You&apos;ve selected {selectedVendor ?? "this part"}</b>
-            {" — "}{awaitingApproval ? "awaiting approval." : "Arkim is purchasing it for you."}
-            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
-              A run sources one part — these options are locked. Start a new request to order another.
-            </div>
-          </div>
-          <button className="proc-btn" data-kind="primary" onClick={viewStatus}>View status</button>
-        </div>
-      )}
-      {options.length === 0 ? (
-        <Working label="No options found for this part." sub="We couldn't find suppliers for it — a direct call may be the fastest path." />
-      ) : (
-        <div className="proc-two-col">
-          <div className="proc-opts">
+  // The candidate list — the working decision surface when uncommitted, the locked,
+  // read-only record (collapsed into the accordion) once committed. Defined once so both
+  // the committed and uncommitted layouts render the SAME list (no fork).
+  const optionsList = (
+    <div className="proc-opts">
             {options.map((c) => {
               const rec = c.id === recId;
               const exact = isExact(c);
@@ -350,24 +325,95 @@ export function OptionsScreen({ runId }: { runId: string }) {
                 </div>
               );
             })}
-          </div>
+    </div>
+  );
 
-          <div className="proc-rail">
-            <RailPartContext specs={specs} />
-          </div>
+  const partRail = (
+    <div className="proc-rail">
+      <RailPartContext specs={specs} />
+    </div>
+  );
+
+  return (
+    <Shell sub={`${partLabel}${specs?.part_number ? ` · ${specs.part_number}` : ""}`} onHome={() => router.push("/")}>
+      {/* Committed: foreground the order status — the decision is made, so the status is
+          what the page is about; the shortlist collapses into the record below. Uncommitted:
+          the candidate list leads (the working decision surface) and OrderSection stays at
+          the bottom (self-hides until there's something to place/track). */}
+      {committed && <OrderSection runId={runId} />}
+
+      {options.length === 0 ? (
+        <Working label="No options found for this part." sub="We couldn't find suppliers for it — a direct call may be the fastest path." />
+      ) : committed ? (
+        <div className="proc-two-col" style={{ marginTop: 22 }}>
+          <CollapsedRecord
+            count={options.length}
+            vendor={selectedVendor}
+            open={optionsOpen}
+            onToggle={() => setOptionsOpen((o) => !o)}
+          >
+            {optionsList}
+          </CollapsedRecord>
+          {partRail}
+        </div>
+      ) : (
+        <div className="proc-two-col">
+          {optionsList}
+          {partRail}
         </div>
       )}
 
-      {/* Quotes review → confirm, and order place → track (self-hide until relevant) */}
+      {/* Quotes review → confirm (self-hides until relevant). */}
       <QuotesSection runId={runId} />
-      <div ref={orderRef}>
-        <OrderSection runId={runId} />
-      </div>
+      {!committed && <OrderSection runId={runId} />}
     </Shell>
   );
 }
 
 // ---------------------------------------------------------------------------
+
+/** Collapsed record of the candidate shortlist, shown once the run is committed. The
+ *  header (a card matching the option cards) subsumes the old lock banner: "{N} suppliers
+ *  considered · you chose {vendor}". Default-closed; expanding reveals the full locked,
+ *  read-only list (collapsed ≠ hidden). */
+function CollapsedRecord({
+  count, vendor, open, onToggle, children,
+}: {
+  count: number; vendor?: string; open: boolean; onToggle: () => void; children: React.ReactNode;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="proc-opt"
+        style={{
+          width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "var(--font-sans)",
+          color: "var(--text)", padding: "16px 17px", display: "flex", alignItems: "center",
+          justifyContent: "space-between", gap: 14,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>
+            {count} supplier{count === 1 ? "" : "s"} considered
+            {vendor ? <> · you chose <span style={{ color: "var(--accent-text)" }}>{vendor}</span></> : ""}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+            {vendor
+              ? "These options are locked to this run — start a new request to order another part."
+              : "Expand to review what was considered — locked to this run."}
+          </div>
+        </div>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 600, color: "var(--muted-2)", flex: "none" }}>
+          {open ? "Hide" : "Review"}
+          <ProcIcon name={open ? "chevD" : "chevR"} size={14} />
+        </span>
+      </button>
+      {open && children}
+    </div>
+  );
+}
 
 function Shell({ children, sub, onHome }: { children: React.ReactNode; sub?: string; onHome?: () => void }) {
   return (
