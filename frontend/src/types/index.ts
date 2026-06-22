@@ -180,7 +180,7 @@ export interface ApprovalRule {
   facility_id: string;
   threshold: number;
   cap?: number;
-  approvers_required: 1 | 2 | 3;
+  approvers_required: number;   // tiers may be edited (incl. 0 = auto-approve)
   approver_roles: string[];
   applies_to: AppliesTo;
 }

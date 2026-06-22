@@ -14,8 +14,11 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead } from "./proc-ui";
+import { ThresholdsEditor } from "./thresholds-editor";
 import { PROC_SITES, defaultShipTo, type ShipTo } from "@/lib/proc-config";
 import { useSiteShipTo, useSaveSiteShipTo } from "@/lib/queries";
+
+type Section = "delivery" | "approvals";
 
 type Field = { k: keyof ShipTo; label: string; placeholder: string; hint?: string; multiline?: boolean };
 
@@ -39,6 +42,7 @@ const FIELDS: Field[] = [
 
 export function SettingsScreen() {
   const router = useRouter();
+  const [section, setSection] = useState<Section>("delivery");
   const [siteIdx, setSiteIdx] = useState(0);
   const site = PROC_SITES[siteIdx];
   const { data, isLoading } = useSiteShipTo(site.id);
@@ -73,10 +77,22 @@ export function SettingsScreen() {
         Home
       </button>
       <ProcHead
-        title={<>Delivery <b>settings</b></>}
-        sub="Where orders ship to — pulled in automatically when you place an order."
+        title={<>Settings</>}
+        sub={section === "delivery"
+          ? "Where orders ship to — pulled in automatically when you place an order."
+          : "How many approvers an order needs, by amount — these tiers govern routing."}
       />
 
+      <div className="proc-sitetabs">
+        {([["delivery", "Delivery"], ["approvals", "Approval thresholds"]] as [Section, string][]).map(([k, l]) => (
+          <button key={k} className="proc-sitetab" data-on={section === k} onClick={() => setSection(k)}>{l}</button>
+        ))}
+      </div>
+
+      {section === "approvals" ? (
+        <ThresholdsEditor />
+      ) : (
+      <>
       {PROC_SITES.length > 1 && (
         <div className="proc-sitetabs">
           {PROC_SITES.map((s, i) => (
@@ -118,6 +134,8 @@ export function SettingsScreen() {
           </button>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

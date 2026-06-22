@@ -282,6 +282,7 @@ class ApprovalRuleIn(BaseModel):
     approvers_required: int = 1
     approver_roles: List[str] = []
     applies_to: str = "buy"
+    id: Optional[str] = None          # set to update a rule in place; omit to insert
 
 
 # ---------------------------------------------------------------------------
@@ -1796,67 +1797,78 @@ def list_facilities():
 @app.get("/api/approval-rules/{facility_id}", response_model=List[ApprovalRuleOut])
 def get_approval_rules(facility_id: str):
     """
-    Get approval rules for a facility.
+    Approval tiers that GOVERN routing for a facility — read from the approval_rules table
+    (the SAME source `determine_approval_path` keys on), falling back to DEFAULT_RULES when
+    the facility has no custom rules yet. Returns the buy tiers ascending by threshold.
 
-    Phase 1: returns canonical Bay Foods Stockton rules as mock data.
-    Phase 2+: reads from the approval_rules DB table.
+    `cap` is derived for display only (one below the next tier's threshold; null for the
+    top tier) — it is not stored and does not affect routing (routing keys on threshold).
+    `applies_to` is "buy": these are the purchase-approval tiers the engine reads (the
+    prototype persists buy tiers only; outreach routing is not wired through this store).
+    A fallback (default) tier carries an empty `id` — saving it inserts a real row.
     """
-    return [
-        ApprovalRuleOut(
-            id="rule-1",
+    from utils.procurement_agent.state import persistence
+    from utils.procurement_agent.state.approval_rules import DEFAULT_RULES
+
+    persisted = persistence.list_approval_rules(facility_id)
+    if persisted:
+        rules = sorted(persisted, key=lambda r: r["threshold_usd"])
+        ids = [r["id"] for r in rules]
+    else:
+        rules = sorted(DEFAULT_RULES, key=lambda r: r["threshold_usd"])
+        ids = ["" for _ in rules]   # "" => not yet persisted; first save inserts the row
+
+    out: List[ApprovalRuleOut] = []
+    for i, r in enumerate(rules):
+        nxt = rules[i + 1]["threshold_usd"] if i + 1 < len(rules) else None
+        out.append(ApprovalRuleOut(
+            id=ids[i],
             facility_id=facility_id,
-            threshold=0,
-            cap=5000,
-            approvers_required=1,
-            approver_roles=["Maintenance Director"],
+            threshold=r["threshold_usd"],
+            cap=(nxt - 1) if nxt is not None else None,
+            approvers_required=int(r["approvers_required"]),
+            approver_roles=list(r.get("approver_roles") or []),
             applies_to="buy",
-        ),
-        ApprovalRuleOut(
-            id="rule-2",
-            facility_id=facility_id,
-            threshold=5001,
-            cap=24999,
-            approvers_required=2,
-            approver_roles=["Maintenance Director", "Operations Manager"],
-            applies_to="buy",
-        ),
-        ApprovalRuleOut(
-            id="rule-3",
-            facility_id=facility_id,
-            threshold=25000,
-            cap=None,
-            approvers_required=3,
-            approver_roles=["Maintenance Director", "Operations Manager", "Plant Manager"],
-            applies_to="buy",
-        ),
-        ApprovalRuleOut(
-            id="rule-4",
-            facility_id=facility_id,
-            threshold=0,
-            cap=None,
-            approvers_required=1,
-            approver_roles=["Maintenance Director"],
-            applies_to="outreach",
-        ),
-    ]
+        ))
+    return out
 
 
 @app.post("/api/approval-rules", response_model=ApprovalRuleOut, status_code=201)
 def upsert_approval_rule(body: ApprovalRuleIn):
     """
-    Create or update an approval rule.
+    Create or update a single buy-approval tier for a facility, PERSISTED to the
+    approval_rules table — so `determine_approval_path` reads the change on the next order
+    (it actually governs routing; it is NOT echoed).
 
-    Phase 1: echoes the request back as a confirmed rule.
-    Phase 2+: persists to the approval_rules DB table.
+    Validation: threshold >= 0 and approvers_required >= 0 (a sane non-negative count).
+    `cap` is display-only (derived on read) and not stored. `applies_to` other than "buy"
+    is rejected — the store routes buys only. Pass `id` to update a tier in place; omit it
+    (or send "") to insert a new one.
     """
-    return ApprovalRuleOut(
-        id=str(uuid.uuid4()),
+    from utils.procurement_agent.state import persistence
+
+    if body.threshold < 0:
+        raise HTTPException(status_code=422, detail="threshold must be >= 0")
+    if body.approvers_required < 0:
+        raise HTTPException(status_code=422, detail="approvers_required must be >= 0")
+    if body.applies_to != "buy":
+        raise HTTPException(status_code=422, detail="only 'buy' approval rules are persisted")
+
+    rule = persistence.upsert_approval_rule(
         facility_id=body.facility_id,
-        threshold=body.threshold,
-        cap=body.cap,
+        threshold_usd=body.threshold,
         approvers_required=body.approvers_required,
         approver_roles=body.approver_roles,
-        applies_to=body.applies_to,
+        rule_id=body.id or None,
+    )
+    return ApprovalRuleOut(
+        id=rule["id"],
+        facility_id=rule["facility_id"],
+        threshold=rule["threshold_usd"],
+        cap=body.cap,
+        approvers_required=int(rule["approvers_required"]),
+        approver_roles=list(rule.get("approver_roles") or []),
+        applies_to="buy",
     )
 
 

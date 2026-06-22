@@ -9,6 +9,15 @@
 
 export const PROC_TENANT = { name: "CAPTEK", sub: "Softgel" };
 
+/**
+ * The facility id proc runs route against. The customer create-run flow posts no
+ * facility_id, so the backend assigns its default (the all-zeros UUID), and order
+ * placement keys approval routing on that. The approval-thresholds editor therefore
+ * edits THIS facility's rules — so a saved change actually governs the next order.
+ * Multi-facility selection arrives with the real facilities/auth wire (Arc 1).
+ */
+export const PROC_FACILITY_ID = "00000000-0000-0000-0000-000000000000";
+
 export interface ShipTo {
   company: string;
   address: string;

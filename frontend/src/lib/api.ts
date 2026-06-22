@@ -320,7 +320,7 @@ export async function getApprovalRules(facilityId: string): Promise<ApprovalRule
 }
 
 export async function upsertApprovalRule(
-  rule: Omit<ApprovalRule, "id">,
+  rule: Omit<ApprovalRule, "id"> & { id?: string },   // id => update in place; omit => insert
 ): Promise<ApprovalRule> {
   return request("/approval-rules", {
     method: "POST",

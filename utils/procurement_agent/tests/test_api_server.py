@@ -612,13 +612,80 @@ class TestStaticEndpoints:
         assert len(facilities) == 5
         assert {"id", "name", "state"} == set(facilities[0])
 
-    def test_approval_rules_returns_four_rules(self, api):
+    def test_approval_rules_default_buy_tiers(self, api):
+        # No custom rules persisted yet -> the GET surfaces the DEFAULT_RULES buy tiers
+        # (the same source determine_approval_path falls back to), ascending, with the
+        # display-only derived cap and empty ids (not-yet-persisted).
         resp = api.get("/api/approval-rules/fac-stockton")
         assert resp.status_code == 200
         rules = resp.json()
-        assert len(rules) == 4
+        assert len(rules) == 3
         assert {"id", "facility_id", "threshold", "cap", "approvers_required",
                 "approver_roles", "applies_to"} == set(rules[0])
+        thresholds = [r["threshold"] for r in rules]
+        assert thresholds == sorted(thresholds)          # ascending
+        assert thresholds[0] == 0
+        assert all(r["applies_to"] == "buy" for r in rules)
+        assert all(r["id"] == "" for r in rules)         # fallback => not persisted
+        assert rules[0]["cap"] == rules[1]["threshold"] - 1   # cap derived from next tier
+        assert rules[-1]["cap"] is None                  # top tier uncapped
+
+
+class TestApprovalRulesPersistence:
+    """The approval-rules endpoints persist to the approval_rules table and drive routing
+    (they are no longer Phase-1 stubs that echo)."""
+
+    def test_post_persists_and_get_reflects(self, api):
+        body = {"facility_id": "fac-x", "threshold": 1000, "approvers_required": 2,
+                "approver_roles": ["ops"], "applies_to": "buy"}
+        resp = api.post("/api/approval-rules", json=body)
+        assert resp.status_code == 201
+        created = resp.json()
+        assert created["id"]                              # a real persisted id, not ""
+        assert created["threshold"] == 1000
+        assert created["approvers_required"] == 2
+
+        rules = api.get("/api/approval-rules/fac-x").json()
+        assert [r["threshold"] for r in rules] == [1000]  # the persisted rule, not defaults
+        assert rules[0]["id"] == created["id"]
+
+    def test_post_updates_in_place_by_id(self, api):
+        created = api.post("/api/approval-rules", json={
+            "facility_id": "fac-y", "threshold": 2000, "approvers_required": 1,
+            "approver_roles": [], "applies_to": "buy"}).json()
+        # Re-POST with the id -> update in place (no duplicate row).
+        updated = api.post("/api/approval-rules", json={
+            "id": created["id"], "facility_id": "fac-y", "threshold": 2000,
+            "approvers_required": 3, "approver_roles": [], "applies_to": "buy"}).json()
+        assert updated["id"] == created["id"]
+        rules = api.get("/api/approval-rules/fac-y").json()
+        assert len(rules) == 1
+        assert rules[0]["approvers_required"] == 3
+
+    def test_post_validation(self, api):
+        base = {"facility_id": "fac-z", "approvers_required": 1, "approver_roles": [],
+                "applies_to": "buy"}
+        assert api.post("/api/approval-rules", json={**base, "threshold": -1}).status_code == 422
+        assert api.post("/api/approval-rules",
+                        json={**base, "threshold": 0, "approvers_required": -1}).status_code == 422
+        assert api.post("/api/approval-rules",
+                        json={**base, "threshold": 0, "applies_to": "outreach"}).status_code == 422
+
+    def test_persisted_rules_drive_routing(self, api):
+        # The same function order placement calls reads what the editor saves.
+        from utils.procurement_agent.state.approval_rules import determine_approval_path
+        fac = "fac-routing"
+        api.post("/api/approval-rules", json={
+            "facility_id": fac, "threshold": 0, "approvers_required": 1,
+            "approver_roles": ["a"], "applies_to": "buy"})
+        api.post("/api/approval-rules", json={
+            "facility_id": fac, "threshold": 500, "approvers_required": 2,
+            "approver_roles": ["a", "b"], "applies_to": "buy"})
+        # A $600 order now matches the $500 tier -> 2 approvers (the saved rule, live).
+        approvers, _roles = determine_approval_path(fac, 600)
+        assert approvers == 2
+        # A $100 order falls to the $0 tier -> 1 approver.
+        assert determine_approval_path(fac, 100)[0] == 1
 
 
 # ---------------------------------------------------------------------------
