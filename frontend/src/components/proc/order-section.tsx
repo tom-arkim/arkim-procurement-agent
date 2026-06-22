@@ -13,7 +13,11 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useOrders, useExecuteOrder, useMarkDelivered, useRunLive, useSiteShipTo } from "@/lib/queries";
+import {
+  useOrders, useExecuteOrder, useMarkDelivered, useRunLive, useSiteShipTo,
+  useApproveRun, useRejectRun,
+} from "@/lib/queries";
+import { ApiError } from "@/lib/query-client";
 import { ProcIcon } from "./proc-icon";
 import { procMoney } from "./proc-ui";
 import { defaultShipTo, PRIMARY_SITE } from "@/lib/proc-config";
@@ -170,9 +174,15 @@ function PlaceOrderCard({
 function AwaitingApproval({ run }: { run: SourcingRunDetail }) {
   // Above-threshold pre-order state: the selection is in approval; no order exists yet.
   // Same honest treatment as BeingPurchased — no placed/shipped steps (nothing's bought).
+  //
+  // The Approve/Reject actions here are a WORKFLOW step, not a verified authorization
+  // gate: the app is currently no-auth, so the approver name is a claimed identity for
+  // the record (NOT an authenticated/verified approver). When auth lands (Cognito JWT +
+  // assigned_sites), the backend already enforces distinct-approver (M1) on the verified
+  // sub and this same field is backed by it — but today it does not enforce who approves.
   const sel = run.selected_candidate as
     (Candidate & { candidate_id?: string; quantity?: number;
-      _approval_path?: { approvers_required?: number; grand_total_usd?: number } }) | undefined;
+      _approval_path?: { approvers_required?: number; grand_total_usd?: number; approver_roles?: string[] } }) | undefined;
   const ap = sel?._approval_path;
   const required = ap?.approvers_required ?? 1;
   const total = ap?.grand_total_usd;
@@ -187,10 +197,40 @@ function AwaitingApproval({ run }: { run: SourcingRunDetail }) {
   const selectedId = sel?.candidate_id ?? run.selected_candidate?.id;
   const vendor = all.find((c) => c.id === selectedId)?.vendorName ?? "the selected supplier";
 
+  // Honest progress: how many distinct approvals are already recorded for this run.
+  const approvedCount = (run.approval_history ?? []).filter((h) => h.action === "approved").length;
   const secondPending = run.phase === "pending_second_approval";
   const statusLine = secondPending
-    ? "Awaiting second approval."
+    ? `Awaiting second approval — ${approvedCount} of ${required} approved.`
     : `Awaiting approval — ${required} approver${required === 1 ? "" : "s"} required.`;
+  // Expected role for THIS step, from the approval path (first → [0], second → [1]).
+  const stepRole = ap?.approver_roles?.[approvedCount] ?? "Approver";
+
+  const approve = useApproveRun(run.id);
+  const reject = useRejectRun(run.id);
+  const [name, setName] = useState("");
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState("");
+  const busy = approve.isPending || reject.isPending;
+
+  const onApprove = () => {
+    if (!name.trim() || busy) return;
+    approve.mutate({ approver_name: name.trim(), approver_role: stepRole });
+  };
+  const onReject = () => {
+    if (!name.trim() || !reason.trim() || busy) return;
+    reject.mutate({ approver_name: name.trim(), approver_role: stepRole, notes: reason.trim() });
+  };
+
+  // Map the backend's distinct-approver rejection (M1, 409) honestly; otherwise generic.
+  const approveErr = approve.error;
+  const errMsg = approveErr
+    ? (approveErr instanceof ApiError && approveErr.status === 409
+        ? (((approveErr.body as { detail?: string } | undefined)?.detail) ?? "This run needs a different approver.")
+        : "Couldn’t record the approval — please try again.")
+    : reject.error
+    ? "Couldn’t record the rejection — please try again."
+    : null;
 
   return (
     <div className="proc-track">
@@ -204,8 +244,75 @@ function AwaitingApproval({ run }: { run: SourcingRunDetail }) {
         </div>
         <span className="proc-pill" data-tone="open"><span className="d" />Awaiting approval</span>
       </div>
-      <div className="rc-note">
-        {statusLine} You&apos;ll see purchasing and delivery tracking here once it&apos;s approved.
+      <div className="rc-note" style={{ marginBottom: 14 }}>
+        {statusLine} Approving records this against the run; once {required >= 2 ? "both approvals are in" : "it’s approved"},
+        you&apos;ll see purchasing and delivery tracking here.
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <label style={{ fontSize: 12, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 5 }}>
+          Approving as <span style={{ color: "var(--muted-2)" }}>({stepRole})</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Your name"
+            disabled={busy}
+            style={{
+              padding: "9px 11px", fontSize: 13, borderRadius: 8,
+              border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)",
+            }}
+          />
+          <span style={{ fontSize: 11, color: "var(--muted-2)" }}>
+            Recorded as the approver for this run.
+          </span>
+        </label>
+
+        {rejecting ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <textarea
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Reason for rejecting (required)"
+              rows={3}
+              disabled={busy}
+              style={{
+                padding: "9px 11px", fontSize: 13, borderRadius: 8, resize: "vertical",
+                border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)",
+              }}
+            />
+            <div style={{ fontSize: 11.5, color: "var(--muted-2)" }}>
+              Rejecting returns this run to your options so you can choose again.
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button className="proc-btn" data-kind="quiet" disabled={busy} onClick={() => { setRejecting(false); setReason(""); }}>
+                Cancel
+              </button>
+              <button
+                className="proc-btn"
+                disabled={busy || !name.trim() || !reason.trim()}
+                onClick={onReject}
+                style={{ background: "var(--st-overdue)", borderColor: "var(--st-overdue)", color: "#fff" }}
+              >
+                {reject.isPending ? "Rejecting…" : "Confirm rejection"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button className="proc-btn" data-kind="quiet" disabled={busy} onClick={() => setRejecting(true)}>
+              Reject
+            </button>
+            <button className="proc-btn" data-kind="primary" disabled={busy || !name.trim()} onClick={onApprove}>
+              <ProcIcon name="checkCircle" size={15} />
+              {approve.isPending ? "Approving…" : secondPending ? "Approve (2nd)" : "Approve"}
+            </button>
+          </div>
+        )}
+
+        {errMsg && (
+          <span className="note" style={{ color: "var(--st-overdue)", fontSize: 12.5 }}>{errMsg}</span>
+        )}
       </div>
     </div>
   );
