@@ -27,6 +27,7 @@ type NavItem = { key: string; label: string; icon: ProcIconName; href?: string; 
 const NAV: NavItem[] = [
   { key: "home", label: "What needs me", icon: "box", href: "/" },
   { key: "request", label: "New request", icon: "plus", href: "/request" },
+  { key: "approvals", label: "Approvals", icon: "checkCircle", href: "/approvals" },
   { key: "history", label: "History & prices", icon: "receipt", href: "/history" },
   { key: "settings", label: "Delivery settings", icon: "building", href: "/settings" },
 ];
