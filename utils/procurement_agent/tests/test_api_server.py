@@ -1242,3 +1242,118 @@ class TestSaveOutreach:
     def test_validation_missing_candidate_ids_422(self, api):
         resp = api.post("/api/runs/any/save-outreach", json={})
         assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# GET /api/events — derived, untargeted notification feed (read-only, no table)
+# ---------------------------------------------------------------------------
+
+class TestDerivedEvents:
+    """_derive_events shapes existing persisted rows (orders + runs + confirmed quotes)
+    into a normalized, newest-first event list. Sources are mocked so the derivation logic
+    is asserted directly (orders.py uses its own DB, not the temp one)."""
+
+    def _patch_sources(self, api, monkeypatch, *, orders=(), runs=(), quotes=()):
+        from utils import orders as orders_mod
+        from utils.procurement_agent.state import persistence
+        from utils import supplier_registry
+        monkeypatch.setattr(orders_mod, "get_orders", lambda *a, **k: list(orders))
+        monkeypatch.setattr(persistence, "list_runs", lambda *a, **k: list(runs))
+        monkeypatch.setattr(supplier_registry, "get_review_items", lambda *a, **k: list(quotes))
+        return api._api_server
+
+    def test_order_status_titles_and_draft_skipped(self, api, monkeypatch):
+        mod = self._patch_sources(api, monkeypatch, orders=[
+            {"id": "o1", "run_id": "r1", "status": "shipped", "updated_at": "2026-06-24T10:00:00+00:00"},
+            {"id": "o2", "run_id": "r2", "status": "draft", "updated_at": "2026-06-24T09:00:00+00:00"},
+            {"id": "o3", "run_id": "r3", "status": "pending_manual_fulfilment", "updated_at": "2026-06-24T08:00:00+00:00"},
+            {"id": "o4", "run_id": "r4", "status": "cancelled", "updated_at": "2026-06-24T07:00:00+00:00"},
+        ])
+        evs = mod._derive_events()
+        titles = {e["order_id"]: e["title"] for e in evs}
+        assert titles == {
+            "o1": "Order shipped",
+            "o3": "Order is being purchased",   # draft (o2) skipped — not a notice
+            "o4": "Order cancelled",
+        }
+        assert all(e["type"] == "order_status" for e in evs)
+
+    def test_approval_events_from_phase_and_rejection_from_history(self, api, monkeypatch):
+        mod = self._patch_sources(api, monkeypatch, runs=[
+            {"id": "r1", "current_phase": "pending_first_approval", "updated_at": "t3", "approval_history_json": []},
+            {"id": "r2", "current_phase": "pending_second_approval", "updated_at": "t2b", "approval_history_json": [{"action": "approved", "acted_at": "t2a"}]},
+            {"id": "r3", "current_phase": "approved", "updated_at": "t2", "approval_history_json": [{"action": "approved", "acted_at": "t2"}]},
+            {"id": "r4", "current_phase": "comparison", "updated_at": "t1", "approval_history_json": [{"action": "rejected", "acted_at": "t1b"}]},
+        ])
+        evs = {e["run_id"]: e for e in mod._derive_events()}
+        assert evs["r1"]["title"] == "Awaiting approval"
+        assert evs["r2"]["title"] == "Awaiting second approval"
+        assert evs["r3"]["title"] == "Approved"
+        assert evs["r4"]["title"] == "Rejected — re-pick"
+        assert evs["r4"]["timestamp"] == "t1b"          # uses the rejection's acted_at
+        assert all(e["type"] == "approval" for e in evs.values())
+
+    def test_plain_comparison_run_yields_no_approval_event(self, api, monkeypatch):
+        mod = self._patch_sources(api, monkeypatch, runs=[
+            {"id": "r1", "current_phase": "comparison", "updated_at": "t1", "approval_history_json": []},
+        ])
+        assert mod._derive_events() == []
+
+    def test_approved_suppressed_when_order_exists(self, api, monkeypatch):
+        mod = self._patch_sources(api, monkeypatch,
+            orders=[{"id": "o1", "run_id": "r1", "status": "placed", "updated_at": "t2"}],
+            runs=[{"id": "r1", "current_phase": "approved", "updated_at": "t1", "approval_history_json": []}],
+        )
+        evs = mod._derive_events()
+        assert any(e["type"] == "order_status" and e["title"] == "Order placed" for e in evs)
+        assert not any(e["type"] == "approval" for e in evs)   # redundant "Approved" suppressed
+
+    def test_confirmed_quote_event(self, api, monkeypatch):
+        mod = self._patch_sources(api, monkeypatch, quotes=[
+            {"id": "q1", "run_id": "r9", "vendor_name": "Acme", "status": "confirmed",
+             "kind": "quote", "resolved_at": "t5", "created_at": "t4"},
+        ])
+        evs = mod._derive_events()
+        assert len(evs) == 1
+        assert evs[0]["type"] == "quote_confirmed"
+        assert evs[0]["title"] == "Acme quoted your part"
+        assert evs[0]["timestamp"] == "t5"               # resolved_at
+        assert evs[0]["run_id"] == "r9"
+
+    def test_newest_first_sort(self, api, monkeypatch):
+        mod = self._patch_sources(api, monkeypatch, orders=[
+            {"id": "o1", "run_id": "r1", "status": "placed", "updated_at": "2026-06-01T00:00:00+00:00"},
+            {"id": "o2", "run_id": "r2", "status": "shipped", "updated_at": "2026-06-20T00:00:00+00:00"},
+        ])
+        assert [e["order_id"] for e in mod._derive_events()] == ["o2", "o1"]
+
+    def test_failsoft_one_source_raises(self, api, monkeypatch):
+        from utils import orders as orders_mod
+        from utils.procurement_agent.state import persistence
+        from utils import supplier_registry
+        def boom(*a, **k):
+            raise RuntimeError("db down")
+        monkeypatch.setattr(orders_mod, "get_orders", boom)
+        monkeypatch.setattr(persistence, "list_runs", lambda *a, **k: [
+            {"id": "r1", "current_phase": "pending_first_approval", "updated_at": "t1", "approval_history_json": []}])
+        monkeypatch.setattr(supplier_registry, "get_review_items", lambda *a, **k: [])
+        evs = api._api_server._derive_events()          # must not raise
+        assert [e["title"] for e in evs] == ["Awaiting approval"]
+
+    def test_endpoint_returns_events(self, api, monkeypatch):
+        self._patch_sources(api, monkeypatch, orders=[
+            {"id": "o1", "run_id": "r1", "status": "shipped", "updated_at": "2026-06-24T10:00:00+00:00"}])
+        resp = api.get("/api/events")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["count"] == 1
+        assert body["events"][0]["title"] == "Order shipped"
+        assert body["events"][0]["type"] == "order_status"
+
+    def test_endpoint_failsoft_never_500s(self, api, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("x")
+        monkeypatch.setattr(api._api_server, "_derive_events", boom)
+        resp = api.get("/api/events")
+        assert resp.status_code == 200
+        assert resp.json() == {"count": 0, "events": []}

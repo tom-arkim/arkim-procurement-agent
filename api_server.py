@@ -2267,6 +2267,157 @@ def list_reorder():
     return {"count": len(items), "reorder": items}
 
 
+# ---------------------------------------------------------------------------
+# Derived notification feed (read-only) — GET /api/events
+#
+# V1 surfaces REAL state changes the viewer can see, DERIVED from existing persisted rows
+# — there is NO notifications table and NO migration. It is UNTARGETED: no reliable
+# per-user identity exists on a run/order yet (initiated_by_user_id is never populated;
+# company_id is NULL in the no-auth demo), so this lists events across ALL runs and never
+# claims a specific person was notified. Per-user targeting + read-state + email are later
+# increments gated on auth (pairs with D2). Honesty: every event reflects the actual
+# current row (an order shows "shipped" only when status == shipped) — no optimistic notice.
+# ---------------------------------------------------------------------------
+
+class EventOut(BaseModel):
+    id: str                          # stable per (source row, state, timestamp)
+    type: str                        # "order_status" | "approval" | "quote_confirmed"
+    run_id: Optional[str] = None
+    order_id: Optional[str] = None
+    title: str
+    timestamp: Optional[str] = None  # the real updated_at / acted_at / resolved_at
+
+
+class EventsResponse(BaseModel):
+    count: int
+    events: List[EventOut]
+
+
+# Order status -> human notice. "draft" is intentionally absent (a no-price placeholder,
+# not a user-facing notice) so it is skipped.
+_ORDER_STATUS_TITLES: dict[str, str] = {
+    "pending_manual_fulfilment": "Order is being purchased",
+    "placed":    "Order placed",
+    "confirmed": "Order confirmed by supplier",
+    "shipped":   "Order shipped",
+    "received":  "Order delivered",
+    "cancelled": "Order cancelled",
+}
+
+
+def _derive_events(limit: int = 50) -> list[dict]:
+    """Derive a newest-first event list from existing persisted state — order statuses, run
+    approval phase/history, and confirmed quotes. Read-only; no new table. Untargeted (all
+    runs). REAL-state-only. Fail-soft PER SOURCE so one bad read can't sink the feed."""
+    import logging
+    from utils import orders as orders_mod
+    from utils.procurement_agent.state import persistence
+    from utils import supplier_registry
+
+    log = logging.getLogger(__name__)
+    events: list[dict] = []
+
+    # 1) Orders — one event per order at its CURRENT status (V1 tracks current status +
+    #    updated_at, not per-status history).
+    try:
+        all_orders = orders_mod.get_orders()
+    except Exception as exc:
+        log.warning("[events] get_orders failed: %s", exc)
+        all_orders = []
+    # Runs that already have a (non-draft) order — used to suppress a now-redundant
+    # "Approved" approval event once the spend has moved on to a real order.
+    ordered_run_ids = {
+        o.get("run_id") for o in all_orders
+        if o.get("status") and o.get("status") != orders_mod.STATUS_DRAFT
+    }
+    for o in all_orders:
+        title = _ORDER_STATUS_TITLES.get(o.get("status"))
+        if not title:
+            continue
+        ts = o.get("updated_at")
+        events.append({
+            "id": f"order:{o.get('id')}:{o.get('status')}:{ts}",
+            "type": "order_status",
+            "run_id": o.get("run_id"),
+            "order_id": o.get("id"),
+            "title": title,
+            "timestamp": ts,
+        })
+
+    # 2) Runs — one approval-lifecycle event per run, from the CURRENT phase, plus the last
+    #    approval_history entry for a rejection (which phase can't show: reject returns the
+    #    run to comparison). At most one per run; always the honest current state.
+    try:
+        runs = persistence.list_runs(limit=200)
+    except Exception as exc:
+        log.warning("[events] list_runs failed: %s", exc)
+        runs = []
+    for r in runs:
+        rid = r.get("id")
+        phase = r.get("current_phase")
+        ts = r.get("updated_at")
+        title = None
+        if phase == Phase.PENDING_FIRST_APPROVAL.value:
+            title = "Awaiting approval"
+        elif phase == Phase.PENDING_SECOND_APPROVAL.value:
+            title = "Awaiting second approval"
+        elif phase == Phase.APPROVED.value and rid not in ordered_run_ids:
+            title = "Approved"
+        else:
+            hist = r.get("approval_history_json") or []
+            last = hist[-1] if isinstance(hist, list) and hist else None
+            if isinstance(last, dict) and last.get("action") == "rejected":
+                title = "Rejected — re-pick"
+                ts = last.get("acted_at") or ts
+        if title:
+            events.append({
+                "id": f"approval:{rid}:{phase}:{ts}",
+                "type": "approval",
+                "run_id": rid,
+                "order_id": None,
+                "title": title,
+                "timestamp": ts,
+            })
+
+    # 3) Confirmed quotes (State C) — a supplier's quote a human confirmed.
+    try:
+        quotes = supplier_registry.get_review_items(kind="quote", status="confirmed")
+    except Exception as exc:
+        log.warning("[events] get_review_items failed: %s", exc)
+        quotes = []
+    for q in quotes:
+        ts = q.get("resolved_at") or q.get("created_at")
+        vendor = q.get("vendor_name")
+        events.append({
+            "id": f"quote:{q.get('id')}:{ts}",
+            "type": "quote_confirmed",
+            "run_id": q.get("run_id"),
+            "order_id": None,
+            "title": f"{vendor} quoted your part" if vendor else "Supplier quoted your part",
+            "timestamp": ts,
+        })
+
+    # Newest-first. Timestamps are ISO-8601 UTC (same format across sources), so a string
+    # sort is chronological; a missing timestamp sorts last.
+    events.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
+    return events[:limit]
+
+
+@app.get("/api/events", response_model=EventsResponse)
+def list_events(limit: int = 50):
+    """Derived, untargeted notification feed (read-only): REAL state changes (order
+    statuses, approval decisions, confirmed quotes) shaped from existing rows. No table, no
+    per-user targeting (no verified identity exists yet), no writes. Fail-soft: returns an
+    empty list rather than 500-ing the shell."""
+    import logging
+    try:
+        events = _derive_events(limit=limit)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("[events] derive failed: %s", exc)
+        events = []
+    return {"count": len(events), "events": events}
+
+
 class ShipToBody(BaseModel):
     company: str = ""
     address: str = ""
