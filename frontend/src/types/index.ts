@@ -478,6 +478,30 @@ export interface CumulativeImpact {
 }
 
 // ---------------------------------------------------------------------------
+// Derived notification feed (GET /api/events) — read-only, untargeted, real-state.
+// Shaped by api_server.py _derive_events() from existing rows (order statuses, run
+// approval phase/history, confirmed quotes); there is NO notifications table. Untargeted:
+// no verified per-user identity exists yet, so events span all runs and never claim a
+// specific person was notified. Every event reflects the actual current row.
+// ---------------------------------------------------------------------------
+
+export type EventType = "order_status" | "approval" | "quote_confirmed";
+
+export interface EventItem {
+  id: string;
+  type: EventType;
+  run_id?: string | null;
+  order_id?: string | null;
+  title: string;
+  timestamp?: string | null; // real updated_at / acted_at / resolved_at (ISO-8601 UTC)
+}
+
+export interface EventsResponse {
+  count: number;
+  events: EventItem[];
+}
+
+// ---------------------------------------------------------------------------
 // UI-layer helpers
 // ---------------------------------------------------------------------------
 

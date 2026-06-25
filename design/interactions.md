@@ -649,3 +649,32 @@ Centered single-column. Top to bottom:
 ### Seeded demo run
 
 `_seed_demo_maintenance_run()` runs at API server startup (idempotent: skips if any `pending_intake` run exists). Creates one E+H Promag 10W run at `fac-stockton` with `urgency_factor = 0.9` (emergency). Submission ID: `maint-sub-demo-001`.
+
+---
+
+## 15. Notification Feed (bell + dashboard "new" dots)
+
+A real notification feed over `GET /api/events`, replacing the placeholder bell toast. **This is V1 — read honestly.**
+
+### What it is (and what it is NOT)
+- **Derived + real-state-only.** The feed is shaped server-side (`api_server.py` `_derive_events()`) from existing rows — order statuses, run approval phase/history, confirmed quotes. There is **no notifications table** and **no migration**. An event shows "Order shipped" **only because** the backend order status is `shipped`; there is no optimistic notice.
+- **Untargeted.** No verified per-user identity exists yet (`initiated_by_user_id` is unpopulated, `company_id` is NULL in the no-auth demo), so the feed lists events across **all** runs and **never claims a specific person was notified or emailed.** Do not add "notified [person]"-style language.
+- **Read-only.** The frontend never writes through this surface.
+
+### Bell dropdown (`proc-shell.tsx`)
+- Bell in the top bar opens a dropdown listing events newest-first: each row is the event `title` + a relative timestamp, and (when the event has a `run_id`) links to `/parts/{run_id}`. Rows with no `run_id` are non-navigable (disabled).
+- **Honest empty state:** "No recent updates."
+- Closes on outside-click or `Escape`. Opening triggers a `refetch()`.
+- Feed fetch (`useEvents`) is **fail-soft**: any error resolves to an empty list, so a feed hiccup never crashes the shell. Refetches on mount + window focus + bell-open — no heavier interval than the dashboard already runs. Follows the `cache: "no-store"` convention for freshness.
+
+### Unread badge + dashboard dots — ONE marker
+- Unread is a **per-device** "new since you last looked" marker, **NOT** a server-side per-user read-state. It is a single ISO timestamp in `localStorage` under `arkim:events:lastSeen` (SSR-guarded: read in `useEffect`, never during render).
+- **Badge:** count of events with `timestamp > lastSeen`, shown on the bell; capped display "9+"; hidden at 0.
+- **Opening the bell** sets `lastSeen` to the newest known event timestamp (falls back to `now` only if the feed is empty) — using the event timestamp, not the client clock, so clock skew can't leave a just-seen event unread. This clears the badge.
+- **Dashboard "new" dots:** on the "Needs you" decision cards and "In flight" rows (`home-screen.tsx`), a run shows a small dot when it has an event newer than the **same** `lastSeen` marker (via `useProcEvents()`). One source of truth — opening the bell clears the dots too. The dot reinforces the status the row already renders; it is not a second signal.
+- `lastSeen` persists across reloads, so already-seen events don't re-surface as unread.
+
+### Deferred (recorded so V1's honesty is on the page)
+- **Per-user targeting + server-side read-state** → gated on auth (a later increment). Until then the feed is untargeted and "seen" is per-device.
+- **Email / push delivery** → a later increment. V1 surfaces in-app only.
+- **A notifications store** → not built; the feed stays derived from existing rows.

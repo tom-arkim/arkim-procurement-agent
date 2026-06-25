@@ -12,6 +12,7 @@
 
 import { useRouter } from "next/navigation";
 import { useRuns, useReorder } from "@/lib/queries";
+import { useProcEvents } from "./proc-shell";
 import { ProcIcon } from "./proc-icon";
 import { ProcPill, SecHead, ProcHead, type ProcTone } from "./proc-ui";
 import { HomeProcImpact } from "./home-impact";
@@ -62,6 +63,9 @@ export function HomeScreen() {
   const router = useRouter();
   const { data: runs, isLoading, isError } = useRuns();
   const { data: reorderData } = useReorder();
+  // "New update" dots reinforce the status already shown — same per-device last-seen
+  // marker as the bell badge (one source of truth; clears when the bell is opened).
+  const { isRunUpdated } = useProcEvents();
 
   const needPart = (
     <button className="proc-btnprimary" onClick={() => router.push("/request")}>
@@ -137,7 +141,10 @@ export function HomeScreen() {
                 <button key={r.id} className="proc-act" data-tone={c.tone} onClick={() => router.push(`/parts/${r.id}`)}>
                   <span className="pa-ic"><ProcIcon name={c.icon} size={18} /></span>
                   <span className="pa-tt">
-                    <span className="pa-title" style={{ display: "block" }}>{c.title}</span>
+                    <span className="pa-title" style={{ display: "block" }}>
+                      {isRunUpdated(r.id) && <span className="proc-newdot" aria-label="New update" />}
+                      {c.title}
+                    </span>
                     <span className="pa-sub" style={{ display: "block" }}>
                       {r.asset_summary ?? "Maintenance part"}
                     </span>
@@ -162,6 +169,7 @@ export function HomeScreen() {
                   <ProcPill tone={p.tone}>{p.label}</ProcPill>
                   <span className="fl-tt">
                     <span className="fl-title" style={{ display: "block" }}>
+                      {isRunUpdated(r.id) && <span className="proc-newdot" aria-label="New update" />}
                       {r.asset_summary ?? "Maintenance part"}
                     </span>
                     <span className="fl-sub" style={{ display: "block" }}>{r.facility_id}</span>

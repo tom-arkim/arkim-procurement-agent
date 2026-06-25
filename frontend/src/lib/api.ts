@@ -22,6 +22,7 @@ import type {
   CreateRunRequest,
   CreateRunResponse,
   CumulativeImpact,
+  EventsResponse,
   Facility,
   ReorderItem,
   ApprovalRule,
@@ -326,6 +327,14 @@ export async function upsertApprovalRule(
     method: "POST",
     body: JSON.stringify(rule),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Derived notification feed (read-only) — newest-first, untargeted, real-state.
+// ---------------------------------------------------------------------------
+
+export async function getEvents(): Promise<EventsResponse> {
+  return request("/events");
 }
 
 // ---------------------------------------------------------------------------

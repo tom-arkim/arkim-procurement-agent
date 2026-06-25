@@ -44,6 +44,7 @@ import {
   getAllOrders,
   getImpact,
   getReorder,
+  getEvents,
   getSiteShipTo,
   putSiteShipTo,
 } from "./api";
@@ -57,6 +58,7 @@ import type {
   SelectCandidateRequest,
   SendMessageRequest,
   SourcingRunDetail,
+  EventItem,
 } from "@/types";
 
 // ---------------------------------------------------------------------------
@@ -368,6 +370,29 @@ export function useReorder() {
   return useQuery({
     queryKey: queryKeys.reorder.all(),
     queryFn: getReorder,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Derived notification feed (read-only) — drives the bell badge + dashboard dots.
+// ---------------------------------------------------------------------------
+
+/** Newest-first feed of REAL state changes (order statuses, approvals, confirmed
+ *  quotes), shaped server-side from existing rows. Fail-soft: any error resolves to an
+ *  empty list so the shell never crashes on a feed hiccup. Refetches on mount + window
+ *  focus (and on bell-open, via refetch()) — no heavier interval than the dashboard. */
+export function useEvents() {
+  return useQuery<EventItem[]>({
+    queryKey: queryKeys.events.all(),
+    queryFn: async () => {
+      try {
+        return (await getEvents()).events ?? [];
+      } catch {
+        return [];
+      }
+    },
+    refetchOnWindowFocus: true,
+    staleTime: 15_000,
   });
 }
 

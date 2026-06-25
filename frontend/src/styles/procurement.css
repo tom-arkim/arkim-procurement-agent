@@ -107,6 +107,24 @@
 .proc-iconbtn { width: 38px; height: 38px; flex: none; border: 1px solid var(--border); border-radius: var(--r); background: var(--surface); color: var(--text); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background-color 0.14s; }
 .proc-iconbtn:hover { background: var(--surface-2); }
 .proc-avatar { width: 38px; height: 38px; flex: none; border-radius: var(--r); background: var(--accent-fill-hi); color: var(--accent-text); border: 1px solid var(--accent-line); display: flex; align-items: center; justify-content: center; font-size: 12.5px; font-weight: 700; cursor: pointer; }
+
+/* ---- notification bell: unread badge + derived-feed dropdown ---- */
+.proc-bellwrap { position: relative; display: inline-flex; }
+.proc-bellbadge { position: absolute; top: -5px; right: -5px; min-width: 17px; height: 17px; padding: 0 4px; box-sizing: border-box; border-radius: 9px; background: var(--st-overdue); color: #fff; font-size: 10px; font-weight: 700; line-height: 13px; text-align: center; border: 2px solid var(--bg); pointer-events: none; }
+.proc-bellmenu { position: absolute; top: calc(100% + 8px); right: 0; width: 320px; max-height: 60vh; overflow-y: auto; padding: 6px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--card-shadow); z-index: 50; }
+.proc-bellhead { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; padding: 8px 10px 6px; }
+.proc-bellempty { font-size: 13px; color: var(--muted); text-align: center; padding: 14px 10px 16px; }
+.proc-belllist { display: flex; flex-direction: column; gap: 2px; }
+.proc-bellitem { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; padding: 9px 10px; border: none; border-radius: var(--r); background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-sans); transition: background-color 0.12s; }
+.proc-bellitem:hover { background: var(--surface-2); }
+.proc-bellitem:disabled { cursor: default; }
+.proc-bellitem:disabled:hover { background: transparent; }
+.proc-bellitem .bi-title { flex: 1; min-width: 0; font-size: 13px; font-weight: 500; color: var(--text-strong); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proc-bellitem .bi-time { flex: none; font-size: 11px; color: var(--muted); }
+
+/* "new update" dot on dashboard run rows — same last-seen marker as the bell badge */
+.proc-newdot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+
 .proc-dbody { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 26px 40px; }
 
 /* ---- page header ---- */
