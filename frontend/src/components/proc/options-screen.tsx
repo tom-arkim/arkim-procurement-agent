@@ -19,7 +19,8 @@ import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
 import { QuotesSection } from "./quotes-section";
 import { OrderSection } from "./order-section";
-import type { AssetSpecs, Candidate, ComparisonArtifact, Phase } from "@/types";
+import type { Candidate, ComparisonArtifact, Phase } from "@/types";
+import { RailPartContext } from "./part-context";
 
 const SOURCED_PHASES: Phase[] = [
   "comparison", "pending_first_approval", "pending_second_approval", "approved",
@@ -501,23 +502,3 @@ function SpecMatch({ artifact }: { artifact: ComparisonArtifact }) {
   );
 }
 
-function RailPartContext({ specs }: { specs?: AssetSpecs }) {
-  if (!specs) return null;
-  const name = [specs.manufacturer, specs.model || specs.part_number].filter(Boolean).join(" ") || "Part";
-  return (
-    <div className="rail-card">
-      <div className="rc-head"><ProcIcon name="toolbox" size={13} />Part &amp; asset</div>
-      <div className="rc-body">
-        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text-strong)", marginBottom: 3 }}>{name}</div>
-        {specs.part_number && <div style={{ fontSize: 12, color: "var(--muted)" }}>{specs.part_number}{specs.manufacturer ? ` · ${specs.manufacturer}` : ""}</div>}
-        {specs.description && (
-          <>
-            <div className="rc-divider" />
-            <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>{specs.description}</div>
-          </>
-        )}
-        <div className="rc-note" style={{ marginTop: 8 }}>Identified from your request and equipment records.</div>
-      </div>
-    </div>
-  );
-}

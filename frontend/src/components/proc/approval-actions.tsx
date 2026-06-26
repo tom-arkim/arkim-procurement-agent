@@ -37,6 +37,25 @@ export interface ApprovalDerived {
   approvedCount: number;
   secondPending: boolean;
   stepRole: string;
+  /** The chosen candidate, re-joined from sourcing_results by the selection's id (the
+   *  selected_candidate blob itself carries no evidence fields). Drives the "why this one"
+   *  rationale on the approval card. Undefined if the join misses. */
+  selectedCandidate?: Candidate;
+  /** How many OTHER options were on the table (alternatives survive selection). */
+  alternativesCount: number;
+}
+
+/** Role string → human copy for display. In the no-auth posture the generic
+ *  `any_authorized_user` baseline conveys nothing, so it renders as no qualifier (null);
+ *  named roles get a title-cased label. No raw snake_case role string ever reaches the UI. */
+export function approverRoleLabel(role?: string): string | null {
+  if (!role || role === "any_authorized_user") return null;
+  const known: Record<string, string> = {
+    maintenance_director: "Maintenance Director",
+    operations_manager: "Operations Manager",
+    vp_operations: "VP Operations",
+  };
+  return known[role] ?? role.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /** Derive the honest approval state (vendor, amount, progress, the current step's expected
@@ -55,7 +74,9 @@ export function deriveApproval(run: SourcingRunDetail): ApprovalDerived {
     ...(run.sourcing_results?.tier3 ?? []),
   ];
   const selectedId = sel?.candidate_id ?? run.selected_candidate?.id;
-  const vendor = all.find((c) => c.id === selectedId)?.vendorName ?? "the selected supplier";
+  const selectedCandidate = all.find((c) => c.id === selectedId);
+  const vendor = selectedCandidate?.vendorName ?? "the selected supplier";
+  const alternativesCount = Math.max(0, all.length - (selectedCandidate ? 1 : 0));
 
   // Honest progress: how many distinct approvals are already recorded for this run.
   const approvedCount = (run.approval_history ?? []).filter((h) => h.action === "approved").length;
@@ -63,7 +84,7 @@ export function deriveApproval(run: SourcingRunDetail): ApprovalDerived {
   // Expected role for THIS step, from the approval path (first → [0], second → [1]).
   const stepRole = ap?.approver_roles?.[approvedCount] ?? "Approver";
 
-  return { vendor, total, qty, required, approvedCount, secondPending, stepRole };
+  return { vendor, total, qty, required, approvedCount, secondPending, stepRole, selectedCandidate, alternativesCount };
 }
 
 /** Honest status line shared by the panel and the queue. */
@@ -75,6 +96,7 @@ export function approvalStatusLine(d: ApprovalDerived): string {
 
 export function ApprovalActions({ run }: { run: SourcingRunDetail }) {
   const { secondPending, stepRole } = deriveApproval(run);
+  const roleLabel = approverRoleLabel(stepRole);
   const approve = useApproveRun(run.id);
   const reject = useRejectRun(run.id);
   const [name, setName] = useState("");
@@ -104,7 +126,7 @@ export function ApprovalActions({ run }: { run: SourcingRunDetail }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <label style={{ fontSize: 12, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 5 }}>
-        Approving as <span style={{ color: "var(--muted-2)" }}>({stepRole})</span>
+        Approving{roleLabel ? <> as <span style={{ color: "var(--muted-2)" }}>({roleLabel})</span></> : null}
         <input
           type="text"
           value={name}

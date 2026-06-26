@@ -18,8 +18,9 @@
 import { useRouter } from "next/navigation";
 import { useRuns, useRun } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
-import { ProcHead, procMoney } from "./proc-ui";
+import { ProcHead } from "./proc-ui";
 import { ApprovalActions, deriveApproval, approvalStatusLine } from "./approval-actions";
+import { ApprovalContext } from "./approval-context";
 import type { SourcingRunListItem } from "@/types";
 
 export function ApprovalsScreen() {
@@ -77,16 +78,13 @@ function ApprovalQueueRow({ runId }: { runId: string }) {
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 12, flexWrap: "wrap", gap: 10 }}>
         <div>
           <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{d.vendor}</div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
-            {d.total != null ? procMoney(d.total) : "—"}
-            {d.qty ? ` · qty ${d.qty}` : ""}
-          </div>
-          <div style={{ fontSize: 12, color: "var(--muted-2)", marginTop: 6 }}>{approvalStatusLine(d)}</div>
+          <div style={{ fontSize: 12, color: "var(--muted-2)", marginTop: 4 }}>{approvalStatusLine(d)}</div>
         </div>
         <button className="proc-btn" data-kind="quiet" style={{ padding: "5px 10px", fontSize: 12 }} onClick={() => router.push(`/parts/${runId}`)}>
           Open run
         </button>
       </div>
+      <ApprovalContext run={run} />
       <ApprovalActions run={run} />
     </div>
   );

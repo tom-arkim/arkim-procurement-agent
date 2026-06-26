@@ -17,6 +17,7 @@ import { useOrders, useExecuteOrder, useMarkDelivered, useRunLive, useSiteShipTo
 import { ProcIcon } from "./proc-icon";
 import { procMoney } from "./proc-ui";
 import { ApprovalActions, deriveApproval, approvalStatusLine } from "./approval-actions";
+import { ApprovalContext } from "./approval-context";
 import { defaultShipTo, PRIMARY_SITE } from "@/lib/proc-config";
 import type { Order, OrderStatus, Phase, SourcingRunDetail } from "@/types";
 
@@ -178,19 +179,14 @@ function AwaitingApproval({ run }: { run: SourcingRunDetail }) {
   return (
     <div className="proc-track">
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{d.vendor}</div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
-            {d.total != null ? procMoney(d.total) : "—"}
-            {d.qty ? ` · qty ${d.qty}` : ""}
-          </div>
-        </div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>{d.vendor}</div>
         <span className="proc-pill" data-tone="open"><span className="d" />Awaiting approval</span>
       </div>
       <div className="rc-note" style={{ marginBottom: 14 }}>
         {approvalStatusLine(d)} Approving records this against the run; once {d.required >= 2 ? "both approvals are in" : "it’s approved"},
         you&apos;ll see purchasing and delivery tracking here.
       </div>
+      <ApprovalContext run={run} />
       <ApprovalActions run={run} />
     </div>
   );
