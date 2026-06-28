@@ -227,6 +227,17 @@ class CreateRunResponse(BaseModel):
     created_at: str
 
 
+class IntakeRequest(BaseModel):
+    """Front-door intake body (multi-part Increment 1, Stage 2). Only the COUNT of `parts`
+    routes single-vs-multi; the part CONTENTS are not parsed here — intake yields one
+    asset_specs per run today, and multi-part extraction is a separate later concern. An
+    empty or single-element `parts` takes the existing single-run path verbatim."""
+    parts: List[Dict[str, Any]] = []
+    facility_id: str = "00000000-0000-0000-0000-000000000000"
+    urgency_factor: float = Field(0.3, ge=0.0, le=1.0)
+    warranty_status: str = "unknown"
+
+
 class SendMessageRequest(BaseModel):
     content: str
     role: str = "user"
@@ -876,6 +887,46 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
             phase=run.current_phase,
             created_at=run.initiated_at.isoformat(),
         )
+
+
+# ---------------------------------------------------------------------------
+# Intake routing front door (multi-part Increment 1, Stage 2)
+#
+# A deterministic gate that decides whether a request fans out. It routes on a PROVIDED
+# part count only — it does NOT parse/extract parts (intake yields one asset_specs per run
+# today). One part takes the existing single-run path, unchanged; two or more take the
+# fan-out path (Stage 3). This stage establishes the branch + the seam, nothing more.
+# ---------------------------------------------------------------------------
+
+def route_intake(part_count: int) -> str:
+    """Single-vs-multi routing decision. Deterministic — no LLM, no randomness:
+    <= 1 part -> 'single' (the existing path); >= 2 -> 'multi' (fan-out, Stage 3)."""
+    return "multi" if part_count >= 2 else "single"
+
+
+def _fan_out_intake(body: IntakeRequest, caller: Optional[Caller]):
+    """Fan-out seam for N>=2 — Stage 3 mints one group_id and creates N runs under it. STUB
+    for now: the routing branch + contract exist so the single path can be proven untouched,
+    but no fan-out logic is implemented here."""
+    raise HTTPException(status_code=501, detail="multi-part fan-out not yet implemented (lands in Stage 3)")
+
+
+@app.post("/api/requests", status_code=201)
+def create_request(body: IntakeRequest, caller: Optional[Caller] = Depends(get_caller)):
+    """Intake front door: route a request to the single-run path (<=1 part) or the fan-out
+    path (>=2 parts). The single branch DELEGATES to the unchanged create_run — byte-for-byte
+    the existing path; part contents (if any) are filled via intake chat exactly as today.
+    The multi branch hits the fan-out seam (Stage 3)."""
+    if route_intake(len(body.parts)) == "multi":
+        return _fan_out_intake(body, caller)
+    return create_run(
+        CreateRunRequest(
+            facility_id=body.facility_id,
+            urgency_factor=body.urgency_factor,
+            warranty_status=body.warranty_status,
+        ),
+        caller,
+    )
 
 
 @app.get("/api/runs", response_model=List[RunListItem])

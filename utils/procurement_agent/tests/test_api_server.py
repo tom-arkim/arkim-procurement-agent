@@ -1416,3 +1416,44 @@ class TestGroupIdColumn:
         # and index already exist on the temp DB) without raising.
         api._api_server._migrate_schema()
         api._api_server._migrate_schema()
+
+
+# ---------------------------------------------------------------------------
+# Multi-part Increment 1, Stage 2 — single-vs-multi routing front door (additive).
+# Routes on a PROVIDED part count; the single branch delegates to the unchanged path,
+# the multi branch hits the Stage-3 fan-out seam. No extraction here.
+# ---------------------------------------------------------------------------
+
+class TestIntakeRouter:
+    def test_route_intake_is_deterministic(self, api):
+        route = api._api_server.route_intake
+        # <=1 -> single ; >=2 -> multi ; same input -> same decision, repeatedly.
+        assert route(0) == "single"
+        assert route(1) == "single"
+        assert route(2) == "multi"
+        assert route(5) == "multi"
+        assert [route(2) for _ in range(5)] == ["multi"] * 5
+        assert [route(1) for _ in range(5)] == ["single"] * 5
+
+    def test_single_part_routes_to_existing_path_unchanged(self, api):
+        # One part -> the existing single-run path. Shape + phase identical to a direct
+        # POST /api/runs (the front door delegates to the unchanged create_run).
+        direct = api.post("/api/runs", json={})
+        viafd = api.post("/api/requests", json={"parts": [{"any": "spec"}]})
+        assert direct.status_code == viafd.status_code == 201
+        assert set(viafd.json().keys()) == set(direct.json().keys())
+        assert viafd.json()["phase"] == direct.json()["phase"] == "intake"
+
+    def test_zero_parts_routes_single(self, api):
+        # Empty parts is N<=1 -> single (a bare run, exactly as POST /api/runs today).
+        resp = api.post("/api/requests", json={"parts": []})
+        assert resp.status_code == 201
+        assert resp.json()["phase"] == "intake"
+
+    def test_multi_routes_to_fanout_seam_without_creating_runs(self, api):
+        before = len(api.get("/api/runs").json())
+        resp = api.post("/api/requests", json={"parts": [{"a": 1}, {"b": 2}]})
+        # Hits the Stage-3 seam, NOT the single path: 501, and no run was created.
+        assert resp.status_code == 501
+        assert "Stage 3" in resp.json()["detail"]
+        assert len(api.get("/api/runs").json()) == before
