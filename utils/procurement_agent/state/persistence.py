@@ -72,6 +72,11 @@ class SourcingRunORM(Base):
     # identity lands, NULL in the current no-auth demo. facility_id stays the SEPARATE
     # site-level label (no rename; facility_id != Site.id reconciliation still open).
     company_id = Column(String(36), nullable=True, index=True)
+    # Multi-part Increment 1 — nullable basket grouping label. NULL for single-part runs
+    # (a NULL-group run is byte-for-byte a today-run); set only when an intake fans one
+    # request into N independent runs. Groups many runs; never unique. The one-run-one-part
+    # invariant is unchanged — the basket groups runs, it does not make a run hold N parts.
+    group_id = Column(String(36), nullable=True, index=True)
     initiated_by_user_id = Column(String(36), nullable=True)
     initiated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -191,6 +196,7 @@ def _orm_to_dict(row: SourcingRunORM) -> dict:
         "id": row.id,
         "facility_id": row.facility_id,
         "company_id": getattr(row, "company_id", None),
+        "group_id": getattr(row, "group_id", None),
         "initiated_by_user_id": row.initiated_by_user_id,
         "initiated_at": row.initiated_at.isoformat() if row.initiated_at else None,
         "current_phase": row.current_phase,

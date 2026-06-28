@@ -1357,3 +1357,62 @@ class TestDerivedEvents:
         resp = api.get("/api/events")
         assert resp.status_code == 200
         assert resp.json() == {"count": 0, "events": []}
+
+
+# ---------------------------------------------------------------------------
+# Multi-part Increment 1 — nullable group_id basket label (additive; a NULL-group
+# run is byte-for-byte a today-run). Column round-trip + the ?group_id= read filter.
+# ---------------------------------------------------------------------------
+
+class TestGroupIdColumn:
+    def test_group_id_round_trips_via_list_and_detail(self, api):
+        rid = _create_run(api)
+        _set_run(api, rid, group_id="grp-1")
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["group_id"] == "grp-1"
+
+        item = next(r for r in api.get("/api/runs").json() if r["id"] == rid)
+        assert item["group_id"] == "grp-1"
+
+    def test_legacy_run_group_id_null(self, api):
+        # A run created the normal (single-part) way carries no group — NULL — and serializes
+        # exactly as before: group_id is the ONLY new field, present and None.
+        rid = _create_run(api)
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["group_id"] is None
+        # Spot-check the rest of the envelope is intact (byte-for-byte a today-run).
+        assert detail["id"] == rid
+        assert detail["phase"] == "intake"
+        assert detail["facility_id"] == "00000000-0000-0000-0000-000000000000"
+
+        item = next(r for r in api.get("/api/runs").json() if r["id"] == rid)
+        assert item["group_id"] is None
+
+    def test_filter_returns_only_the_group_and_no_param_unchanged(self, api):
+        a1, a2, b1 = _create_run(api), _create_run(api), _create_run(api)
+        legacy = _create_run(api)  # NULL group — must never appear in a group filter
+        _set_run(api, a1, group_id="grp-A")
+        _set_run(api, a2, group_id="grp-A")
+        _set_run(api, b1, group_id="grp-B")
+
+        # No param: unchanged — every run present (same set the un-filtered query returns).
+        all_ids = [r["id"] for r in api.get("/api/runs").json()]
+        assert set(all_ids) >= {a1, a2, b1, legacy}
+
+        # Filter: only the matching group, and in the SAME relative order as the no-param list
+        # (the filter narrows, it does not reorder).
+        group_a = [r["id"] for r in api.get("/api/runs", params={"group_id": "grp-A"}).json()]
+        assert set(group_a) == {a1, a2}
+        assert group_a == [i for i in all_ids if i in {a1, a2}]
+
+        # A NULL-group run is invisible to a group filter; an unknown group is empty.
+        assert api.get("/api/runs", params={"group_id": "grp-B"}).json()[0]["id"] == b1
+        assert api.get("/api/runs", params={"group_id": "nope"}).json() == []
+
+    def test_create_index_migration_idempotent(self, api):
+        # The guarded ALTER + CREATE INDEX IF NOT EXISTS must survive re-running (the column
+        # and index already exist on the temp DB) without raising.
+        api._api_server._migrate_schema()
+        api._api_server._migrate_schema()

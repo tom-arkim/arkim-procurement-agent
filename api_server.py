@@ -82,6 +82,12 @@ def _migrate_schema() -> None:
             "ALTER TABLE sourcing_runs ADD COLUMN tier3_outreach_sent_json TEXT",
             # D2 prereq #1 — nullable tenant key (company PIN). Keys only, no enforcement.
             "ALTER TABLE sourcing_runs ADD COLUMN company_id VARCHAR(36)",
+            # Multi-part Increment 1 — nullable basket grouping label. NULL for every
+            # single-part run (indistinguishable from a pre-migration run); set only when
+            # an intake fans one request into N runs. The CREATE INDEX is separate (below)
+            # because the bare ALTER does not index the column on already-migrated DBs.
+            "ALTER TABLE sourcing_runs ADD COLUMN group_id VARCHAR(36)",
+            "CREATE INDEX IF NOT EXISTS ix_sourcing_runs_group_id ON sourcing_runs (group_id)",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -162,6 +168,7 @@ class RunListItem(BaseModel):
     urgency: str          # "Stocking" | "Predictive" | "Emergency"
     warranty: str         # "Active" | "Expired" | "Unknown"
     facility_id: str
+    group_id: Optional[str] = None        # basket grouping label; NULL for single-part runs
     asset_summary: Optional[str] = None   # e.g. "Goulds 3196MTX · 5HP pump"
     amount: Optional[float] = None
     maintenance_submission_id: Optional[str] = None
@@ -176,6 +183,7 @@ class RunDetail(BaseModel):
     warranty: str
     facility_id: str
     facility_state: str = "unknown"      # for geographic indicator on vendor cards
+    group_id: Optional[str] = None       # basket grouping label; NULL for single-part runs
     asset_specs: Optional[Dict[str, Any]] = None
     inventory_result: Optional[Dict[str, Any]] = None
     sourcing_results: Optional[Dict[str, Any]] = None
@@ -778,6 +786,7 @@ def _orm_to_list_item(run: SourcingRunORM) -> RunListItem:
         urgency=_urgency_label(run.urgency_factor),
         warranty=_warranty_label(run.warranty_status),
         facility_id=run.facility_id,
+        group_id=getattr(run, "group_id", None),
         asset_summary=asset_summary,
         amount=None,
         maintenance_submission_id=handoff.get("submission_id"),
@@ -820,6 +829,7 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
         warranty=_warranty_label(run.warranty_status),
         facility_id=run.facility_id,
         facility_state=_FACILITY_STATES.get(run.facility_id, "unknown"),
+        group_id=getattr(run, "group_id", None),
         asset_specs=_asset_specs,
         inventory_result=_parse(run.inventory_result_json),
         sourcing_results=sourcing,
@@ -872,16 +882,20 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
 def list_runs(
     facility_id: Optional[str] = None,
     phase: Optional[str] = None,
+    group_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ):
-    """List sourcing runs with optional filtering."""
+    """List sourcing runs with optional filtering. `group_id` returns only the runs in one
+    basket; absent, the result is unchanged (no filtering, same ordering)."""
     with _SessionFactory() as session:
         q = session.query(SourcingRunORM)
         if facility_id:
             q = q.filter(SourcingRunORM.facility_id == facility_id)
         if phase:
             q = q.filter(SourcingRunORM.current_phase == phase)
+        if group_id:
+            q = q.filter(SourcingRunORM.group_id == group_id)
         runs = q.order_by(SourcingRunORM.initiated_at.desc()).offset(offset).limit(limit).all()
         return [_orm_to_list_item(r) for r in runs]
 
