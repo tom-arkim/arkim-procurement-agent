@@ -172,6 +172,35 @@ class RequestGroupApprovalORM(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
 
+class RfqDraftORM(Base):
+    """A persisted, reviewable RFQ draft (RFQ wiring A0). The HITL spine: a draft is created
+    (drafted), a human reviews the STORED draft and records a real approval (approved) or
+    rejects it (rejected), and only an approved draft can be sent (sent, A2). The lifecycle is
+    enforced — a draft can NEVER reach 'sent' without passing through 'approved' (see
+    ALLOWED_DRAFT_TRANSITIONS / transition_draft). No endpoints, no send live yet.
+
+    candidate_snapshot_json freezes the hydrated candidate at draft time, so the human reviews
+    exactly what was sourced. approved_by/approved_at mirror the Approval dataclass so A2 can
+    build the Approval from the row with no re-keying; they are stored as the ISO STRING the
+    Approval carries. sent_message_id is a SOFT reference to sent_messages.id (that table lives
+    in a separate sqlite DB — no cross-DB SQL FK), populated only at the A2 send."""
+    __tablename__ = "rfq_drafts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id = Column(String(36), ForeignKey("sourcing_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    candidate_id = Column(String(200), nullable=False)        # display id {vendor}-t{tier}-{idx}
+    candidate_snapshot_json = Column(Text, nullable=False)    # frozen hydrated candidate dict
+    draft_body = Column(Text, nullable=False)                 # what _make_draft produced
+    status = Column(String(20), nullable=False, default="drafted")  # drafted|approved|rejected|sent
+    approved_by = Column(String(120), nullable=True)
+    approved_at = Column(String(40), nullable=True)           # ISO str — mirrors Approval.approved_at
+    rejected_by = Column(String(120), nullable=True)
+    rejected_at = Column(String(40), nullable=True)
+    sent_message_id = Column(String(36), nullable=True)       # soft ref to sent_messages.id (cross-DB)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 def migrate_run_state(engine) -> None:
     """Phase B0 additive migration: ensure the document_status column exists on
     sourcing_runs for pre-B0 databases. Idempotent (guarded ALTER) and additive —
@@ -337,6 +366,141 @@ def list_runs(
             q = q.filter(SourcingRunORM.group_id == group_id)
         rows = q.offset(offset).limit(limit).all()
         return [_orm_to_dict(r) for r in rows]
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
+# RFQ drafts — persistence + enforced lifecycle (RFQ wiring A0)
+#
+# The integrity spine: a draft can NEVER reach 'sent' without passing through 'approved'.
+# Mirrors the orders.py state-machine discipline (illegal transitions are rejected, not
+# recorded) — but here the helper RAISES on an illegal transition.
+# ---------------------------------------------------------------------------
+
+ALLOWED_DRAFT_TRANSITIONS: dict[str, set[str]] = {
+    "drafted":  {"approved", "rejected"},
+    "approved": {"sent"},
+    "rejected": set(),   # terminal
+    "sent":     set(),   # terminal
+}
+
+
+class DraftTransitionError(ValueError):
+    """Raised when an RFQ-draft status transition is illegal (skip-approval, backward,
+    resurrect a rejected/sent draft, re-approve, or advance a terminal draft)."""
+
+
+def can_transition_draft(current: str, new: str) -> bool:
+    """True iff `current -> new` is a legal draft-lifecycle transition (pure; no I/O)."""
+    return new in ALLOWED_DRAFT_TRANSITIONS.get(current, set())
+
+
+def _draft_to_dict(row: RfqDraftORM) -> dict:
+    return {
+        "id": row.id,
+        "run_id": row.run_id,
+        "candidate_id": row.candidate_id,
+        "candidate_snapshot": _pj(row.candidate_snapshot_json),
+        "draft_body": row.draft_body,
+        "status": row.status,
+        "approved_by": row.approved_by,
+        "approved_at": row.approved_at,
+        "rejected_by": row.rejected_by,
+        "rejected_at": row.rejected_at,
+        "sent_message_id": row.sent_message_id,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def create_draft(
+    run_id: str,
+    candidate_id: str,
+    candidate_snapshot: dict,
+    draft_body: str,
+    db_url: Optional[str] = None,
+) -> dict:
+    """Create an RFQ draft at status='drafted'. candidate_snapshot is frozen as JSON so the
+    human later reviews exactly what was sourced. No approval, no send."""
+    session = _get_session(db_url)
+    try:
+        row = RfqDraftORM(
+            id=str(uuid.uuid4()),
+            run_id=run_id,
+            candidate_id=candidate_id,
+            candidate_snapshot_json=_j(candidate_snapshot),
+            draft_body=draft_body,
+            status="drafted",
+        )
+        session.add(row)
+        session.commit()
+        return _draft_to_dict(row)
+    finally:
+        session.close()
+
+
+def get_draft(draft_id: str, db_url: Optional[str] = None) -> Optional[dict]:
+    """Fetch one draft by id. None if not found."""
+    session = _get_session(db_url)
+    try:
+        row = session.get(RfqDraftORM, draft_id)
+        return _draft_to_dict(row) if row else None
+    finally:
+        session.close()
+
+
+def list_drafts(run_id: str, db_url: Optional[str] = None) -> list[dict]:
+    """All drafts for a run, newest first."""
+    session = _get_session(db_url)
+    try:
+        rows = (
+            session.query(RfqDraftORM)
+            .filter(RfqDraftORM.run_id == run_id)
+            .order_by(RfqDraftORM.created_at.desc())
+            .all()
+        )
+        return [_draft_to_dict(r) for r in rows]
+    finally:
+        session.close()
+
+
+def transition_draft(
+    draft_id: str,
+    new_status: str,
+    *,
+    approved_by: Optional[str] = None,
+    rejected_by: Optional[str] = None,
+    sent_message_id: Optional[str] = None,
+    db_url: Optional[str] = None,
+) -> dict:
+    """Move a draft to `new_status`, ENFORCING the legal lifecycle (drafted -> approved |
+    rejected; approved -> sent; terminals are terminal). Raises DraftTransitionError on an
+    illegal transition (KeyError-free) and on an unknown draft_id. The approval/rejection is
+    recorded AS PART OF the transition (approved_at/rejected_at stamped here, ISO), so a
+    recorded approval is real — tied to the act, never preset while drafted."""
+    session = _get_session(db_url)
+    try:
+        row = session.get(RfqDraftORM, draft_id)
+        if row is None:
+            raise DraftTransitionError(f"draft {draft_id} not found")
+        if not can_transition_draft(row.status, new_status):
+            raise DraftTransitionError(
+                f"illegal draft transition: {row.status} -> {new_status}"
+            )
+        now_iso = datetime.now(timezone.utc).isoformat()
+        if new_status == "approved":
+            row.approved_by = approved_by
+            row.approved_at = now_iso
+        elif new_status == "rejected":
+            row.rejected_by = rejected_by
+            row.rejected_at = now_iso
+        elif new_status == "sent":
+            row.sent_message_id = sent_message_id
+        row.status = new_status
+        row.updated_at = datetime.now(timezone.utc)
+        session.commit()
+        return _draft_to_dict(row)
     finally:
         session.close()
 
