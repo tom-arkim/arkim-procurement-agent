@@ -192,7 +192,12 @@ class RunDetail(BaseModel):
     approval_history: List[Dict[str, Any]] = []
     messages: List[Dict[str, Any]] = []
     tier3_selection: Optional[List[str]] = None
-    tier3_outreach_sent: Optional[Dict[str, str]] = None  # candidateId → sentAt ISO
+    tier3_outreach_sent: Optional[Dict[str, str]] = None  # candidateId → sentAt ISO (legacy synthetic stamp)
+    # Real per-candidate outreach signal derived from rfq_drafts (the A0–A2 flow), keyed by the
+    # candidate display id: {candidate_id: drafted|approved|rejected|sent}. Additive companion to
+    # the legacy tier3_outreach_sent map — 'sent' here means a genuine message went (A2 marks
+    # 'sent' only on a real send), so it is dispatch-truth, not a synthetic timestamp.
+    rfq_draft_status: Optional[Dict[str, str]] = None
     maintenance_handoff: Optional[Dict[str, Any]] = None
     # True when T2+T3 have candidates but none have pnMatchLevel=="exact".
     # Suppressed when spec_based_sourcing or part_number is absent (not a typo case).
@@ -807,6 +812,25 @@ def _orm_to_list_item(run: SourcingRunORM) -> RunListItem:
     )
 
 
+def _rfq_draft_status_for_run(run_id: str) -> dict:
+    """Real per-candidate outreach signal from rfq_drafts: {candidate_id: status}. Newest draft
+    per candidate wins (list_drafts is newest-first). A 'sent' status already means a genuine
+    send went (A2 claim-matches-reality), so it is dispatch-truth — no synthetic stamp needed.
+    Read-only, fail-soft (returns {} on any error). Additive: leaves tier3_outreach_sent intact."""
+    import logging
+    from utils.procurement_agent.state import persistence
+    out: dict = {}
+    try:
+        for d in persistence.list_drafts(run_id):   # newest-first
+            cid = d.get("candidate_id")
+            if cid and cid not in out:               # first (newest) wins
+                out[cid] = d.get("status")
+    except Exception as exc:
+        logging.getLogger(__name__).warning("[rfq] draft-status read failed for %s: %s", run_id, exc)
+        return {}
+    return out
+
+
 def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
     def _parse(col): return json.loads(col) if col else None
 
@@ -851,6 +875,7 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
             else (run.approval_history_json or []),
         tier3_selection=json.loads(run.tier3_selection_json) if run.tier3_selection_json else None,
         tier3_outreach_sent=json.loads(run.tier3_outreach_sent_json) if run.tier3_outreach_sent_json else None,
+        rfq_draft_status=_rfq_draft_status_for_run(run.id),
         maintenance_handoff=_parse(run.maintenance_handoff_json),
         no_exact_match=no_exact_match,
         created_at=run.initiated_at.isoformat() if run.initiated_at else "",

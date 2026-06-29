@@ -1981,3 +1981,46 @@ class TestContactSetAssembly:
         rid = _run_with_candidate(api, source_url="https://beta.com", vendor="Beta")
         resp = _make_draft_via_api(api, rid, candidate_id="Beta-t3-0")    # create -> seeds, no raise
         assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# RFQ wiring C (Option A) — real per-candidate outreach signal on RunDetail, derived from
+# rfq_drafts. Additive: the legacy tier3_outreach_sent stamp is left intact.
+# ---------------------------------------------------------------------------
+
+class TestRfqDraftStatusSignal:
+    def test_status_progresses_drafted_approved_sent(self, api, monkeypatch):
+        from utils import rfq_send
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]
+        assert api.get(f"/api/runs/{rid}").json()["rfq_draft_status"] == {"Acme Pumps-t3-0": "drafted"}
+
+        api.post(f"/api/rfq-drafts/{did}/approve", json={"approved_by": "tom"})
+        assert api.get(f"/api/runs/{rid}").json()["rfq_draft_status"] == {"Acme Pumps-t3-0": "approved"}
+
+        # 'sent' is dispatch-truth — A2 only marks sent on a genuine send (mocked here).
+        monkeypatch.setattr(rfq_send, "send_rfq",
+            lambda *a, **k: {"sent": True, "status": "sent", "sent_message_id": "sm-1", "recipients": {}})
+        api.post(f"/api/rfq-drafts/{did}/send")
+        assert api.get(f"/api/runs/{rid}").json()["rfq_draft_status"] == {"Acme Pumps-t3-0": "sent"}
+
+    def test_newest_draft_per_candidate_wins(self, api):
+        rid = _run_with_candidate(api)
+        d1 = _make_draft_via_api(api, rid).json()["draft_id"]
+        api.post(f"/api/rfq-drafts/{d1}/reject", json={"rejected_by": "tom"})
+        _make_draft_via_api(api, rid)   # re-draft the same candidate (newer)
+        assert api.get(f"/api/runs/{rid}").json()["rfq_draft_status"] == {"Acme Pumps-t3-0": "drafted"}
+
+    def test_no_drafts_is_empty_map(self, api):
+        rid = _create_run(api)
+        assert api.get(f"/api/runs/{rid}").json()["rfq_draft_status"] == {}
+
+    def test_additive_legacy_stamp_left_intact(self, api):
+        # The real signal is ADDITIVE — the legacy tier3_outreach_sent stamp still works and
+        # the two coexist independently on the same run.
+        rid = _run_with_candidate(api)
+        api.post(f"/api/runs/{rid}/outreach", json={"candidate_ids": ["Acme Pumps-t3-0"]})
+        _make_draft_via_api(api, rid)
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert "Acme Pumps-t3-0" in detail["tier3_outreach_sent"]            # legacy intact
+        assert detail["rfq_draft_status"] == {"Acme Pumps-t3-0": "drafted"}  # real signal added
