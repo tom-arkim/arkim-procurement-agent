@@ -1819,3 +1819,106 @@ class TestRfqDraftEndpoints:
         assert draft["status"] == "approved"            # never "sent"
         assert draft["sent_message_id"] is None
         assert supplier_registry.get_sent_messages(run_id=rid) == []   # nothing sent/recorded
+
+
+# ---------------------------------------------------------------------------
+# RFQ wiring A2 — the SEND endpoint (consumes an approved draft, behind the flag).
+# Built to mocks: no live email, no network, no Apollo.
+# ---------------------------------------------------------------------------
+
+def _seed_recipient(domain="acme.com"):
+    from utils import supplier_registry
+    supplier_registry.upsert_primary_contact(domain, {
+        "primary_contact_email": f"sales@{domain}",
+        "primary_contact_status": "resolved",
+    })
+
+def _approved_draft(api, *, seed=True):
+    """A run + an APPROVED draft for Acme; optionally seed a resolved recipient for acme.com."""
+    if seed:
+        _seed_recipient()
+    rid = _run_with_candidate(api)
+    did = _make_draft_via_api(api, rid).json()["draft_id"]
+    api.post(f"/api/rfq-drafts/{did}/approve", json={"approved_by": "tom@arkim.ai"})
+    return rid, did
+
+
+class TestRfqDraftSend:
+    def test_flag_off_stubs_and_draft_not_marked_sent(self, api, monkeypatch):
+        # Default flag OFF -> 'stubbed', no network. The draft must NOT be marked sent (a
+        # 'sent' draft must mean a message actually went); it stays approved + re-sendable.
+        from utils import rfq_send, supplier_registry
+        monkeypatch.setattr(rfq_send, "write_audit_log", lambda *a, **k: "")  # don't pollute audit DB
+        rid, did = _approved_draft(api)
+
+        resp = api.post(f"/api/rfq-drafts/{did}/send")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["send_status"] == "stubbed" and body["sent"] is False
+        assert body["draft_status"] == "approved" and body["sent_message_id"] is None
+
+        draft = api.get(f"/api/rfq-drafts/{did}").json()
+        assert draft["status"] == "approved" and draft["sent_message_id"] is None
+        # A stubbed row exists, but it honestly says 'stubbed' — it does not claim delivery.
+        rows = supplier_registry.get_sent_messages(run_id=rid)
+        assert rows and all(r["status"] == "stubbed" for r in rows)
+
+    def test_genuine_send_marks_sent_and_writes_id(self, api, monkeypatch):
+        # Mock a real send: only on result['sent'] does the draft become 'sent' with the id.
+        from utils import rfq_send
+        def fake_send(candidate, draft_body, approval, *, run_id=None, sender=None):
+            return {"sent": True, "status": "sent", "sent_message_id": "sm-1",
+                    "recipients": {"to": ["sales@acme.com"], "cc": []}}
+        monkeypatch.setattr(rfq_send, "send_rfq", fake_send)
+        _, did = _approved_draft(api)
+
+        body = api.post(f"/api/rfq-drafts/{did}/send").json()
+        assert body["sent"] is True and body["send_status"] == "sent"
+        assert body["draft_status"] == "sent" and body["sent_message_id"] == "sm-1"
+        draft = api.get(f"/api/rfq-drafts/{did}").json()
+        assert draft["status"] == "sent" and draft["sent_message_id"] == "sm-1"
+
+    def test_unapproved_draft_409_and_send_never_called(self, api, monkeypatch):
+        from utils import rfq_send
+        calls = {"n": 0}
+        def spy(*a, **k):
+            calls["n"] += 1
+            return {"sent": False, "status": "stubbed"}
+        monkeypatch.setattr(rfq_send, "send_rfq", spy)
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]  # drafted, NOT approved
+
+        resp = api.post(f"/api/rfq-drafts/{did}/send")
+        assert resp.status_code == 409
+        assert calls["n"] == 0                                  # send_rfq never reached
+
+    def test_no_recipients_not_marked_sent(self, api, monkeypatch):
+        # No seeded recipient -> send_rfq returns no_recipients before any flag/network.
+        from utils import rfq_send
+        monkeypatch.setattr(rfq_send, "write_audit_log", lambda *a, **k: "")
+        _, did = _approved_draft(api, seed=False)
+        body = api.post(f"/api/rfq-drafts/{did}/send").json()
+        assert body["send_status"] == "no_recipients" and body["sent"] is False
+        assert body["draft_status"] == "approved"
+        assert api.get(f"/api/rfq-drafts/{did}").json()["status"] == "approved"
+
+    def test_send_never_touches_apollo(self, api, monkeypatch):
+        # Hard guarantee: a send cannot instantiate the Apollo client (no credit spend).
+        from utils import rfq_send
+        import utils.apollo_client as apollo_mod
+        monkeypatch.setattr(rfq_send, "write_audit_log", lambda *a, **k: "")
+        def boom(*a, **k):
+            raise AssertionError("Apollo must never be touched by a send")
+        monkeypatch.setattr(apollo_mod.ApolloClient, "__init__", boom)
+        _, did = _approved_draft(api)
+        resp = api.post(f"/api/rfq-drafts/{did}/send")
+        assert resp.status_code == 200 and resp.json()["send_status"] == "stubbed"  # no raise
+
+    def test_double_send_is_409(self, api, monkeypatch):
+        from utils import rfq_send
+        monkeypatch.setattr(rfq_send, "send_rfq",
+                            lambda *a, **k: {"sent": True, "status": "sent", "sent_message_id": "sm-2", "recipients": {}})
+        _, did = _approved_draft(api)
+        assert api.post(f"/api/rfq-drafts/{did}/send").json()["draft_status"] == "sent"
+        again = api.post(f"/api/rfq-drafts/{did}/send")
+        assert again.status_code == 409                         # sent is terminal

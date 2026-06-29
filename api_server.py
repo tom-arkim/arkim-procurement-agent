@@ -2921,6 +2921,60 @@ def reject_rfq_draft(draft_id: str, body: RfqDraftRejectRequest):
     return {"draft_id": draft["id"], "status": draft["status"], "rejected_by": draft["rejected_by"]}
 
 
+@app.post("/api/rfq-drafts/{draft_id}/send")
+def send_rfq_draft(draft_id: str):
+    """Send an APPROVED RFQ draft (RFQ wiring A2 — the first path that can send a real email).
+
+    Consumes the stored approval + frozen candidate snapshot and calls send_rfq behind
+    EMAIL_SEND_ENABLED. CLAIM-MATCHES-REALITY: the draft is marked 'sent' ONLY on a genuine
+    send (a real message went). With the flag OFF (default) send_rfq returns 'stubbed' without
+    touching the network, and on stubbed/no_recipients/error the draft stays 'approved' and
+    re-sendable — its 'sent' state always means a message actually went. The send is gated to
+    approved drafts (409 otherwise, and send_rfq is NEVER called for a non-approved draft).
+    Recipients come only from send_rfq's own local lookup_by_domain — NO contact resolution,
+    NO _escalate_contact, NO Apollo: this endpoint cannot spend an Apollo credit."""
+    from utils.procurement_agent.state import persistence
+    from utils import rfq_send
+
+    draft = persistence.get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    # Gate BEFORE send: only 'approved' -> 'sent' is legal. A drafted/rejected/sent draft 409s
+    # and send_rfq is never reached.
+    if not persistence.can_transition_draft(draft["status"], "sent"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"draft is '{draft['status']}' — only an approved draft can be sent",
+        )
+
+    approval = rfq_send.Approval(approved_by=draft["approved_by"], approved_at=draft["approved_at"])
+    result = rfq_send.send_rfq(
+        draft["candidate_snapshot"],   # the frozen snapshot the human approved (vendor_name + source_url)
+        draft["draft_body"],
+        approval,
+        run_id=draft["run_id"],
+    )
+
+    # Mark 'sent' ONLY on a genuine send. send_rfq returns a sent_message_id even when stubbed
+    # (it records a stubbed row), so key on result["sent"], never on the id's presence.
+    if result.get("sent"):
+        persistence.transition_draft(draft_id, "sent", sent_message_id=result.get("sent_message_id"))
+        draft_status = "sent"
+        sent_message_id = result.get("sent_message_id")
+    else:
+        draft_status = draft["status"]   # unchanged (approved) — re-sendable
+        sent_message_id = None
+
+    return {
+        "draft_id": draft_id,
+        "draft_status": draft_status,
+        "send_status": result.get("status"),   # sent | stubbed | no_recipients | error | not_sent_no_approval
+        "sent": bool(result.get("sent")),
+        "sent_message_id": sent_message_id,
+        "recipients": result.get("recipients"),
+    }
+
+
 class ShipToBody(BaseModel):
     company: str = ""
     address: str = ""
