@@ -88,3 +88,22 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
+/**
+ * Human-readable reason for a failed API call, or `null` for a pure network/connectivity
+ * failure (no response). Lets the UI distinguish a real server error (B/C — show the
+ * backend's `detail`) from "can't reach the backend" (A — the only case where "is the
+ * backend running?" is the right message), instead of masking everything as a catch-all.
+ */
+export function apiErrorMessage(err: unknown): string | null {
+  if (err instanceof ApiError) {
+    const detail = (err.body as { detail?: unknown } | undefined)?.detail;
+    if (typeof detail === "string" && detail.trim()) return detail;          // FastAPI {"detail": "..."}
+    if (Array.isArray(detail) && detail.length) {                            // 422 validation array
+      const msg = (detail[0] as { msg?: string })?.msg;
+      return msg ? `Invalid request: ${msg}` : `Request rejected (${err.status}).`;
+    }
+    return `Request failed (${err.status}).`;                                // a status, no usable detail
+  }
+  return null;                                                               // no response -> connectivity
+}

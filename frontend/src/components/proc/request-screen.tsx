@@ -16,7 +16,7 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { createRun, sendMessage, confirmIntake, uploadNameplate } from "@/lib/api";
 import { useRun } from "@/lib/queries";
-import { queryKeys } from "@/lib/query-client";
+import { queryKeys, apiErrorMessage } from "@/lib/query-client";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ArkimLoader } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
@@ -53,6 +53,9 @@ export function RequestScreen() {
   const [busy, setBusy] = useState(false);
   const [moreInput, setMoreInput] = useState(false);
   const [moreText, setMoreText] = useState("");
+  // The real failure reason (server detail) when the backend responded with an error;
+  // null means a pure network failure -> show the "is the backend running?" fallback.
+  const [errMsg, setErrMsg] = useState<string | null>(null);
 
   const { data: run } = useRun(runId ?? "", { enabled: Boolean(runId) });
 
@@ -78,7 +81,8 @@ export function RequestScreen() {
       }
       refresh(created.id);
       setStage("identify");
-    } catch {
+    } catch (e) {
+      setErrMsg(apiErrorMessage(e));   // server detail (B/C) or null for a network failure (A)
       setStage("error");
     }
   };
@@ -199,8 +203,8 @@ export function RequestScreen() {
         <div className="proc-working">
           <ProcIcon name="alert" size={20} color="var(--st-overdue)" />
           <div>
-            <div className="w-t">Couldn&apos;t process that request.</div>
-            <div className="w-s">Is the backend running? <button className="proc-btn" data-kind="quiet" style={{ padding: "2px 6px" }} onClick={() => setStage("entry")}>Try again</button></div>
+            <div className="w-t">{errMsg ?? "Couldn't process that request."}</div>
+            <div className="w-s">{errMsg ? null : <>Is the backend running? </>}<button className="proc-btn" data-kind="quiet" style={{ padding: "2px 6px" }} onClick={() => { setErrMsg(null); setStage("entry"); }}>Try again</button></div>
           </div>
         </div>
       )}
