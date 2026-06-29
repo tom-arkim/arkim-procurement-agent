@@ -1733,13 +1733,13 @@ class TestBasketApproval:
 # RFQ wiring A1 — draft create / review / approve / reject endpoints (NO send).
 # ---------------------------------------------------------------------------
 
-def _run_with_candidate(api):
-    """A run carrying one reconstructable Tier-3 candidate (Acme Pumps-t3-0)."""
+def _run_with_candidate(api, *, source_url="https://acme.com", vendor="Acme Pumps"):
+    """A run carrying one reconstructable Tier-3 candidate ('{vendor}-t3-0')."""
     rid = _create_run(api)
     _set_run(api, rid,
         asset_specs_json=json.dumps({"manufacturer": "Goulds", "model": "3196", "part_number": "PN-1"}),
         sourcing_results_json=json.dumps({"tier_3": {"results": [
-            {"vendor_name": "Acme Pumps", "source_url": "https://acme.com", "base_price": 200.0},
+            {"vendor_name": vendor, "source_url": source_url, "base_price": 200.0},
         ]}}))
     return rid
 
@@ -1893,10 +1893,13 @@ class TestRfqDraftSend:
         assert calls["n"] == 0                                  # send_rfq never reached
 
     def test_no_recipients_not_marked_sent(self, api, monkeypatch):
-        # No seeded recipient -> send_rfq returns no_recipients before any flag/network.
+        # A NO-DOMAIN candidate (source_url None) is the only no_recipients case after B seeds
+        # a generic inbox for any real domain. send_rfq returns no_recipients before any network.
         from utils import rfq_send
         monkeypatch.setattr(rfq_send, "write_audit_log", lambda *a, **k: "")
-        _, did = _approved_draft(api, seed=False)
+        rid = _run_with_candidate(api, source_url=None, vendor="NoDomain Co")
+        did = _make_draft_via_api(api, rid, candidate_id="NoDomain Co-t3-0").json()["draft_id"]
+        api.post(f"/api/rfq-drafts/{did}/approve", json={"approved_by": "tom"})
         body = api.post(f"/api/rfq-drafts/{did}/send").json()
         assert body["send_status"] == "no_recipients" and body["sent"] is False
         assert body["draft_status"] == "approved"
@@ -1922,3 +1925,59 @@ class TestRfqDraftSend:
         assert api.post(f"/api/rfq-drafts/{did}/send").json()["draft_status"] == "sent"
         again = api.post(f"/api/rfq-drafts/{did}/send")
         assert again.status_code == 409                         # sent is terminal
+
+
+# ---------------------------------------------------------------------------
+# RFQ wiring B — free contact-set assembly (cache -> generic inbox -> human-flag).
+# ZERO Apollo: nothing here can spend a credit.
+# ---------------------------------------------------------------------------
+
+class TestContactSetAssembly:
+    def test_assemble_seeds_generic_inbox_when_none(self, api):
+        # A domain with no cached contact -> construct + seed sales@{domain}, resolved.
+        from utils import supplier_registry
+        rs = supplier_registry.assemble_recipient_set("https://acme.com")
+        assert rs == {"to": ["sales@acme.com"], "cc": [], "status": "resolved"}
+        # Written back to the store, so a later read (or send_rfq) finds it.
+        again = supplier_registry.recipient_set(supplier_registry.lookup_by_domain("acme.com"))
+        assert again["to"] == ["sales@acme.com"]
+
+    def test_assemble_reuses_cached_primary(self, api):
+        from utils import supplier_registry
+        supplier_registry.upsert_primary_contact("acme.com", {
+            "primary_contact_email": "jane@acme.com", "primary_contact_status": "resolved"})
+        rs = supplier_registry.assemble_recipient_set("https://acme.com")
+        assert rs["to"] == ["jane@acme.com"] and rs["status"] == "resolved"
+
+    def test_assemble_no_domain_is_human_flag(self, api):
+        from utils import supplier_registry
+        assert supplier_registry.assemble_recipient_set(None) == {"to": [], "cc": [], "status": "needs_human"}
+        assert supplier_registry.assemble_recipient_set("") == {"to": [], "cc": [], "status": "needs_human"}
+
+    def test_create_surfaces_resolved_recipients(self, api):
+        rid = _run_with_candidate(api)
+        resp = _make_draft_via_api(api, rid).json()
+        assert resp["recipients"] == {"to": ["sales@acme.com"], "cc": [], "status": "resolved"}
+
+    def test_get_surfaces_live_recipients(self, api):
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]
+        draft = api.get(f"/api/rfq-drafts/{did}").json()
+        assert draft["recipients"]["to"] == ["sales@acme.com"] and draft["recipients"]["status"] == "resolved"
+
+    def test_no_domain_candidate_is_human_flag_not_falsely_sendable(self, api):
+        rid = _run_with_candidate(api, source_url=None, vendor="NoDomain Co")
+        resp = _make_draft_via_api(api, rid, candidate_id="NoDomain Co-t3-0").json()
+        assert resp["recipients"] == {"to": [], "cc": [], "status": "needs_human"}
+
+    def test_assembly_never_touches_apollo(self, api, monkeypatch):
+        # Hard guarantee: free assembly cannot instantiate the Apollo client (no credit spend).
+        from utils import supplier_registry
+        import utils.apollo_client as apollo_mod
+        def boom(*a, **k):
+            raise AssertionError("Apollo must never be touched by contact assembly")
+        monkeypatch.setattr(apollo_mod.ApolloClient, "__init__", boom)
+        assert supplier_registry.assemble_recipient_set("https://acme.com")["status"] == "resolved"
+        rid = _run_with_candidate(api, source_url="https://beta.com", vendor="Beta")
+        resp = _make_draft_via_api(api, rid, candidate_id="Beta-t3-0")    # create -> seeds, no raise
+        assert resp.status_code == 201

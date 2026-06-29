@@ -2826,6 +2826,22 @@ def reject_group(group_id: str, body: RejectRequest, caller: Optional[Caller] = 
 # The send (A2) is a separate endpoint that consumes an approved draft.
 # ---------------------------------------------------------------------------
 
+def _draft_recipients(draft: dict, *, seed: bool) -> dict:
+    """Resolve the draft's recipient set from the FROZEN snapshot's source_url via the FREE
+    path only (cache -> constructed generic inbox -> human-flag). NEVER Apollo. seed=True (at
+    draft-create) constructs+writes a generic inbox if the domain has none; seed=False (review/
+    GET) is read-only and reflects the current store — both compute via recipient_set, so what
+    the human reviews matches what send_rfq will use at send-time."""
+    from utils import supplier_registry
+    snap = draft.get("candidate_snapshot") or {}
+    source_url = snap.get("source_url")
+    if seed:
+        return supplier_registry.assemble_recipient_set(source_url)
+    domain = supplier_registry._normalize_domain(source_url or "")
+    rs = supplier_registry.recipient_set(supplier_registry.lookup_by_domain(domain) if domain else None)
+    return {"to": rs["to"], "cc": rs["cc"], "status": "resolved" if rs["to"] else "needs_human"}
+
+
 class RfqDraftCreateRequest(BaseModel):
     candidate_id: str
     tier: int
@@ -2866,11 +2882,15 @@ def create_rfq_draft(run_id: str, body: RfqDraftCreateRequest):
         candidate_snapshot=cand,     # send-sufficient: carries vendor_name + source_url
         draft_body=draft_body,
     )
+    # Assemble the recipient set via the FREE path (seeds a generic inbox if needed), so the
+    # human reviews who it goes to before approving. No Apollo, no escalation.
+    recipients = _draft_recipients(draft, seed=True)
     return {
         "draft_id": draft["id"],
         "status": draft["status"],
         "candidate_id": draft["candidate_id"],
         "draft_body": draft["draft_body"],
+        "recipients": recipients,
     }
 
 
@@ -2882,6 +2902,9 @@ def get_rfq_draft(draft_id: str):
     draft = persistence.get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
+    # Surface the CURRENT recipient set (read-only) so the approver sees who it goes to — the
+    # same recipient_set send_rfq uses, so review matches send.
+    draft["recipients"] = _draft_recipients(draft, seed=False)
     return draft
 
 

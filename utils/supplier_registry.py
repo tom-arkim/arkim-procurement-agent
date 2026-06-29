@@ -673,6 +673,34 @@ def recipient_set(record: Optional[dict]) -> dict:
     return {"to": to, "cc": cc}
 
 
+def assemble_recipient_set(domain_or_url: Optional[str]) -> dict:
+    """Resolve a usable recipient set for an RFQ, using ONLY the free path — NEVER Apollo.
+
+    The standalone free cascade (mirrors SourcingAgent._resolve_contact): a cached non-bounced
+    contact is reused; otherwise a generic ``sales@{domain}`` inbox is CONSTRUCTED, written back
+    to the store, and used; a missing domain yields no recipients and a human-flag. ZERO Apollo
+    exposure — only lookup_by_domain (SELECT), upsert_contact (write), recipient_set
+    (data-model). The credit-gated people-search/enrich escalation is a SEPARATE, manually
+    triggered step and is never reached here.
+
+    Returns {"to": list[str], "cc": list[str], "status": "resolved"|"needs_human"}.
+    """
+    norm = _normalize_domain(domain_or_url or "")
+    if not norm:
+        return {"to": [], "cc": [], "status": "needs_human"}   # no domain -> honest human-flag
+
+    rs = recipient_set(lookup_by_domain(norm))
+    if not rs["to"]:
+        # No usable contact yet — construct + seed the generic inbox (free; not verified).
+        upsert_contact(norm, {
+            "contact_email": f"sales@{norm}",
+            "contact_method": "generic_inbox",
+            "contact_status": "resolved",
+        })
+        rs = recipient_set(lookup_by_domain(norm))
+    return {"to": rs["to"], "cc": rs["cc"], "status": "resolved" if rs["to"] else "needs_human"}
+
+
 def record_sent_message(
     run_id: Optional[str],
     supplier_domain: Optional[str],
