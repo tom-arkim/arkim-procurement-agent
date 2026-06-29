@@ -1450,10 +1450,79 @@ class TestIntakeRouter:
         assert resp.status_code == 201
         assert resp.json()["phase"] == "intake"
 
-    def test_multi_routes_to_fanout_seam_without_creating_runs(self, api):
+    def test_single_part_creates_ungrouped_run(self, api):
+        # The single branch -> create_run -> group_id NULL. A single is NEVER a basket.
+        resp = api.post("/api/requests", json={"parts": [{"a": 1}]})
+        assert resp.status_code == 201
+        detail = api.get(f"/api/runs/{resp.json()['id']}").json()
+        assert detail["group_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Multi-part Increment 1, Stage 3 — fan-out: one request -> N independent grouped runs.
+# The runs are joined ONLY by a shared group_id; each is a normal run_id-scoped run.
+# ---------------------------------------------------------------------------
+
+class TestFanOut:
+    def test_fanout_creates_n_grouped_independent_runs(self, api):
+        resp = api.post("/api/requests", json={"parts": [{"p": 1}, {"p": 2}, {"p": 3}]})
+        assert resp.status_code == 201
+        body = resp.json()
+        gid, run_ids = body["group_id"], body["run_ids"]
+        assert gid
+        assert len(run_ids) == 3
+        assert len(set(run_ids)) == 3                       # distinct run_ids
+        for rid in run_ids:
+            detail = api.get(f"/api/runs/{rid}").json()
+            assert detail["group_id"] == gid                # all share the one label
+            assert detail["phase"] == "intake"              # normal fresh runs
+
+    def test_fanout_runs_advance_independently(self, api):
+        run_ids = api.post("/api/requests", json={"parts": [{}, {}, {}]}).json()["run_ids"]
+        # Advance ONE sibling directly; the others must be untouched (no shared state).
+        _set_run(api, run_ids[0], current_phase="sourcing")
+        assert api.get(f"/api/runs/{run_ids[0]}").json()["phase"] == "sourcing"
+        assert api.get(f"/api/runs/{run_ids[1]}").json()["phase"] == "intake"
+        assert api.get(f"/api/runs/{run_ids[2]}").json()["phase"] == "intake"
+
+    def test_fanout_group_filter_returns_exactly_the_siblings(self, api):
+        # Ties Stage 1's ?group_id= filter to real fan-out output.
+        body = api.post("/api/requests", json={"parts": [{}, {}, {}]}).json()
+        gid = body["group_id"]
+        filtered = api.get("/api/runs", params={"group_id": gid}).json()
+        assert {r["id"] for r in filtered} == set(body["run_ids"])
+
+    def test_fanout_is_all_or_nothing_on_partial_failure(self, api, monkeypatch):
+        # All-or-nothing: if the 2nd run fails to build, ZERO runs are persisted.
         before = len(api.get("/api/runs").json())
-        resp = api.post("/api/requests", json={"parts": [{"a": 1}, {"b": 2}]})
-        # Hits the Stage-3 seam, NOT the single path: 501, and no run was created.
-        assert resp.status_code == 501
-        assert "Stage 3" in resp.json()["detail"]
+        real_orm = api._api_server.SourcingRunORM
+        calls = {"n": 0}
+
+        def flaky(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("simulated insert failure")
+            return real_orm(*a, **k)
+
+        monkeypatch.setattr(api._api_server, "SourcingRunORM", flaky)
+        with pytest.raises(RuntimeError):
+            api.post("/api/requests", json={"parts": [{}, {}, {}]})
+        # No partial basket — count unchanged.
+        monkeypatch.setattr(api._api_server, "SourcingRunORM", real_orm)
         assert len(api.get("/api/runs").json()) == before
+
+    def test_maintenance_single_path_unchanged_fanout_deferred(self, api):
+        # Maintenance-path fan-out is DEFERRED (needs MaintenanceSubmission to carry N parts).
+        # The existing single from-maintenance path is byte-for-byte: one submission -> one
+        # run, NULL group.
+        sub = {
+            "submission_id": "sub-fanout-doc-1",
+            "facility_id": "fac-x",
+            "submitted_by": "tech@plant",
+            "asset_specs": {"manufacturer": "Acme", "part_number": "PN-1"},
+            "context": {"chat_thread_summary": "pump seal leaking", "urgency": "standard"},
+        }
+        resp = api.post("/api/runs/from-maintenance", json=sub)
+        assert resp.status_code == 201
+        detail = api.get(f"/api/runs/{resp.json()['run_id']}").json()
+        assert detail["group_id"] is None

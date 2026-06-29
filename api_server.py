@@ -861,22 +861,43 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
 # Sourcing run endpoints
 # ---------------------------------------------------------------------------
 
+def _new_run_orm(
+    *,
+    facility_id: str,
+    urgency_factor: float,
+    warranty_status: str,
+    company_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+) -> SourcingRunORM:
+    """Build (do not persist) a fresh run at phase=intake — the SINGLE construction the
+    create path uses. Shared by create_run (commits one) and _fan_out_intake (commits N in
+    one transaction), so fan-out reuses the create path instead of reimplementing it.
+    group_id is NULL for a single run, the shared basket label for a fanned one."""
+    now = datetime.now(timezone.utc)
+    return SourcingRunORM(
+        id=str(uuid.uuid4()),
+        facility_id=facility_id,
+        company_id=company_id,
+        group_id=group_id,
+        current_phase=Phase.INTAKE.value,
+        urgency_factor=urgency_factor,
+        warranty_status=warranty_status,
+        initiated_at=now,
+        updated_at=now,
+    )
+
+
 @app.post("/api/runs", response_model=CreateRunResponse, status_code=201)
 def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_caller)):
     """Create a new sourcing run and return it in intake phase.
 
     D2 prereq #1 (keys only): stamp the run's tenant key (company PIN) from the verified
     Caller when one is present — NEVER from the body. No token (today's demo) -> NULL."""
-    now = datetime.now(timezone.utc)
-    run = SourcingRunORM(
-        id=str(uuid.uuid4()),
+    run = _new_run_orm(
         facility_id=body.facility_id,
-        company_id=caller.company_id if caller else None,
-        current_phase=Phase.INTAKE.value,
         urgency_factor=body.urgency_factor,
         warranty_status=body.warranty_status,
-        initiated_at=now,
-        updated_at=now,
+        company_id=caller.company_id if caller else None,
     )
     with _SessionFactory() as session:
         session.add(run)
@@ -904,11 +925,38 @@ def route_intake(part_count: int) -> str:
     return "multi" if part_count >= 2 else "single"
 
 
-def _fan_out_intake(body: IntakeRequest, caller: Optional[Caller]):
-    """Fan-out seam for N>=2 — Stage 3 mints one group_id and creates N runs under it. STUB
-    for now: the routing branch + contract exist so the single path can be proven untouched,
-    but no fan-out logic is implemented here."""
-    raise HTTPException(status_code=501, detail="multi-part fan-out not yet implemented (lands in Stage 3)")
+def _fan_out_intake(body: IntakeRequest, caller: Optional[Caller]) -> Dict[str, Any]:
+    """Fan a >=2-part request into N independent single-part runs under ONE shared group_id.
+
+    Each run is constructed EXACTLY as the single create_run does (same bare intake shell;
+    part contents are filled later via intake chat per run), plus the group_id label. The
+    runs are joined ONLY by that label: distinct run_ids, distinct rows, no FK between
+    siblings, no shared mutable state, no run-spanning lock — each advances on its own
+    run_id-scoped guards after birth.
+
+    Partial-failure policy: ALL-OR-NOTHING. The N runs are built then committed in ONE
+    transaction; if any insert fails the whole batch rolls back (zero runs persisted). For a
+    money-adjacent basket a half-created request — some lines sourced, others silently
+    dropped — is a correctness hazard; a clean failure the caller can retry is safer than an
+    ambiguous partial basket. (Atomic birth only — it adds no shared runtime state; once
+    committed the runs are fully independent.)"""
+    group_id = str(uuid.uuid4())
+    company_id = caller.company_id if caller else None
+    runs = [
+        _new_run_orm(
+            facility_id=body.facility_id,
+            urgency_factor=body.urgency_factor,
+            warranty_status=body.warranty_status,
+            company_id=company_id,
+            group_id=group_id,
+        )
+        for _ in body.parts
+    ]
+    run_ids = [r.id for r in runs]  # client-assigned UUIDs — safe to read pre-commit
+    with _SessionFactory() as session:
+        session.add_all(runs)
+        session.commit()  # single atomic commit — all N or none
+    return {"group_id": group_id, "run_ids": run_ids}
 
 
 @app.post("/api/requests", status_code=201)
@@ -916,7 +964,7 @@ def create_request(body: IntakeRequest, caller: Optional[Caller] = Depends(get_c
     """Intake front door: route a request to the single-run path (<=1 part) or the fan-out
     path (>=2 parts). The single branch DELEGATES to the unchanged create_run — byte-for-byte
     the existing path; part contents (if any) are filled via intake chat exactly as today.
-    The multi branch hits the fan-out seam (Stage 3)."""
+    The multi branch fans out into N grouped independent runs (one shared group_id)."""
     if route_intake(len(body.parts)) == "multi":
         return _fan_out_intake(body, caller)
     return create_run(
