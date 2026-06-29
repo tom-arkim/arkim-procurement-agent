@@ -38,6 +38,7 @@ from utils.auth import Caller, get_caller
 # Import the existing persistence layer
 from utils.procurement_agent.state.persistence import (
     SourcingRunORM,
+    RequestGroupApprovalORM,
     _SessionFactory,
     Base,
     _engine,
@@ -2653,6 +2654,167 @@ def get_group(group_id: str):
         run_count=len(rows),
         runs=rows,
     )
+
+
+# ---------------------------------------------------------------------------
+# Basket-total approval rollup (multi-part Increment 1, Stage 5)
+#
+# The crux: the basket routes approval on the BASKET TOTAL, ONCE. A sum that crosses a
+# threshold requires that threshold's approver count even when every individual line is
+# sub-threshold (3x$2k = $6k needs 2 approvers though each $2k line alone needs 1). This is
+# NOT N per-run approvals — a sub-threshold line cannot self-approve out of the basket gate.
+# Children advance only via the legal transition under the ONE basket decision.
+# ---------------------------------------------------------------------------
+
+def _advance_run_to_approved(
+    run: SourcingRunORM, *, basket_approval_id: str, basket_total: float, approver_names: list[str],
+) -> None:
+    """Advance ONE child run pending_first_approval -> approved through the LEGAL transition
+    (validate_transition), under the single basket decision. The child's OWN
+    _approval_path.approvers_required does NOT govern here — the basket total already did.
+    The child records an approval_history entry that REFERENCES the basket decision rather
+    than fabricating an independent per-child human approval."""
+    from utils.procurement_agent.state.phases import validate_transition
+    current = Phase(run.current_phase)
+    if not validate_transition(current, Phase.APPROVED):
+        raise HTTPException(status_code=409, detail=f"run {run.id} not awaiting approval (phase {current.value})")
+    now = datetime.now(timezone.utc)
+    history = json.loads(run.approval_history_json) if run.approval_history_json else []
+    history.append({
+        "sequence": len(history) + 1,
+        "action": "approved",
+        "approver_name": "(basket decision)",
+        "approver_role": "basket",
+        "notes": f"Authorised by basket approval {basket_approval_id} — basket total "
+                 f"${basket_total:,.2f}; approver(s): {', '.join(approver_names)}",
+        "basket_approval_id": basket_approval_id,
+        "acted_at": now.isoformat(),
+    })
+    run.approval_history_json = json.dumps(history)
+    run.current_phase = Phase.APPROVED.value
+    run.updated_at = now
+
+
+@app.post("/api/groups/{group_id}/approve")
+def approve_group(group_id: str, body: ApproveRequest, caller: Optional[Caller] = Depends(get_caller)):
+    """Approve a basket on the BASKET TOTAL — routed ONCE via determine_approval_path. Gathers
+    the required number of approvals against the basket record; only when met does it advance
+    EVERY child pending_first_approval -> approved via the legal transition. Children never go
+    through the per-run /approve, and no child's own _approval_path governs the basket gate."""
+    from utils.procurement_agent.state import persistence
+    from utils.procurement_agent.state.approval_rules import determine_approval_path
+
+    runs = persistence.list_runs(group_id=group_id, limit=500)
+    if not runs:
+        raise HTTPException(status_code=404, detail="Basket not found")
+    if not all(r.get("current_phase") == Phase.PENDING_FIRST_APPROVAL.value for r in runs):
+        raise HTTPException(status_code=409, detail="Basket not ready — every part must be selected and awaiting approval.")
+
+    # Route ONCE on the basket total, via the SAME helper Stage 4 displays (display == gate).
+    basket_total = _basket_total(runs)
+    facility_id = runs[0].get("facility_id") or "00000000-0000-0000-0000-000000000000"
+    approvers_required, _roles = determine_approval_path(facility_id, basket_total)
+    approver_id = caller.user_id if caller else None
+
+    with _SessionFactory() as session:
+        rec = session.query(RequestGroupApprovalORM).filter_by(group_id=group_id).first()
+        if rec is None:
+            rec = RequestGroupApprovalORM(
+                id=str(uuid.uuid4()), group_id=group_id, facility_id=facility_id,
+                basket_total=basket_total, approvers_required=approvers_required,
+                approvals_received_json="[]", status="pending_first",
+            )
+            session.add(rec)
+        if rec.status in ("approved", "rejected"):
+            raise HTTPException(status_code=409, detail=f"Basket already {rec.status}.")
+
+        received = json.loads(rec.approvals_received_json or "[]")
+        # M1-style distinct approver: enforced only on a verified identity (no-auth demo skips).
+        if approver_id is not None and approver_id in {a.get("approver_id") for a in received}:
+            raise HTTPException(status_code=409, detail="A second, distinct approver is required — you have already approved this basket.")
+        received.append({
+            "approver_id": approver_id,
+            "approver_name": body.approver_name,
+            "approver_role": body.approver_role,
+            "at": datetime.now(timezone.utc).isoformat(),
+        })
+        # Re-route on the current total each call (a child's selection may have changed).
+        rec.basket_total = basket_total
+        rec.approvers_required = approvers_required
+        rec.approvals_received_json = json.dumps(received)
+
+        if len(received) >= approvers_required:
+            rec.status = "approved"
+            approver_names = [a.get("approver_name") for a in received]
+            for r in runs:
+                child = session.get(SourcingRunORM, r["id"])
+                if child is not None:
+                    _advance_run_to_approved(
+                        child, basket_approval_id=rec.id, basket_total=basket_total, approver_names=approver_names,
+                    )
+        elif approvers_required >= 2 and len(received) == 1:
+            rec.status = "pending_second"
+        else:
+            rec.status = "pending_first"
+        rec.updated_at = datetime.now(timezone.utc)
+        session.commit()
+        result = {
+            "group_id": group_id,
+            "status": rec.status,
+            "approvals_received": len(received),
+            "approvers_required": approvers_required,
+            "basket_total": basket_total,
+        }
+    return result
+
+
+@app.post("/api/groups/{group_id}/reject")
+def reject_group(group_id: str, body: RejectRequest, caller: Optional[Caller] = Depends(get_caller)):
+    """Reject a basket — non-terminal: returns EVERY child to comparison (re-pick), clears
+    each selection, commits NO order. Mirrors the per-run reject (a backward reset) at basket
+    scope, and records the rejection on the basket record + each child's history."""
+    from utils.procurement_agent.state import persistence
+
+    runs = persistence.list_runs(group_id=group_id, limit=500)
+    if not runs:
+        raise HTTPException(status_code=404, detail="Basket not found")
+    now = datetime.now(timezone.utc)
+
+    with _SessionFactory() as session:
+        rec = session.query(RequestGroupApprovalORM).filter_by(group_id=group_id).first()
+        if rec is None:  # rejecting a basket never approve-touched — still record the decision
+            facility_id = runs[0].get("facility_id") or "00000000-0000-0000-0000-000000000000"
+            rec = RequestGroupApprovalORM(
+                id=str(uuid.uuid4()), group_id=group_id, facility_id=facility_id,
+                basket_total=_basket_total(runs), approvers_required=0,
+                approvals_received_json="[]", status="pending_first",
+            )
+            session.add(rec)
+        if rec.status in ("approved", "rejected"):
+            raise HTTPException(status_code=409, detail=f"Basket already {rec.status}.")
+        rec.status = "rejected"
+        rec.updated_at = now
+
+        for r in runs:
+            child = session.get(SourcingRunORM, r["id"])
+            if child is None:
+                continue
+            history = json.loads(child.approval_history_json) if child.approval_history_json else []
+            history.append({
+                "sequence": len(history) + 1,
+                "action": "rejected",
+                "approver_name": body.approver_name,
+                "approver_role": body.approver_role,
+                "notes": f"Basket rejected ({rec.id}): {body.notes}",
+                "basket_approval_id": rec.id,
+                "acted_at": now.isoformat(),
+            })
+            child.approval_history_json = json.dumps(history)
+            child.selected_candidate_json = None
+            child.current_phase = Phase.COMPARISON.value
+            child.updated_at = now
+        session.commit()
+    return {"group_id": group_id, "status": "rejected", "phase": Phase.COMPARISON.value}
 
 
 class ShipToBody(BaseModel):

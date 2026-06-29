@@ -151,6 +151,27 @@ class ApprovalRuleORM(Base):
     )
 
 
+class RequestGroupApprovalORM(Base):
+    """The basket-level approval decision (multi-part Increment 1, Stage 5). One row per
+    basket (group_id). It holds the decision routed on the BASKET TOTAL — the human(s)
+    authorise the whole cart once; the per-run approval_history of each child references
+    this decision rather than recording N independent human approvals. Created on first
+    approve (new table, auto-created by create_all — no ALTER)."""
+    __tablename__ = "request_group_approvals"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    group_id = Column(String(36), nullable=False, index=True)
+    facility_id = Column(String(36), nullable=False)
+    basket_total = Column(Float, nullable=False, default=0.0)
+    approvers_required = Column(Integer, nullable=False, default=1)
+    # JSON array of {approver_id, approver_name, approver_role, at} — mirrors approval_history.
+    approvals_received_json = Column(Text, nullable=False, default="[]")
+    # pending_first | pending_second | approved | rejected
+    status = Column(String(30), nullable=False, default="pending_first")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
 def migrate_run_state(engine) -> None:
     """Phase B0 additive migration: ensure the document_status column exists on
     sourcing_runs for pre-B0 databases. Idempotent (guarded ALTER) and additive —

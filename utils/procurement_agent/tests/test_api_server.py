@@ -1617,3 +1617,113 @@ class TestBasketRollup:
         assert set(run_ids) == {r["run_id"] for r in body["runs"]}
         # The single run's id is not a group id -> 404.
         assert api.get(f"/api/groups/{single}").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Multi-part Increment 1, Stage 5 — basket-total approval rollup.
+# Route ONCE on the basket total; a sub-threshold line cannot self-approve out of the gate;
+# children advance only via the legal transition under the one basket decision.
+# ---------------------------------------------------------------------------
+
+def _ready_child(api, run_id, amount, *, line_required=1):
+    """Put a fanned child into 'selected, awaiting approval' with a line amount. line_required
+    is the line's OWN _approval_path count (1 = sub-threshold) — the basket total must override
+    it, not defer to it."""
+    _set_run(api, run_id,
+             current_phase="pending_first_approval",
+             selected_candidate_json=json.dumps({
+                 "candidate_id": "x", "tier": 1,
+                 "_approval_path": {"approvers_required": line_required, "grand_total_usd": amount},
+             }))
+
+def _approve_basket(api, gid, name):
+    return api.post(f"/api/groups/{gid}/approve", json={"approver_name": name, "approver_role": "ops"})
+
+
+class TestBasketApproval:
+    def test_subthreshold_lines_sum_crosses_dual_approver_gate(self, api):
+        # HEADLINE: 3x$2k = $6k must require 2 approvers even though each $2k line needs 1.
+        from utils.procurement_agent.state.approval_rules import determine_approval_path
+        fac = "00000000-0000-0000-0000-000000000000"
+        assert determine_approval_path(fac, 2000.0)[0] == 1     # one line alone
+        assert determine_approval_path(fac, 6000.0)[0] == 2     # the basket total
+
+        gid, kids = _fanout(api, 3)
+        for rid in kids:
+            _ready_child(api, rid, 2000.0, line_required=1)      # each line self-says "1 approver"
+
+        r1 = _approve_basket(api, gid, "Ann")
+        assert r1.status_code == 200
+        body = r1.json()
+        assert body["approvers_required"] == 2                   # routed on the $6k total
+        assert body["basket_total"] == 6000.0
+        assert body["status"] == "pending_second"
+        # Gate holds: ONE approval has NOT advanced any child (no self-approve-out).
+        for rid in kids:
+            assert api.get(f"/api/runs/{rid}").json()["phase"] == "pending_first_approval"
+
+    def test_basket_approve_gathers_required_then_advances_all_children(self, api):
+        gid, kids = _fanout(api, 3)
+        for rid in kids:
+            _ready_child(api, rid, 2000.0)
+        _approve_basket(api, gid, "Ann")                         # 1 of 2
+        r2 = _approve_basket(api, gid, "Bob")                    # 2 of 2 -> approved
+        assert r2.json()["status"] == "approved"
+        for rid in kids:
+            assert api.get(f"/api/runs/{rid}").json()["phase"] == "approved"
+            hist = _read_history(api, rid)
+            entry = hist[-1]
+            assert entry["action"] == "approved"
+            assert entry["approver_role"] == "basket"            # references the basket decision
+            assert entry["basket_approval_id"]                   # not N fabricated human approvals
+
+    def test_single_approver_basket_advances_on_first_approval(self, api):
+        # A sub-$5k basket total needs only 1 approver -> first approval advances children.
+        gid, kids = _fanout(api, 2)
+        for rid in kids:
+            _ready_child(api, rid, 1000.0)                       # $2k total < $5k -> 1 approver
+        r = _approve_basket(api, gid, "Ann")
+        assert r.json()["approvers_required"] == 1
+        assert r.json()["status"] == "approved"
+        for rid in kids:
+            assert api.get(f"/api/runs/{rid}").json()["phase"] == "approved"
+
+    def test_basket_approve_requires_all_children_ready(self, api):
+        gid, (a, b, c) = _fanout(api, 3)
+        _ready_child(api, a, 2000.0)
+        _ready_child(api, b, 2000.0)
+        # c still at intake -> basket not ready.
+        assert _approve_basket(api, gid, "Ann").status_code == 409
+
+    def test_basket_reject_returns_children_to_repick(self, api):
+        gid, kids = _fanout(api, 3)
+        for rid in kids:
+            _ready_child(api, rid, 2000.0)
+        r = api.post(f"/api/groups/{gid}/reject",
+                     json={"approver_name": "Ann", "approver_role": "ops", "notes": "changed plan"})
+        assert r.status_code == 200
+        for rid in kids:
+            detail = api.get(f"/api/runs/{rid}").json()
+            assert detail["phase"] == "comparison"               # non-terminal re-pick
+            assert detail["selected_candidate"] is None          # selection cleared, no order committed
+
+    def test_displayed_total_equals_routed_total(self, api):
+        gid, kids = _fanout(api, 3)
+        for rid in kids:
+            _ready_child(api, rid, 2000.0)
+        displayed = api.get(f"/api/groups/{gid}").json()["basket_total"]   # Stage 4 display
+        routed = _approve_basket(api, gid, "Ann").json()["basket_total"]   # Stage 5 gate
+        assert displayed == routed == 6000.0
+
+    def test_single_part_run_per_run_approval_unchanged(self, api):
+        # A NULL-group run uses the existing per-run /approve, entirely unchanged.
+        rid = _create_run(api)
+        _set_run(api, rid, current_phase="pending_first_approval",
+                 selected_candidate_json=json.dumps({
+                     "candidate_id": "x", "tier": 1,
+                     "_approval_path": {"approvers_required": 1, "grand_total_usd": 100.0},
+                 }))
+        r = api.post(f"/api/runs/{rid}/approve", json={"approver_name": "Sam", "approver_role": "ops"})
+        assert r.status_code == 200
+        assert r.json()["phase"] == "approved"
+        assert api.get(f"/api/runs/{rid}").json()["group_id"] is None
