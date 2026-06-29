@@ -303,13 +303,17 @@ def list_runs(
     limit: int = 20,
     offset: int = 0,
     db_url: Optional[str] = None,
+    group_id: Optional[str] = None,
 ) -> list[dict]:
-    """Return recent runs ordered by created_at DESC."""
+    """Return recent runs ordered by created_at DESC. `group_id` returns only one basket's
+    runs (additive; absent -> unchanged)."""
     session = _get_session(db_url)
     try:
         q = session.query(SourcingRunORM).order_by(SourcingRunORM.created_at.desc())
         if facility_id:
             q = q.filter(SourcingRunORM.facility_id == facility_id)
+        if group_id:
+            q = q.filter(SourcingRunORM.group_id == group_id)
         rows = q.offset(offset).limit(limit).all()
         return [_orm_to_dict(r) for r in rows]
     finally:

@@ -2531,6 +2531,130 @@ def list_events(limit: int = 50):
     return {"count": len(events), "events": events}
 
 
+# ---------------------------------------------------------------------------
+# Basket status rollup (read-only) — GET /api/groups/{group_id}
+#
+# Aggregates the N runs sharing a group_id into one basket view. Mirrors the _derive_events
+# discipline: computed on read, no writes, no new table, fail-soft per row. Single-part runs
+# (group_id NULL) are never returned — they are not baskets. The amount helpers below are the
+# SINGLE source of a run's/basket's money: Stage 5's approval gate ROUTES on exactly what
+# this endpoint DISPLAYS, by calling the same helpers on the same field.
+# ---------------------------------------------------------------------------
+
+_UNIDENTIFIED_PART = "Unidentified — intake in progress"
+
+
+def _run_selected_amount(run: dict) -> float:
+    """A run's selected line amount (USD) — THE field Stage 5 routes on:
+    selected_candidate_json._approval_path.grand_total_usd. No selection yet, or anything
+    malformed, contributes 0.0 — never a fabricated amount. Fully defensive (never raises)."""
+    sel = run.get("selected_candidate_json")
+    if not isinstance(sel, dict):
+        return 0.0
+    path = sel.get("_approval_path")
+    if not isinstance(path, dict):
+        return 0.0
+    try:
+        return float(path.get("grand_total_usd") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _basket_total(runs: list[dict]) -> float:
+    """The basket total — the sum Stage 5's gate routes on. Defined as the sum of the SAME
+    per-run helper this endpoint displays, so display and routing can never diverge."""
+    return sum(_run_selected_amount(r) for r in runs)
+
+
+def _run_part_label(run: dict) -> Optional[str]:
+    """Human part label from the run's asset_specs — NEVER invented. Returns None when no
+    part has been identified yet (intake in progress), so the caller shows a placeholder."""
+    specs = run.get("asset_specs_json")
+    if not isinstance(specs, dict):
+        return None
+    mfr = (specs.get("manufacturer") or "").strip()
+    model = (specs.get("model") or "").strip()
+    pn = (specs.get("part_number") or "").strip()
+    label = " ".join(p for p in (mfr, model or pn) if p).strip()
+    return label or None
+
+
+def _basket_status(child_phases: list[str]) -> str:
+    """A small, honest basket-level status derived from the children's phases. Mixed phases
+    are reported as 'mixed' — never papered over."""
+    phases = {p for p in child_phases if p}
+    if not phases:
+        return "empty"
+    if Phase.ERROR.value in phases:
+        return "has_errors"
+    if phases <= {Phase.PENDING_INTAKE.value, Phase.INTAKE.value}:
+        return "all_intake"
+    if phases <= {Phase.INVENTORY.value, Phase.SOURCING.value, Phase.COMPARISON.value}:
+        return "sourcing_in_progress"
+    if phases <= {Phase.PENDING_FIRST_APPROVAL.value, Phase.PENDING_SECOND_APPROVAL.value}:
+        return "all_awaiting_approval"
+    if phases <= {Phase.APPROVED.value, Phase.EXECUTING.value, Phase.FULFILLING.value, Phase.COMPLETED.value}:
+        return "all_committed"
+    return "mixed"
+
+
+class BasketRunRow(BaseModel):
+    run_id: Optional[str] = None
+    part: Optional[str] = None            # label or placeholder; None only on a degraded row
+    phase: Optional[str] = None
+    selected_amount: float = 0.0          # 0.0 until a candidate is selected (never faked)
+    error: Optional[str] = None           # set when this row degraded (fail-soft), else None
+
+
+class BasketRollup(BaseModel):
+    group_id: str
+    status: str
+    basket_total: float
+    run_count: int
+    runs: List[BasketRunRow]
+
+
+@app.get("/api/groups/{group_id}", response_model=BasketRollup)
+def get_group(group_id: str):
+    """Read-only basket rollup over the runs sharing `group_id`: per-run part/phase/selected
+    amount, a derived basket status, and the basket_total (the exact figure Stage 5 routes
+    on). No writes. Fail-soft: a malformed child degrades to an error row, never 500-ing the
+    basket. Unknown group -> 404."""
+    import logging
+    from utils.procurement_agent.state import persistence
+    log = logging.getLogger(__name__)
+    try:
+        runs = persistence.list_runs(group_id=group_id, limit=500)
+    except Exception as exc:
+        log.warning("[groups] list_runs failed for %s: %s", group_id, exc)
+        runs = []
+    if not runs:
+        raise HTTPException(status_code=404, detail="Basket not found")
+
+    rows: List[BasketRunRow] = []
+    for run in runs:
+        try:
+            rows.append(BasketRunRow(
+                run_id=run.get("id"),
+                part=_run_part_label(run) or _UNIDENTIFIED_PART,
+                phase=run.get("current_phase"),
+                selected_amount=_run_selected_amount(run),
+            ))
+        except Exception as exc:  # one bad row degrades, the basket still returns
+            log.warning("[groups] row degraded for run %s: %s", run.get("id"), exc)
+            rows.append(BasketRunRow(run_id=run.get("id"), phase=run.get("current_phase"), error=str(exc)))
+
+    # basket_total comes from the shared helper over the raw runs (the Stage-5 routing figure),
+    # so it stays correct even if a display row degraded.
+    return BasketRollup(
+        group_id=group_id,
+        status=_basket_status([r.get("current_phase") for r in runs]),
+        basket_total=_basket_total(runs),
+        run_count=len(rows),
+        runs=rows,
+    )
+
+
 class ShipToBody(BaseModel):
     company: str = ""
     address: str = ""

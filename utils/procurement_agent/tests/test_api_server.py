@@ -1526,3 +1526,94 @@ class TestFanOut:
         assert resp.status_code == 201
         detail = api.get(f"/api/runs/{resp.json()['run_id']}").json()
         assert detail["group_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# Multi-part Increment 1, Stage 4 — read-only basket status rollup.
+# Computed on read, no writes, fail-soft. The amount helpers are the SINGLE source for
+# both the displayed basket_total now and Stage 5's routing total.
+# ---------------------------------------------------------------------------
+
+def _fanout(api, n):
+    """Fan out n parts; return (group_id, [run_ids])."""
+    body = api.post("/api/requests", json={"parts": [{} for _ in range(n)]}).json()
+    return body["group_id"], body["run_ids"]
+
+def _stamp_amount(api, run_id, amount):
+    """Record a selected candidate with a grand_total_usd on a run (Stage-5's routed field)."""
+    _set_run(api, run_id, selected_candidate_json=json.dumps(
+        {"candidate_id": "x", "tier": 1, "_approval_path": {"grand_total_usd": amount}}))
+
+
+class TestBasketRollup:
+    def test_rollup_returns_grouped_rows_and_status(self, api):
+        gid, run_ids = _fanout(api, 3)
+        body = api.get(f"/api/groups/{gid}").json()
+        assert body["group_id"] == gid
+        assert body["run_count"] == 3
+        assert {r["run_id"] for r in body["runs"]} == set(run_ids)
+        assert all(r["phase"] == "intake" for r in body["runs"])
+        assert body["status"] == "all_intake"
+        # Fresh fan-out runs have no part identified yet -> honest placeholder, not invented.
+        assert all(r["part"] == "Unidentified — intake in progress" for r in body["runs"])
+
+    def test_basket_total_sums_selected_and_zero_when_unselected(self, api):
+        gid, (a, b, c) = _fanout(api, 3)
+        _stamp_amount(api, a, 2000.0)
+        _stamp_amount(api, b, 1500.0)
+        # c left unselected -> contributes 0, not a fabricated amount.
+        body = api.get(f"/api/groups/{gid}").json()
+        amounts = {r["run_id"]: r["selected_amount"] for r in body["runs"]}
+        assert amounts[a] == 2000.0
+        assert amounts[b] == 1500.0
+        assert amounts[c] == 0.0
+        assert body["basket_total"] == 3500.0
+
+    def test_displayed_total_equals_shared_routing_helper(self, api):
+        # The invariant Stage 5 depends on: the number shown == the number that will be gated
+        # on. Lock it now — endpoint total == _basket_total == sum of the per-run helper.
+        from utils.procurement_agent.state import persistence
+        gid, (a, b, _) = _fanout(api, 3)
+        _stamp_amount(api, a, 2000.0)
+        _stamp_amount(api, b, 1500.0)
+        shown = api.get(f"/api/groups/{gid}").json()["basket_total"]
+        runs = persistence.list_runs(group_id=gid, limit=500)
+        helper_total = api._api_server._basket_total(runs)
+        manual = sum(api._api_server._run_selected_amount(r) for r in runs)
+        assert shown == helper_total == manual == 3500.0
+
+    def test_mixed_phase_status_is_honest(self, api):
+        gid, (a, b, c) = _fanout(api, 3)
+        _set_run(api, a, current_phase="intake")
+        _set_run(api, b, current_phase="sourcing")
+        _set_run(api, c, current_phase="approved")
+        assert api.get(f"/api/groups/{gid}").json()["status"] == "mixed"
+
+    def test_failsoft_degraded_row_still_returns_200(self, api, monkeypatch):
+        gid, (a, b, c) = _fanout(api, 3)
+        real = api._api_server._run_part_label
+        def boom(run):
+            if run.get("id") == b:
+                raise RuntimeError("bad part read")
+            return real(run)
+        monkeypatch.setattr(api._api_server, "_run_part_label", boom)
+
+        resp = api.get(f"/api/groups/{gid}")
+        assert resp.status_code == 200                  # one bad row does NOT sink the basket
+        rows = {r["run_id"]: r for r in resp.json()["runs"]}
+        assert rows[b]["error"] == "bad part read"      # degraded row surfaced honestly
+        assert rows[a]["error"] is None and rows[c]["error"] is None
+        assert resp.json()["run_count"] == 3
+
+    def test_unknown_group_id_404(self, api):
+        assert api.get("/api/groups/does-not-exist").status_code == 404
+
+    def test_null_group_run_is_invisible(self, api):
+        # A single (NULL-group) run is never part of a basket rollup.
+        single = _create_run(api)
+        gid, run_ids = _fanout(api, 2)
+        body = api.get(f"/api/groups/{gid}").json()
+        assert single not in {r["run_id"] for r in body["runs"]}
+        assert set(run_ids) == {r["run_id"] for r in body["runs"]}
+        # The single run's id is not a group id -> 404.
+        assert api.get(f"/api/groups/{single}").status_code == 404
