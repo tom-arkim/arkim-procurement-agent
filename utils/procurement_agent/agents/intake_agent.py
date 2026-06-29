@@ -281,6 +281,19 @@ class IntakeAgent:
         else:
             extracted = self._extract_text(text, prior_specs, prior_question=prior_question)
 
+        # The extractor's contract is ONE spec object (a dict). A LIST means the LLM saw
+        # MULTIPLE parts (it emits one object per part) — single-part intake can't merge that.
+        # It is a describable user situation, NOT a server error: ask for one part at a time
+        # (no silent data loss, no 502). A list-wrapped single part is unwrapped; an empty/
+        # malformed list degrades to {} so the merge below asks for clarification, never crashes.
+        if isinstance(extracted, list):
+            parts = [p for p in extracted if isinstance(p, dict)]
+            if len(parts) >= 2:
+                return self._multi_part_response(prior_specs, len(parts))
+            extracted = parts[0] if parts else {}
+        elif not isinstance(extracted, dict):
+            extracted = {}
+
         # Merge with prior specs — new non-null values win
         merged = dict(prior_specs)
         for k, v in extracted.items():
@@ -348,6 +361,36 @@ class IntakeAgent:
                 "reasoning":               extracted.get("confidence_reasoning"),
                 "proceed_state":           state,
                 "caveat":                  caveat,
+            },
+        }
+
+    @staticmethod
+    def _multi_part_response(prior_specs: dict, n: int) -> dict:
+        """Honest intake result when the user described MULTIPLE parts (the extractor returned a
+        list of >1). Returns the normal run() contract with sufficient=False so send_message
+        replies with the message at HTTP 200 — the run stays in intake, no specs are merged from
+        the multi-part list (no silent data loss), and it is NOT a 502 (not a server error)."""
+        prior_specs = prior_specs or {}
+        mfg_conf = float(prior_specs.get("manufacturer_confidence") or 0)
+        part_conf = float(prior_specs.get("part_id_confidence") or 0)
+        message = (
+            f"It looks like you've described several parts ({n} detected). "
+            f"Please submit one part at a time for now."
+        )
+        return {
+            "asset_specs":             dict(prior_specs),   # unchanged — nothing merged from the list
+            "manufacturer_confidence": mfg_conf,
+            "part_id_confidence":      part_conf,
+            "sufficient":              False,
+            "follow_up_question":      message,
+            "manufacturer_caveat":     None,
+            "confidence_summary": {
+                "manufacturer_confidence": mfg_conf,
+                "part_id_confidence":      part_conf,
+                "missing_field":           None,
+                "reasoning":               f"Multiple parts detected ({n}) — single-part intake.",
+                "proceed_state":           "multi_part_detected",
+                "caveat":                  None,
             },
         }
 

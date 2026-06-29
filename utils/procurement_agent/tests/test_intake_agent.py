@@ -836,3 +836,54 @@ class TestDetectMediaType:
 
     def test_riff_without_webp_marker_defaults_to_jpeg(self):
         assert _detect_media_type(b"RIFF\x00\x00\x00\x00AVI " + b"\x00" * 64) == "image/jpeg"
+
+
+# ---------------------------------------------------------------------------
+# Multi-part list extraction — the LLM returns a JSON ARRAY when the user describes
+# several parts. run() must NOT crash (the old `extracted.items()` AttributeError) — it
+# detects the list and responds honestly ("one part at a time"), unwraps a list-of-1, and
+# degrades an empty/malformed list to a clarification.
+# ---------------------------------------------------------------------------
+
+class TestMultiPartListHandling:
+    def test_list_of_two_returns_honest_one_at_a_time(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {"manufacturer_confidence": 0, "part_id_confidence": 0}
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(
+                [_extracted({"manufacturer": "SKF"}), _extracted({"manufacturer": "Gates"})])
+            result = agent.run(_make_run(prior),
+                               {"text": "a bearing and a belt", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False
+        assert "several parts (2 detected)" in result["follow_up_question"]
+        assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
+        # No silent data loss / no fabricated specs: nothing merged from the list.
+        assert "manufacturer" not in result["asset_specs"]
+
+    def test_list_wrapped_single_is_unwrapped(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([_extracted()])  # list of exactly 1
+            result = agent.run(_make_run(),
+                               {"text": "Grundfos CR32-5", "images": [], "force_proceed": False})
+        # Unwrapped to the single-part path — processed normally, NOT the multi-part message.
+        assert result["asset_specs"]["manufacturer"] == "Grundfos"
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+
+    def test_empty_list_degrades_to_clarification_no_crash(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([])  # empty / malformed
+            result = agent.run(_make_run(),
+                               {"text": "???", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False  # asks for more — no crash, no multi-part message
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+
+    def test_single_dict_path_unchanged(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(_extracted())  # normal dict
+            result = agent.run(_make_run(),
+                               {"text": "Grundfos CR32-5", "images": [], "force_proceed": False})
+        assert result["sufficient"] is True          # byte-for-byte the existing success path
+        assert result["follow_up_question"] is None

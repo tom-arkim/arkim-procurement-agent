@@ -304,6 +304,27 @@ class TestSendMessage:
         assert resp.status_code == 502
         assert "detail" in resp.json()
 
+    def test_multipart_submission_is_200_not_502(self, api, monkeypatch):
+        # A multi-item description makes the LLM return a JSON ARRAY. run() now handles it
+        # honestly at HTTP 200 (no AttributeError -> no 502), and the run stays in intake.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")   # real IntakeAgent path (not mocked)
+        import requests
+        def fake_post(*a, **k):
+            m = Mock()
+            m.raise_for_status = Mock()
+            m.json.return_value = {"content": [{"text": json.dumps([
+                {"manufacturer": "SKF", "manufacturer_confidence": 90, "part_id_confidence": 80},
+                {"manufacturer": "Gates", "manufacturer_confidence": 90, "part_id_confidence": 80},
+            ])}]}
+            return m
+        monkeypatch.setattr(requests, "post", fake_post)
+
+        rid = _create_run(api)
+        resp = api.post(f"/api/runs/{rid}/messages", json={"content": "a bearing and a belt"})
+        assert resp.status_code == 200                                   # NOT 502
+        assert "several parts" in resp.json()["message"]["content"]
+        assert api.get(f"/api/runs/{rid}").json()["phase"] == "intake"   # clean state, not errored
+
 
 # ---------------------------------------------------------------------------
 # POST /api/runs/{id}/upload
