@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Optional
 
 from utils.apollo_client import ApolloClient
-from utils.models import SourcingRun, AssetSpecs, SourcingOption
+from utils.models import SourcingRun, AssetSpecs, SourcingOption, lead_time_source_for
 
 _TIER1_CATALOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
@@ -455,6 +455,7 @@ class SourcingAgent:
                     "vendor_name":               supplier["name"],
                     "base_price":                float(item.get("price", 0.0)),
                     "lead_time_days":             int(item.get("lead_days", 2)),
+                    "lead_time_source":          lead_time_source_for(item),  # extracted if the catalog row stated it
                     "reliability_score":          float(supplier.get("reliability_score", 95.0)),
                     "merchant_type":              "Arkim Network",
                     "match_type":                 match_type,
@@ -1010,6 +1011,7 @@ class SourcingAgent:
                     "vendor_name":               _vendor_name_from_url(r.get("url")) or r.get("title", "Unknown Distributor"),
                     "base_price":                0.0,
                     "lead_time_days":            7,
+                    "lead_time_source":          "placeholder",  # capability-pivot: no contact, no real lead time
                     "reliability_score":         70.0,
                     "merchant_type":             "Capability Discovery",
                     "match_type":                "Capability Pivot",
@@ -1065,6 +1067,7 @@ class SourcingAgent:
                 "vendor_name":                brand,
                 "base_price":                 0.0,
                 "lead_time_days":             10,
+                "lead_time_source":           "placeholder",  # seeded OEM distributor: quote-required, no real lead time
                 "reliability_score":          85.0,
                 "merchant_type":              "OEM Authorized Distributor",
                 "match_type":                 "OEM Authorized Distributor",
@@ -1123,6 +1126,7 @@ class SourcingAgent:
             "vendor_name":                brand,
             "base_price":                 0.0,
             "lead_time_days":             4,
+            "lead_time_source":           "placeholder",  # catalog-miss fallback: hardcoded, no real lead time
             "reliability_score":          95.0,
             "merchant_type":              "Arkim Network",
             "match_type":                 "Exact OEM",

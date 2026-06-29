@@ -115,6 +115,19 @@ class AssetSpecs:
     spec_based_sourcing: bool = False
 
 
+def lead_time_source_for(item: dict, *, key: str = "lead_days") -> str:
+    """Provenance of a lead-time value from a CURATED/catalog source (e.g. Tier-1 seed data):
+    'extracted' when the source row actually carries the value, 'defaulted' when it was absent
+    and the caller falls to a synthetic default.
+
+    LLM/heuristic sources (Tier-2 marketplace/national/aftermarket) are NEVER trusted as
+    extracted: their prompt is instructed to emit a default for unknown, so a default-valued
+    lead is indistinguishable from a real one — those callers rely on the conservative
+    SourcingOption default ('defaulted'). Pre-quote rows with no contact use 'placeholder'
+    (no real lead time exists yet). A confirmed quote later marks 'quoted'."""
+    return "extracted" if item.get(key) is not None else "defaulted"
+
+
 @dataclass
 class SourcingOption:
     vendor_name: str
@@ -128,6 +141,10 @@ class SourcingOption:
     admin_fee: float = 0.0
     source_url: Optional[str] = None
     price_tbd: bool = False             # True when no price was found
+    # Provenance of lead_time_days, mirroring price_tbd's honesty role (see lead_time_source_for):
+    # "extracted" (real, from a catalog/listing) | "defaulted" (synthetic heuristic — LLM/None) |
+    # "placeholder" (no real lead time pre-quote) | "quoted" (a confirmed quote; set in the transform).
+    lead_time_source: str = "defaulted"
     extracted_shipping_fee: Optional[float] = None  # from vendor page; 0 = Free Shipping
     is_freight: bool = False            # True if LTL/truck freight required
     match_type: str = "Exact OEM"        # "Exact OEM" | "Aftermarket Compatible" | "Functional Alternative"
