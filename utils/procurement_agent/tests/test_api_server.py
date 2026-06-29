@@ -1727,3 +1727,95 @@ class TestBasketApproval:
         assert r.status_code == 200
         assert r.json()["phase"] == "approved"
         assert api.get(f"/api/runs/{rid}").json()["group_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# RFQ wiring A1 — draft create / review / approve / reject endpoints (NO send).
+# ---------------------------------------------------------------------------
+
+def _run_with_candidate(api):
+    """A run carrying one reconstructable Tier-3 candidate (Acme Pumps-t3-0)."""
+    rid = _create_run(api)
+    _set_run(api, rid,
+        asset_specs_json=json.dumps({"manufacturer": "Goulds", "model": "3196", "part_number": "PN-1"}),
+        sourcing_results_json=json.dumps({"tier_3": {"results": [
+            {"vendor_name": "Acme Pumps", "source_url": "https://acme.com", "base_price": 200.0},
+        ]}}))
+    return rid
+
+def _make_draft_via_api(api, rid, candidate_id="Acme Pumps-t3-0", tier=3, **extra):
+    return api.post(f"/api/runs/{rid}/rfq-draft", json={"candidate_id": candidate_id, "tier": tier, **extra})
+
+
+class TestRfqDraftEndpoints:
+    def test_create_hydrates_serverside_and_freezes_send_sufficient_snapshot(self, api):
+        rid = _run_with_candidate(api)
+        resp = _make_draft_via_api(api, rid)
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["status"] == "drafted"
+        assert "Acme Pumps" in body["draft_body"] and "PN-1" in body["draft_body"]
+        # The frozen snapshot is send-sufficient: vendor_name + source_url present.
+        draft = api.get(f"/api/rfq-drafts/{body['draft_id']}").json()
+        assert draft["candidate_snapshot"]["source_url"] == "https://acme.com"
+        assert draft["candidate_snapshot"]["vendor_name"] == "Acme Pumps"
+
+    def test_client_supplied_candidate_is_ignored(self, api):
+        # Authoritative-source discipline: a client trying to inject a candidate/source_url is
+        # ignored — the server reconstructs from sourcing_results_json.
+        rid = _run_with_candidate(api)
+        resp = _make_draft_via_api(api, rid,
+            source_url="https://evil.com",
+            candidate_snapshot={"vendor_name": "Evil", "source_url": "https://evil.com"})
+        draft = api.get(f"/api/rfq-drafts/{resp.json()['draft_id']}").json()
+        assert draft["candidate_snapshot"]["source_url"] == "https://acme.com"   # server value
+        assert draft["candidate_snapshot"]["vendor_name"] == "Acme Pumps"
+
+    def test_candidate_or_run_not_found_404(self, api):
+        rid = _run_with_candidate(api)
+        assert _make_draft_via_api(api, rid, candidate_id="Nope-t3-0").status_code == 404
+        assert _make_draft_via_api(api, "no-such-run").status_code == 404
+
+    def test_get_and_list_drafts(self, api):
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]
+        assert api.get(f"/api/rfq-drafts/{did}").json()["id"] == did
+        assert api.get("/api/rfq-drafts/nope").status_code == 404
+        listed = api.get(f"/api/runs/{rid}/rfq-drafts").json()
+        assert listed["count"] == 1 and listed["drafts"][0]["id"] == did
+
+    def test_approve_records_approver(self, api):
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]
+        r = api.post(f"/api/rfq-drafts/{did}/approve", json={"approved_by": "tom@arkim.ai"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "approved" and r.json()["approved_by"] == "tom@arkim.ai"
+        assert api.get(f"/api/rfq-drafts/{did}").json()["approved_at"] is not None
+
+    def test_reject(self, api):
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]
+        r = api.post(f"/api/rfq-drafts/{did}/reject", json={"rejected_by": "tom@arkim.ai"})
+        assert r.status_code == 200 and r.json()["status"] == "rejected"
+
+    def test_approve_unknown_404(self, api):
+        assert api.post("/api/rfq-drafts/nope/approve", json={"approved_by": "x"}).status_code == 404
+
+    def test_double_approve_is_409_not_500(self, api):
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]
+        api.post(f"/api/rfq-drafts/{did}/approve", json={"approved_by": "a"})
+        again = api.post(f"/api/rfq-drafts/{did}/approve", json={"approved_by": "b"})
+        assert again.status_code == 409                 # A0 lifecycle raise, surfaced honestly
+
+    def test_no_send_path_reachable(self, api):
+        # These endpoints structurally cannot send: after draft+approve the draft never reaches
+        # 'sent', carries no sent_message_id, and the sent_messages store is untouched.
+        from utils import supplier_registry
+        rid = _run_with_candidate(api)
+        did = _make_draft_via_api(api, rid).json()["draft_id"]
+        api.post(f"/api/rfq-drafts/{did}/approve", json={"approved_by": "tom"})
+        draft = api.get(f"/api/rfq-drafts/{did}").json()
+        assert draft["status"] == "approved"            # never "sent"
+        assert draft["sent_message_id"] is None
+        assert supplier_registry.get_sent_messages(run_id=rid) == []   # nothing sent/recorded

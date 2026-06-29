@@ -2817,6 +2817,110 @@ def reject_group(group_id: str, body: RejectRequest, caller: Optional[Caller] = 
     return {"group_id": group_id, "status": "rejected", "phase": Phase.COMPARISON.value}
 
 
+# ---------------------------------------------------------------------------
+# RFQ drafts — create / review / approve / reject endpoints (RFQ wiring A1)
+#
+# The separated HITL flow: an endpoint creates a reviewable draft (server-side hydrated,
+# frozen), a human reads it back (GET), then approves or rejects it against the STORED draft.
+# NONE of these endpoints send: there is no send_rfq call, no email, no Apollo anywhere here.
+# The send (A2) is a separate endpoint that consumes an approved draft.
+# ---------------------------------------------------------------------------
+
+class RfqDraftCreateRequest(BaseModel):
+    candidate_id: str
+    tier: int
+
+
+class RfqDraftApproveRequest(BaseModel):
+    approved_by: str       # becomes Approval.approved_by at the A2 send
+
+
+class RfqDraftRejectRequest(BaseModel):
+    rejected_by: str
+
+
+@app.post("/api/runs/{run_id}/rfq-draft", status_code=201)
+def create_rfq_draft(run_id: str, body: RfqDraftCreateRequest):
+    """Create a reviewable RFQ draft for one sourced candidate. The candidate is reconstructed
+    SERVER-SIDE from the run's stored sourcing results (authoritative — a client-supplied
+    candidate is never trusted) and frozen as the draft's snapshot; the body is generated from
+    the run's asset specs. status=drafted. NO send — that is A2."""
+    from utils.procurement_agent.state import persistence
+    from utils.procurement_agent.outreach import _make_draft
+
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        # Authoritative source: reconstruct from the stored raw results (needs the JSON string).
+        cand = _reconstruct_candidate(run.sourcing_results_json, body.candidate_id, body.tier)
+        if cand is None:
+            raise HTTPException(status_code=404, detail="Candidate not found in this run")
+        specs = json.loads(run.asset_specs_json) if run.asset_specs_json else {}
+
+    vendor_name = cand.get("vendor_name") or "supplier"
+    draft_body = _make_draft(vendor_name, specs)
+    draft = persistence.create_draft(
+        run_id=run_id,
+        candidate_id=body.candidate_id,
+        candidate_snapshot=cand,     # send-sufficient: carries vendor_name + source_url
+        draft_body=draft_body,
+    )
+    return {
+        "draft_id": draft["id"],
+        "status": draft["status"],
+        "candidate_id": draft["candidate_id"],
+        "draft_body": draft["draft_body"],
+    }
+
+
+@app.get("/api/rfq-drafts/{draft_id}")
+def get_rfq_draft(draft_id: str):
+    """Read one stored draft (status, body, frozen candidate snapshot, approval state) — this
+    is what makes a later approval a real review of what the human can see."""
+    from utils.procurement_agent.state import persistence
+    draft = persistence.get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return draft
+
+
+@app.get("/api/runs/{run_id}/rfq-drafts")
+def list_rfq_drafts(run_id: str):
+    """All RFQ drafts for a run, newest first."""
+    from utils.procurement_agent.state import persistence
+    drafts = persistence.list_drafts(run_id)
+    return {"run_id": run_id, "count": len(drafts), "drafts": drafts}
+
+
+@app.post("/api/rfq-drafts/{draft_id}/approve")
+def approve_rfq_draft(draft_id: str, body: RfqDraftApproveRequest):
+    """Record a human approval against a STORED draft. The approval is stamped on the A0
+    lifecycle transition (drafted -> approved). NO send. 404 unknown draft; 409 illegal
+    transition (re-approve / already sent / rejected) — surfaced honestly, never a 500."""
+    from utils.procurement_agent.state import persistence
+    if persistence.get_draft(draft_id) is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    try:
+        draft = persistence.transition_draft(draft_id, "approved", approved_by=body.approved_by)
+    except persistence.DraftTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"draft_id": draft["id"], "status": draft["status"], "approved_by": draft["approved_by"]}
+
+
+@app.post("/api/rfq-drafts/{draft_id}/reject")
+def reject_rfq_draft(draft_id: str, body: RfqDraftRejectRequest):
+    """Reject a STORED draft (drafted -> rejected, terminal). NO send. 404 unknown; 409 illegal."""
+    from utils.procurement_agent.state import persistence
+    if persistence.get_draft(draft_id) is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    try:
+        draft = persistence.transition_draft(draft_id, "rejected", rejected_by=body.rejected_by)
+    except persistence.DraftTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"draft_id": draft["id"], "status": draft["status"], "rejected_by": draft["rejected_by"]}
+
+
 class ShipToBody(BaseModel):
     company: str = ""
     address: str = ""
