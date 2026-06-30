@@ -102,7 +102,11 @@ export function ApprovalContext({ run }: { run: SourcingRunDetail }) {
           <div className="appctx-label">Why this supplier</div>
           <div className="appctx-facts">
             {match && <span className="appctx-fact">{match}</span>}
-            {cand?.leadTime && <span className="appctx-fact">Lead time {cand.leadTime}</span>}
+            {cand?.leadTime && (
+              <span className="appctx-fact" title={cand.leadTimeSource === "defaulted" ? "Estimated lead time" : undefined}>
+                Lead time {cand.leadTimeSource === "defaulted" ? `~${cand.leadTime}` : cand.leadTime}
+              </span>
+            )}
             {d.alternativesCount > 0 && (
               <span className="appctx-fact">Chosen over {d.alternativesCount} other option{d.alternativesCount === 1 ? "" : "s"}</span>
             )}

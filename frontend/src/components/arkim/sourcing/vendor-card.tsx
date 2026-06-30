@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Pill } from "@/components/ui/pill";
 import { PnMatch, MatchBar } from "@/components/ui/match";
 import { External, Clock, Dollar } from "@/components/ui/icons";
+import { LeadTime } from "./lead-time";
 import { useSelectCandidate, useRequestConfirmation } from "@/lib/queries";
 import { useArkimStore } from "@/store";
 import type { Candidate } from "@/types";
@@ -134,10 +135,7 @@ export function VendorCard({ candidate, runId, className }: VendorCardProps) {
           )}
         </div>
 
-        <div className="flex items-center gap-1 text-fg-3">
-          <Clock size={12} className="shrink-0" />
-          <span className="font-mono text-[11px]">{candidate.leadTime}</span>
-        </div>
+        <LeadTime candidate={candidate} />
       </div>
 
       {/* PN match + suitability */}

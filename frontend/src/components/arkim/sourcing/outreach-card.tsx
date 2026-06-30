@@ -3,6 +3,7 @@
 import { cn } from "@/lib/utils";
 import { MatchBar } from "@/components/ui/match";
 import { Clock } from "@/components/ui/icons";
+import { LeadTime } from "./lead-time";
 import { Pill } from "@/components/ui/pill";
 import { useArkimStore } from "@/store";
 import type { Candidate } from "@/types";
@@ -103,10 +104,7 @@ export function OutreachCard({ candidate, runId, sentAt, className }: OutreachCa
           />
         </div>
 
-        <div className="flex items-center gap-1 text-fg-3">
-          <Clock size={12} className="shrink-0" />
-          <span className="font-mono text-[11px]">{candidate.leadTime}</span>
-        </div>
+        <LeadTime candidate={candidate} />
 
         {hasSent && (
           <div className="flex flex-col items-center justify-center gap-1 py-2.5 rounded border border-hr-2 bg-bg-2 mt-1">

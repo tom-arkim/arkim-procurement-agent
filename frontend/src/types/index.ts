@@ -121,7 +121,12 @@ export interface Candidate {
   // human-confirmed RFQ quote — the strongest claim in the ladder.
   evidenceState?: "priced" | "uncontacted" | "quoted";
   purchaseChannel?: "marketplace" | "reference";  // increment 2 (State M); marketplace = buyable price
-  leadTime: string;
+  // Null when no real lead time exists yet (a pre-quote/RFQ row or absent data) — render
+  // "Lead time on quote", never a fabricated number. leadTimeSource is the provenance,
+  // mirroring price's priceVerified/evidenceState: a "defaulted" value is shown but qualified
+  // (estimated); "extracted"/"quoted" are real.
+  leadTime: string | null;
+  leadTimeSource?: "extracted" | "defaulted" | "placeholder" | "quoted";
   url: string;
   suitability: number;
   confidence: number;

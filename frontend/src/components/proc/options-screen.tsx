@@ -250,9 +250,14 @@ export function OptionsScreen({ runId }: { runId: string }) {
                               </>
                             : <div className="o-num">{procMoney(c.price)}</div>)
                         : <div className="o-num"><span className="q">Get a quote</span></div>}
-                      {/* Lead time shown only when a listing/quote backs it; on uncontacted
-                          rows it's a hardcoded default, so it's omitted (not shown as fact). */}
-                      {!isUncontacted(c) && c.leadTime && <div className="o-ships">{c.leadTime}</div>}
+                      {/* Lead time shown only when a value backs it (the backend nulls
+                          placeholder/absent leads). A "defaulted" heuristic is shown but
+                          qualified (~ + estimated); extracted/quoted render as fact. */}
+                      {!isUncontacted(c) && c.leadTime && (
+                        <div className="o-ships" title={c.leadTimeSource === "defaulted" ? "Estimated lead time" : undefined}>
+                          {c.leadTimeSource === "defaulted" ? `~${c.leadTime}` : c.leadTime}
+                        </div>
+                      )}
                       {/* State C: surface the quote's terms alongside price + lead time. */}
                       {quoted && c.terms && <div className="o-terms">{c.terms}</div>}
                       {/* State M: in stock now, Arkim orders it — speed/certainty, not channel. */}
