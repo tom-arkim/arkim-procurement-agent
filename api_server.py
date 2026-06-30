@@ -229,6 +229,10 @@ class CreateRunRequest(BaseModel):
     # into it (the incremental "+ add another part" flow). NULL/omitted -> group-less, exactly
     # as the legacy single-run path. SECURITY DEBT: client-supplied + unvalidated — see CLEANUP.
     group_id: Optional[str] = None
+    # Optional pre-extracted asset_specs to SEED the run at birth (multi-part fan-out seeds each
+    # card from the already-parsed per-part specs — no re-extraction). None -> bare intake run,
+    # exactly the legacy path.
+    asset_specs: Optional[Dict[str, Any]] = None
 
 
 class CreateRunResponse(BaseModel):
@@ -257,6 +261,12 @@ class SendMessageResponse(BaseModel):
     run_id: str
     message: Dict[str, Any]
     updated_phase: str
+    # Intake sufficiency state (e.g. "multi_part_detected") so the frontend can react — None on
+    # legacy/single-part responses (additive, non-breaking).
+    proceed_state: Optional[str] = None
+    # When proceed_state == "multi_part_detected", the N parsed per-part extraction dicts so the
+    # frontend can fan them into N seeded cards. None otherwise.
+    parts: Optional[List[Dict[str, Any]]] = None
 
 
 class SelectCandidateRequest(BaseModel):
@@ -922,11 +932,13 @@ def _new_run_orm(
     warranty_status: str,
     company_id: Optional[str] = None,
     group_id: Optional[str] = None,
+    asset_specs: Optional[Dict[str, Any]] = None,
 ) -> SourcingRunORM:
     """Build (do not persist) a fresh run at phase=intake — the SINGLE construction the
     create path uses. Shared by create_run (commits one) and _fan_out_intake (commits N in
     one transaction), so fan-out reuses the create path instead of reimplementing it.
-    group_id is NULL for a single run, the shared basket label for a fanned one."""
+    group_id is NULL for a single run, the shared basket label for a fanned one.
+    asset_specs seeds the run's specs at birth (multi-part fan-out); None -> bare intake run."""
     now = datetime.now(timezone.utc)
     return SourcingRunORM(
         id=str(uuid.uuid4()),
@@ -936,6 +948,7 @@ def _new_run_orm(
         current_phase=Phase.INTAKE.value,
         urgency_factor=urgency_factor,
         warranty_status=warranty_status,
+        asset_specs_json=json.dumps(asset_specs) if asset_specs else None,
         initiated_at=now,
         updated_at=now,
     )
@@ -953,6 +966,7 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
         warranty_status=body.warranty_status,
         company_id=caller.company_id if caller else None,
         group_id=body.group_id,   # opt-in basket label; None -> group-less (legacy, unchanged)
+        asset_specs=body.asset_specs,   # opt-in seed; None -> bare intake run (legacy, unchanged)
     )
     with _SessionFactory() as session:
         session.add(run)
@@ -1265,6 +1279,10 @@ def send_message(run_id: str, body: SendMessageRequest):
         run_id=run_id,
         message=agent_reply,
         updated_phase=new_phase,
+        proceed_state=proceed_state or None,
+        # The N per-part dicts ride along ONLY on a multi-part detection (None otherwise), so the
+        # frontend can fan them into seeded cards.
+        parts=result.get("multi_part_specs") if proceed_state == "multi_part_detected" else None,
     )
 
 

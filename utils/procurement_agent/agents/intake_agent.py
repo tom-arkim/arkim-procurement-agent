@@ -319,7 +319,7 @@ class IntakeAgent:
         if isinstance(extracted, list):
             parts = [p for p in extracted if isinstance(p, dict)]
             if len(parts) >= 2:
-                return self._multi_part_response(prior_specs, len(parts))
+                return self._multi_part_response(prior_specs, parts)
             extracted = parts[0] if parts else {}
         elif not isinstance(extracted, dict):
             extracted = {}
@@ -395,12 +395,16 @@ class IntakeAgent:
         }
 
     @staticmethod
-    def _multi_part_response(prior_specs: dict, n: int) -> dict:
+    def _multi_part_response(prior_specs: dict, parts: list[dict]) -> dict:
         """Honest intake result when the user described MULTIPLE parts (the extractor returned a
         list of >1). Returns the normal run() contract with sufficient=False so send_message
         replies with the message at HTTP 200 — the run stays in intake, no specs are merged from
-        the multi-part list (no silent data loss), and it is NOT a 502 (not a server error)."""
+        the multi-part list (no silent data loss), and it is NOT a 502 (not a server error).
+
+        The parsed parts ride along as `multi_part_specs` (the full per-part extraction dicts) so
+        a caller CAN fan them into N seeded cards — still merging NOTHING into THIS run's specs."""
         prior_specs = prior_specs or {}
+        n = len(parts)
         mfg_conf = float(prior_specs.get("manufacturer_confidence") or 0)
         part_conf = float(prior_specs.get("part_id_confidence") or 0)
         message = (
@@ -414,6 +418,7 @@ class IntakeAgent:
             "sufficient":              False,
             "follow_up_question":      message,
             "manufacturer_caveat":     None,
+            "multi_part_specs":        list(parts),          # the N per-part dicts, for fan-out
             "confidence_summary": {
                 "manufacturer_confidence": mfg_conf,
                 "part_id_confidence":      part_conf,

@@ -974,6 +974,26 @@ class TestMultiPartArrayExtraction:
         assert result["asset_specs"]["manufacturer"] == "SKF"
         assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
 
+    def test_multi_part_returns_parsed_parts_for_fanout(self):
+        # The parsed parts ride along as multi_part_specs so a caller can fan them into N cards;
+        # still sufficient=False, proceed_state=multi_part_detected, nothing merged into THIS run.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        skf = _extracted({"manufacturer": "SKF", "model": "6205-2RS1", "part_number": "6205-2RS1",
+                          "detected_type": "deep groove ball bearing", "category": "Part"})
+        flowsic = _extracted({"manufacturer": "SICK", "model": "FLOWSIC610", "part_number": "FLOWSIC610",
+                              "detected_type": "gas flow analyzer", "category": "Equipment"})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([skf, flowsic])
+            result = agent.run(_make_run({"manufacturer_confidence": 0, "part_id_confidence": 0}),
+                               {"text": "SKF 6205-2RS1, FLOWSIC610", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False
+        assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
+        parts = result["multi_part_specs"]
+        assert len(parts) == 2
+        assert parts[0]["part_number"] == "6205-2RS1"
+        assert parts[1]["model"] == "FLOWSIC610"
+        assert "manufacturer" not in result["asset_specs"]   # nothing merged into THIS run
+
     def test_multipart_text_WITH_image_also_detects_array(self):
         # The #2 tie-in: a multi-part description sent WITH an image goes through the multimodal
         # extractor (images present) but hits the SAME run() list-gate -> _multi_part_response.

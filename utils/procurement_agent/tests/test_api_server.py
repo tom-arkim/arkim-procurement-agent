@@ -206,6 +206,20 @@ class TestCreateRun:
         assert resp.status_code == 422
         assert "detail" in resp.json()
 
+    def test_asset_specs_seed_births_run_with_specs(self, api):
+        # The multi-part fan-out seeds each card from already-parsed per-part specs (no
+        # re-extraction): a run created WITH asset_specs is born carrying them.
+        specs = {"manufacturer": "SKF", "part_number": "6205-2RS1", "detected_type": "bearing"}
+        rid = api.post("/api/runs", json={"asset_specs": specs}).json()["id"]
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["asset_specs"] == specs
+
+    def test_no_asset_specs_is_bare_intake_run_unchanged(self, api):
+        # REGRESSION: omitting asset_specs -> a bare intake run (specs None), the legacy path.
+        rid = api.post("/api/runs", json={}).json()["id"]
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["asset_specs"] is None
+
 
 # ---------------------------------------------------------------------------
 # GET /api/runs  (list)
@@ -274,11 +288,38 @@ class TestSendMessage:
         resp = api.post(f"/api/runs/{rid}/messages", json={"content": "It's a Goulds pump"})
         assert resp.status_code == 200
         body = resp.json()
-        assert set(body) == {"run_id", "message", "updated_phase"}
+        assert set(body) == {"run_id", "message", "updated_phase", "proceed_state", "parts"}
         assert body["run_id"] == rid
         assert body["updated_phase"] == "intake"   # messages never auto-advances
         assert body["message"]["role"] == "agent"
         assert body["message"]["content"] == "What is the model number?"
+        # Single/insufficient -> no multi-part signal (additive fields default None).
+        assert body["proceed_state"] is None
+        assert body["parts"] is None
+
+    def test_multi_part_surfaces_proceed_state_and_parts(self, api, monkeypatch):
+        # A multi-part detection carries proceed_state + the N parsed parts on the wire, so the
+        # frontend can fan them into N seeded cards (nothing is merged into THIS run).
+        rid = _create_run(api)
+        parts = [
+            {"manufacturer": "SKF", "part_number": "6205-2RS1", "detected_type": "bearing"},
+            {"manufacturer": "SICK", "model": "FLOWSIC610", "detected_type": "gas flow analyzer"},
+        ]
+        _mock_intake(api, monkeypatch, {
+            "sufficient": False,
+            "manufacturer_confidence": 0,
+            "part_id_confidence": 0,
+            "asset_specs": {},
+            "follow_up_question": "It looks like you've described several parts (2 detected). ...",
+            "multi_part_specs": parts,
+            "confidence_summary": {"proceed_state": "multi_part_detected"},
+        })
+        resp = api.post(f"/api/runs/{rid}/messages", json={"content": "SKF 6205-2RS1, FLOWSIC610"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["proceed_state"] == "multi_part_detected"
+        assert body["parts"] == parts                       # the N per-part dicts ride along
+        assert len(body["parts"]) == 2
 
     def test_not_found_404(self, api):
         # 404 is raised before IntakeAgent is touched, so no mock needed.
