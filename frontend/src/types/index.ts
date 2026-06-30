@@ -265,6 +265,8 @@ export interface CreateRunRequest {
   facility_id?: string;
   urgency_factor?: number;
   warranty_status?: string;
+  /** Optional basket label — runs sharing one group_id form a basket. Omitted -> group-less. */
+  group_id?: string;
 }
 
 export interface CreateRunResponse {
