@@ -480,6 +480,66 @@ class TestUpload:
         assert payload["text"] == ""
         assert len(payload["images"]) == 1
 
+    def test_multi_part_image_surfaces_signal_not_false_failure(self, api, monkeypatch):
+        # A multi-part IMAGE result must carry proceed_state + parts AND reply with the "N
+        # detected" message — NOT "couldn't read the nameplate" (the read succeeded, N found).
+        rid = _create_run(api)
+        parts = [
+            {"manufacturer": "SKF", "part_number": "6205-2RS1", "detected_type": "bearing"},
+            {"manufacturer": "SICK", "model": "FLOWSIC610", "detected_type": "gas flow analyzer"},
+        ]
+        _mock_intake(api, monkeypatch, {
+            "sufficient": False, "manufacturer_confidence": 0, "part_id_confidence": 0,
+            "asset_specs": {},
+            "follow_up_question": "It looks like you've described several parts (2 detected). ...",
+            "multi_part_specs": parts,
+            "confidence_summary": {"proceed_state": "multi_part_detected"},
+        })
+        resp = api.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("plate.jpg", b"\xff\xd8fakejpeg", "image/jpeg")},
+            data={"text": "SKF 6205-2RS1, FLOWSIC610"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["proceed_state"] == "multi_part_detected"
+        assert body["parts"] == parts
+        assert "several parts" in body["message"]["content"]               # the N-detected reply
+        assert "couldn't read" not in body["message"]["content"].lower()   # NOT the false failure
+
+    def test_single_part_image_signal_none_reply_unchanged(self, api, monkeypatch):
+        # A single-part image: proceed_state passes through (or None), parts None, the normal
+        # nameplate-read reply unchanged.
+        rid = _create_run(api)
+        _mock_intake(api, monkeypatch, {
+            "sufficient": True, "manufacturer_confidence": 90, "part_id_confidence": 90,
+            "asset_specs": {"manufacturer": "Goulds", "model": "3196", "part_number": "ABC123"},
+            "confidence_summary": {"proceed_state": "proceed_full_confidence"},
+        })
+        resp = api.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("plate.jpg", b"\xff\xd8fakejpeg", "image/jpeg")},
+        )
+        body = resp.json()
+        assert body["parts"] is None
+        assert "Extracted: Goulds" in body["message"]["content"]   # normal read reply unchanged
+
+    def test_unreadable_image_still_reports_couldnt_read(self, api, monkeypatch):
+        # REGRESSION: a genuinely unreadable image (extraction threw -> result None) STILL gets
+        # the honest "couldn't read" failure message; the multi-part branch must not swallow it.
+        rid = _create_run(api)
+        agent = Mock()
+        agent.run.side_effect = RuntimeError("vision boom")
+        monkeypatch.setattr(api._api_server, "IntakeAgent", Mock(return_value=agent))
+        resp = api.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("plate.jpg", b"\xff\xd8fakejpeg", "image/jpeg")},
+        )
+        body = resp.json()
+        assert body["proceed_state"] is None
+        assert body["parts"] is None
+        assert "went wrong reading that image" in body["message"]["content"]
+
 
 # ---------------------------------------------------------------------------
 # POST /api/runs/{id}/approve

@@ -1365,6 +1365,8 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...), text: str 
         traceback.print_exc()
         result = None
 
+    proceed_state = ""   # set from the result below; "" (None on the wire) when the image threw
+
     if result is None:
         # Extraction threw — treat as failed case
         reply_text = (
@@ -1382,9 +1384,17 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...), text: str 
         mfg       = specs.get("manufacturer") or ""
         model     = specs.get("model") or ""
         pn        = specs.get("part_number") or ""
+        proceed_state = result.get("confidence_summary", {}).get("proceed_state", "")
 
+        # Multi-part detected is a SUCCESS (N parts found), not a read failure — handle it FIRST
+        # so it never falls through to case (d) "couldn't read the nameplate". The read worked;
+        # the reply is the same "N detected, one at a time" follow-up the text path uses.
+        if proceed_state == "multi_part_detected":
+            reply_text = result.get("follow_up_question") or (
+                "It looks like you've described several parts. Please submit one part at a time for now."
+            )
         # (a) High confidence — both thresholds met
-        if result.get("sufficient"):
+        elif result.get("sufficient"):
             ident = " ".join(p for p in [mfg, pn or model] if p)
             reply_text = (
                 f"Extracted: {ident} — specs are in the panel. "
@@ -1446,6 +1456,10 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...), text: str 
         "filename": file.filename,
         "size_bytes": len(contents),
         "message":  agent_reply,
+        # Mirror send_message: surface the intake signal so the frontend can fan a multi-part
+        # image into N seeded cards. parts ride along ONLY on a multi-part detection.
+        "proceed_state": proceed_state or None,
+        "parts": result.get("multi_part_specs") if (result and proceed_state == "multi_part_detected") else None,
         "extraction": {
             "status":           "ok" if result else "error",
             "sufficient":       result.get("sufficient") if result else False,
