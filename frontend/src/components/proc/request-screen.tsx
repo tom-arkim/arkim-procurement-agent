@@ -39,6 +39,11 @@ function specsReady(specs?: AssetSpecs): boolean {
 
 type Stage = "entry" | "working" | "identify" | "error";
 
+/** One part in the request, each backed by its OWN run (the per-item / basket model). The
+ *  parent holds the runId + the latest intake reply; specs / partLabel / ready-state are
+ *  derived per-card from useRun(runId) (Stage A data layer). */
+type IntakeItem = { runId: string; reply: string };
+
 export function RequestScreen() {
   const router = useRouter();
   const qc = useQueryClient();
@@ -48,11 +53,18 @@ export function RequestScreen() {
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-  const [runId, setRunId] = useState<string | null>(null);
-  const [reply, setReply] = useState<string | null>(null);
+  // Each described part is its OWN run. item 0 drives the existing identify card; items 1+
+  // render as their own cards (Stage A: minimal). basket-compatible by construction.
+  const [items, setItems] = useState<IntakeItem[]>([]);
+  const primary = items[0];
+  const runId = primary?.runId ?? null;
+  const reply = primary?.reply ?? null;
   const [busy, setBusy] = useState(false);
   const [moreInput, setMoreInput] = useState(false);
   const [moreText, setMoreText] = useState("");
+  // "+ add another part" inline input.
+  const [addText, setAddText] = useState("");
+  const [addBusy, setAddBusy] = useState(false);
   // The real failure reason (server detail) when the backend responded with an error;
   // null means a pure network failure -> show the "is the backend running?" fallback.
   const [errMsg, setErrMsg] = useState<string | null>(null);
@@ -70,15 +82,11 @@ export function RequestScreen() {
     setStage("working");
     try {
       const created = await createRun({});
-      setRunId(created.id);
-      if (file) {
-        // Nameplate photo -> vision extraction updates the run's asset_specs.
-        const up = await uploadNameplate(created.id, file);
-        setReply(up.message?.content ?? "Read the nameplate from your photo.");
-      } else {
-        const r = await sendMessage(created.id, { content: desc });
-        setReply(r.message.content);
-      }
+      // Nameplate photo -> vision extraction; else text intake. Either way item 0's reply.
+      const itemReply = file
+        ? (await uploadNameplate(created.id, file)).message?.content ?? "Read the nameplate from your photo."
+        : (await sendMessage(created.id, { content: desc })).message.content;
+      setItems([{ runId: created.id, reply: itemReply }]);
       refresh(created.id);
       setStage("identify");
     } catch (e) {
@@ -93,7 +101,7 @@ export function RequestScreen() {
     setBusy(true);
     try {
       const r = await sendMessage(runId, { content: more });
-      setReply(r.message.content);
+      setItems((prev) => prev.map((it, i) => (i === 0 ? { ...it, reply: r.message.content } : it)));
       refresh(runId);
       setMoreInput(false);
       setMoreText("");
@@ -101,6 +109,24 @@ export function RequestScreen() {
       fire("Message failed — please try again.");
     } finally {
       setBusy(false);
+    }
+  };
+
+  // "+ add another part" — each added part is its own independent run (its own intake result).
+  const addPart = async () => {
+    const desc = addText.trim();
+    if (!desc) return;
+    setAddBusy(true);
+    try {
+      const created = await createRun({});
+      const r = await sendMessage(created.id, { content: desc });
+      setItems((prev) => [...prev, { runId: created.id, reply: r.message.content }]);
+      refresh(created.id);
+      setAddText("");
+    } catch {
+      fire("Couldn't add that part — please try again.");
+    } finally {
+      setAddBusy(false);
     }
   };
 
@@ -282,8 +308,54 @@ export function RequestScreen() {
               </div>
             )}
           </div>
+
+          {/* Additional parts — Stage A: minimal cards. Each owns its own run (independent). */}
+          {items.slice(1).map((item) => (
+            <ItemCard key={item.runId} runId={item.runId} reply={item.reply} />
+          ))}
+
+          {/* + add another part (each becomes its own item-run) */}
+          <div className="id-actions" style={{ marginTop: 12 }}>
+            <input
+              className="proc-idinput"
+              value={addText}
+              onChange={(e) => setAddText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") addPart(); }}
+              placeholder="Add another part — describe it…"
+            />
+            <button className="proc-btn" data-kind="quiet" disabled={addBusy || !addText.trim()} onClick={addPart}>
+              {addBusy ? "Adding…" : "+ Add part"}
+            </button>
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/** Minimal per-item card (Stage A): one part's identity + ready/needs-clarification state.
+ *  Owns its own useRun (hooks can't loop). partLabel comes from the run's REAL intake result,
+ *  "Unidentified part" if absent — never guessed. Polish + per-item clarification submit land
+ *  in Stage B. */
+function ItemCard({ runId, reply }: { runId: string; reply: string }) {
+  const { data: run } = useRun(runId, { enabled: Boolean(runId) });
+  const specs = run?.asset_specs;
+  const ready = specsReady(specs);
+  const label =
+    [val(specs?.manufacturer), val(specs?.model) || val(specs?.part_number)].filter(Boolean).join(" ") ||
+    val(specs?.description) ||
+    "";
+  return (
+    <div className="proc-id" style={{ marginTop: 10 }}>
+      <div className="id-top">
+        <span className="id-ic"><ProcIcon name={ready ? "toolbox" : "alert"} size={20} /></span>
+        <div style={{ flex: 1 }}>
+          <div className="id-kick">{ready ? "Part identified" : "Need a little more"}</div>
+          <div className="id-name">{label || "Unidentified part"}</div>
+          {!ready && reply && <div className="id-meta" style={{ marginTop: 4 }}>{reply}</div>}
+        </div>
+      </div>
     </div>
   );
 }
