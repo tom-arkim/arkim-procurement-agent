@@ -241,6 +241,13 @@ class CreateRunResponse(BaseModel):
     created_at: str
 
 
+class AssetSpecsSeedRequest(BaseModel):
+    """Body for PUT /api/runs/{id}/asset-specs — the post-birth equivalent of the createRun
+    birth-seed: write pre-extracted specs onto an EXISTING run (multi-part fan-out seeds part 1
+    onto the already-created run 0). Same shape/security posture as CreateRunRequest.asset_specs."""
+    asset_specs: Dict[str, Any]
+
+
 class IntakeRequest(BaseModel):
     """Front-door intake body (multi-part Increment 1, Stage 2). Only the COUNT of `parts`
     routes single-vs-multi; the part CONTENTS are not parsed here — intake yields one
@@ -977,6 +984,24 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
             phase=run.current_phase,
             created_at=run.initiated_at.isoformat(),
         )
+
+
+@app.put("/api/runs/{run_id}/asset-specs")
+def seed_asset_specs(run_id: str, body: AssetSpecsSeedRequest):
+    """Write pre-extracted specs onto an EXISTING run — the post-birth equivalent of the
+    createRun birth-seed (multi-part fan-out seeds part 1 onto the already-created run 0).
+
+    Scoped to the seed purpose ONLY: it sets asset_specs and nothing else — no phase advance,
+    no re-extraction, no sufficiency assessment. 404 if the run doesn't exist. SECURITY DEBT:
+    client-supplied + unvalidated, same posture as the birth-seed — see CLEANUP §4.1."""
+    with _SessionFactory() as session:
+        orm = session.get(SourcingRunORM, run_id)
+        if not orm:
+            raise HTTPException(status_code=404, detail="Run not found")
+        orm.asset_specs_json = json.dumps(body.asset_specs)
+        orm.updated_at = datetime.now(timezone.utc)
+        session.commit()
+    return {"run_id": run_id, "asset_specs": body.asset_specs}
 
 
 # ---------------------------------------------------------------------------

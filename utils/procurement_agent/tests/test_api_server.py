@@ -221,6 +221,37 @@ class TestCreateRun:
         assert detail["asset_specs"] is None
 
 
+class TestSeedAssetSpecs:
+    """PUT /api/runs/{id}/asset-specs — the post-birth equivalent of the createRun birth-seed,
+    used by the multi-part fan-out to seed part 1 onto the already-created run 0."""
+
+    def test_writes_specs_onto_existing_run(self, api):
+        rid = _create_run(api)
+        specs = {"manufacturer": "SKF", "part_number": "6205-2RS1", "detected_type": "bearing"}
+        resp = api.put(f"/api/runs/{rid}/asset-specs", json={"asset_specs": specs})
+        assert resp.status_code == 200
+        assert resp.json()["asset_specs"] == specs
+        assert api.get(f"/api/runs/{rid}").json()["asset_specs"] == specs   # persisted
+
+    def test_unknown_run_404(self, api):
+        resp = api.put("/api/runs/does-not-exist/asset-specs", json={"asset_specs": {"x": 1}})
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "Run not found"}
+
+    def test_seed_does_not_change_phase_or_sufficiency(self, api):
+        # Scoped to the seed purpose: it sets specs only — the run stays in intake (no advance,
+        # no re-extraction, no sufficiency assessment).
+        rid = _create_run(api)
+        before = api.get(f"/api/runs/{rid}").json()["phase"]
+        api.put(f"/api/runs/{rid}/asset-specs", json={"asset_specs": {"manufacturer": "SKF"}})
+        after = api.get(f"/api/runs/{rid}").json()
+        assert after["phase"] == before == "intake"
+
+    def test_validation_missing_asset_specs_422(self, api):
+        rid = _create_run(api)
+        assert api.put(f"/api/runs/{rid}/asset-specs", json={}).status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # GET /api/runs  (list)
 # ---------------------------------------------------------------------------
