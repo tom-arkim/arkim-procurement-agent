@@ -92,9 +92,10 @@ export function RequestScreen() {
       const gid = crypto.randomUUID();
       setGroupId(gid);
       const created = await createRun({ group_id: gid });
-      // Nameplate photo -> vision extraction; else text intake. Either way item 0's reply.
+      // Nameplate photo -> vision extraction (with the typed text alongside, so the image never
+      // discards the description); else text intake. Either way item 0's reply.
       const itemReply = file
-        ? (await uploadNameplate(created.id, file)).message?.content ?? "Read the nameplate from your photo."
+        ? (await uploadNameplate(created.id, file, desc)).message?.content ?? "Read the nameplate from your photo."
         : (await sendMessage(created.id, { content: desc })).message.content;
       setItems([{ runId: created.id, reply: itemReply }]);
       refresh(created.id);

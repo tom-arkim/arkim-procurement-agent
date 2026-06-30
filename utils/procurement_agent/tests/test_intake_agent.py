@@ -974,6 +974,24 @@ class TestMultiPartArrayExtraction:
         assert result["asset_specs"]["manufacturer"] == "SKF"
         assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
 
+    def test_multipart_text_WITH_image_also_detects_array(self):
+        # The #2 tie-in: a multi-part description sent WITH an image goes through the multimodal
+        # extractor (images present) but hits the SAME run() list-gate -> _multi_part_response.
+        # So plumbing the text into the image path extends #1's detection to image+text uploads.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        skf = _extracted({"manufacturer": "SKF", "model": "6205-2RS1", "part_number": "6205-2RS1",
+                          "detected_type": "deep groove ball bearing", "category": "Part"})
+        flowsic = _extracted({"manufacturer": "SICK", "model": "FLOWSIC610", "part_number": "FLOWSIC610",
+                              "detected_type": "gas flow analyzer", "category": "Equipment"})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([skf, flowsic])
+            result = agent.run(_make_run({"manufacturer_confidence": 0, "part_id_confidence": 0}),
+                               {"text": "SKF 6205-2RS1, FLOWSIC610", "images": [b"\xff\xd8img"],
+                                "force_proceed": False})
+        assert result["sufficient"] is False
+        assert "several parts (2 detected)" in result["follow_up_question"]
+        assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
+
 
 # ---------------------------------------------------------------------------
 # Over-ask fix: a confident PART NUMBER uniquely identifies the part, so the category

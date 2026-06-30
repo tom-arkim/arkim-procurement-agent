@@ -24,7 +24,7 @@ from utils.marketplace_registry import is_marketplace
 
 import secrets
 
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, UploadFile, File
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -1269,7 +1269,7 @@ def send_message(run_id: str, body: SendMessageRequest):
 
 
 @app.post("/api/runs/{run_id}/upload")
-async def upload_nameplate(run_id: str, file: UploadFile = File(...)):
+async def upload_nameplate(run_id: str, file: UploadFile = File(...), text: str = Form("")):
     """
     Upload a nameplate image for vision extraction.
 
@@ -1314,7 +1314,10 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...)):
     )
 
     try:
-        result = agent.run(run_obj, {"text": "", "images": [contents]})
+        # Pass the user's typed description ALONGSIDE the image — the multimodal extractor
+        # templates it in, so an attached image never silently eats the text (and a multi-part
+        # description + image reaches the same array detection as the text path).
+        result = agent.run(run_obj, {"text": text, "images": [contents]})
     except Exception:
         traceback.print_exc()
         result = None

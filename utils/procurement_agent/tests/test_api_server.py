@@ -370,6 +370,44 @@ class TestUpload:
         resp = api.post(f"/api/runs/{rid}/upload")
         assert resp.status_code == 422
 
+    def test_typed_text_passed_through_with_image(self, api, monkeypatch):
+        # The typed description rides ALONGSIDE the image: agent.run receives {"text": <text>, ...},
+        # not "" — the image must not silently discard what the user wrote.
+        rid = _create_run(api)
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": True, "manufacturer_confidence": 90, "part_id_confidence": 90,
+            "asset_specs": {"manufacturer": "Goulds"},
+        }
+        monkeypatch.setattr(api._api_server, "IntakeAgent", Mock(return_value=agent))
+        resp = api.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("plate.jpg", b"\xff\xd8fakejpeg", "image/jpeg")},
+            data={"text": "Goulds 3196, also a FLOWSIC610"},
+        )
+        assert resp.status_code == 200
+        payload = agent.run.call_args.args[1]   # run(run_obj, {"text":..., "images":[...]})
+        assert payload["text"] == "Goulds 3196, also a FLOWSIC610"   # NOT discarded
+        assert len(payload["images"]) == 1
+
+    def test_image_only_text_defaults_empty_no_regression(self, api, monkeypatch):
+        # No text field -> text defaults to "" -> byte-for-byte today's image-only behaviour.
+        rid = _create_run(api)
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": True, "manufacturer_confidence": 90, "part_id_confidence": 90,
+            "asset_specs": {"manufacturer": "Goulds"},
+        }
+        monkeypatch.setattr(api._api_server, "IntakeAgent", Mock(return_value=agent))
+        resp = api.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("plate.jpg", b"\xff\xd8fakejpeg", "image/jpeg")},
+        )
+        assert resp.status_code == 200
+        payload = agent.run.call_args.args[1]
+        assert payload["text"] == ""
+        assert len(payload["images"]) == 1
+
 
 # ---------------------------------------------------------------------------
 # POST /api/runs/{id}/approve

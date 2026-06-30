@@ -117,6 +117,7 @@ export async function sendMessage(
 export async function uploadNameplate(
   runId: string,
   file: File,
+  text = "",
 ): Promise<{
   run_id: string;
   filename: string;
@@ -126,6 +127,9 @@ export async function uploadNameplate(
 }> {
   const form = new FormData();
   form.append("file", file);
+  // The typed description rides along with the image (multipart "text" field) so an attached
+  // image never silently discards what the user wrote.
+  form.append("text", text);
   // Don't set Content-Type header — browser sets it with boundary for multipart.
   return request(`/runs/${runId}/upload`, {
     method: "POST",
