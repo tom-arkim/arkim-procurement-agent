@@ -309,9 +309,9 @@ export function RequestScreen() {
             )}
           </div>
 
-          {/* Additional parts — Stage A: minimal cards. Each owns its own run (independent). */}
+          {/* Additional parts — each is its own polished card that resolves independently. */}
           {items.slice(1).map((item) => (
-            <ItemCard key={item.runId} runId={item.runId} reply={item.reply} />
+            <ItemCard key={item.runId} runId={item.runId} initialReply={item.reply} />
           ))}
 
           {/* + add another part (each becomes its own item-run) */}
@@ -334,28 +334,81 @@ export function RequestScreen() {
 }
 
 
-/** Minimal per-item card (Stage A): one part's identity + ready/needs-clarification state.
- *  Owns its own useRun (hooks can't loop). partLabel comes from the run's REAL intake result,
- *  "Unidentified part" if absent — never guessed. Polish + per-item clarification submit land
- *  in Stage B. */
-function ItemCard({ runId, reply }: { runId: string; reply: string }) {
+/** Per-item card: one part's identity + state, and — only when it's under-specified — its OWN
+ *  clarification input. Owns its useRun (hooks can't loop) and its own clarification state, so
+ *  each card resolves independently: one card's submit/pending/error never touches another's.
+ *
+ *  - partLabel comes from the run's REAL intake result, "Unidentified part" if absent (never guessed).
+ *  - A ready item (specsReady true, incl. a PN'd part via the over-ask fix) shows NO box.
+ *  - While its request is pending the input AND button lock together; they re-enable on response
+ *    OR error. An error surfaces the real detail on THIS card (server detail, or the connectivity
+ *    line for a true network failure) and the user can edit + retry. */
+function ItemCard({ runId, initialReply }: { runId: string; initialReply: string }) {
+  const qc = useQueryClient();
   const { data: run } = useRun(runId, { enabled: Boolean(runId) });
   const specs = run?.asset_specs;
   const ready = specsReady(specs);
+  const pn = val(specs?.part_number);
+  const mfg = val(specs?.manufacturer);
   const label =
-    [val(specs?.manufacturer), val(specs?.model) || val(specs?.part_number)].filter(Boolean).join(" ") ||
-    val(specs?.description) ||
-    "";
+    [mfg, val(specs?.model) || pn].filter(Boolean).join(" ") || val(specs?.description) || "";
+
+  // The latest reply for THIS item: seeded from intake, then owned locally after each clarification.
+  const [reply, setReply] = useState(initialReply);
+  const [moreText, setMoreText] = useState("");
+  const [pending, setPending] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async () => {
+    const more = moreText.trim();
+    if (!more || pending) return;
+    setPending(true);
+    setErr(null);
+    try {
+      const r = await sendMessage(runId, { content: more });
+      setReply(r.message.content);
+      setMoreText("");
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.all() });
+    } catch (e) {
+      // Real reason on THIS card: server detail (HTTP error) or null -> the connectivity line.
+      setErr(apiErrorMessage(e) ?? "Couldn't reach the backend — is it running?");
+    } finally {
+      setPending(false);   // re-enable on response OR error so the user can retry
+    }
+  };
+
   return (
     <div className="proc-id" style={{ marginTop: 10 }}>
       <div className="id-top">
-        <span className="id-ic"><ProcIcon name={ready ? "toolbox" : "alert"} size={20} /></span>
+        <span className="id-ic"><ProcIcon name={ready ? "toolbox" : "alert"} size={20} color={ready ? undefined : "var(--st-overdue)"} /></span>
         <div style={{ flex: 1 }}>
           <div className="id-kick">{ready ? "Part identified" : "Need a little more"}</div>
           <div className="id-name">{label || "Unidentified part"}</div>
+          {ready && pn && <div className="id-meta">Part no. <b>{pn}</b>{mfg ? <> · {mfg}</> : null}</div>}
           {!ready && reply && <div className="id-meta" style={{ marginTop: 4 }}>{reply}</div>}
         </div>
       </div>
+
+      {!ready && (
+        <div className="id-actions" style={{ marginTop: 10 }}>
+          <input
+            className="proc-idinput"
+            value={moreText}
+            onChange={(e) => setMoreText(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+            placeholder="Add the manufacturer, model, or what it does…"
+            disabled={pending}
+          />
+          <button className="proc-btn" data-kind="primary" disabled={pending || !moreText.trim()} onClick={submit}>
+            {pending ? "Sending…" : "Send"}
+          </button>
+        </div>
+      )}
+
+      {err && (
+        <div className="id-meta" style={{ color: "var(--st-overdue)", marginTop: 8 }}>{err}</div>
+      )}
     </div>
   );
 }
