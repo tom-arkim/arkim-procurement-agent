@@ -85,6 +85,18 @@ export async function createRun(body: CreateRunRequest): Promise<CreateRunRespon
   return request("/runs", { method: "POST", body: JSON.stringify(body) });
 }
 
+/** Seed pre-extracted specs onto an EXISTING run (multi-part fan-out seeds part 1 onto run 0).
+ *  The post-birth equivalent of createRun's asset_specs — sets specs only, no phase/extraction. */
+export async function seedAssetSpecs(
+  runId: string,
+  assetSpecs: Record<string, unknown>,
+): Promise<{ run_id: string; asset_specs: Record<string, unknown> }> {
+  return request(`/runs/${runId}/asset-specs`, {
+    method: "PUT",
+    body: JSON.stringify({ asset_specs: assetSpecs }),
+  });
+}
+
 export async function listRuns(params?: {
   facilityId?: string;
   phase?: string;
@@ -123,6 +135,9 @@ export async function uploadNameplate(
   filename: string;
   size_bytes: number;
   message?: { id: string; role: string; content: string; created_at: string };
+  // Mirrors SendMessageResponse: the multi-part signal so an image can fan out too.
+  proceed_state?: string | null;
+  parts?: Record<string, unknown>[] | null;
   extraction: unknown;
 }> {
   const form = new FormData();

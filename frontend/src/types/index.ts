@@ -267,6 +267,8 @@ export interface CreateRunRequest {
   warranty_status?: string;
   /** Optional basket label — runs sharing one group_id form a basket. Omitted -> group-less. */
   group_id?: string;
+  /** Optional pre-extracted specs to seed the run at birth (multi-part fan-out — no re-extraction). */
+  asset_specs?: Record<string, unknown>;
 }
 
 export interface CreateRunResponse {
@@ -289,6 +291,10 @@ export interface SendMessageResponse {
     created_at: string;
   };
   updated_phase: Phase;
+  /** Intake sufficiency state (e.g. "multi_part_detected"); null on single-part responses. */
+  proceed_state?: string | null;
+  /** When proceed_state === "multi_part_detected", the N parsed per-part specs (to fan out). */
+  parts?: Record<string, unknown>[] | null;
 }
 
 export interface SelectCandidateRequest {

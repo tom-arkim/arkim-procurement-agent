@@ -14,7 +14,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { createRun, sendMessage, confirmIntake, uploadNameplate } from "@/lib/api";
+import { createRun, sendMessage, confirmIntake, uploadNameplate, seedAssetSpecs } from "@/lib/api";
 import { useRun } from "@/lib/queries";
 import { queryKeys, apiErrorMessage } from "@/lib/query-client";
 import { ProcIcon } from "./proc-icon";
@@ -83,6 +83,41 @@ export function RequestScreen() {
   const allReady = items.length > 0 && items.every((it) => readyById[it.runId] === true);
   const readyCount = items.filter((it) => readyById[it.runId] === true).length;
 
+  // A returned part is seedable only if it carries REAL identity — never seed a card from an
+  // empty/identity-less fragment (no invented parts).
+  const isSeedablePart = (p: Record<string, unknown>): boolean =>
+    Boolean(
+      val(p.manufacturer as string) || val(p.model as string) || val(p.part_number as string) ||
+      val(p.description as string) || val(p.detected_type as string),
+    );
+
+  // Multi-part auto-split: reuse run 0 as part 1 (seed parts[0] onto it via PUT — it already
+  // carries the basket group_id, so no orphan, no re-extraction) and birth-seed parts 2..N as
+  // their own runs in the SAME basket. N pre-populated cards, each showing exactly what was detected.
+  const fanOut = async (run0Id: string, gid: string, parts: Record<string, unknown>[]) => {
+    await seedAssetSpecs(run0Id, parts[0]);
+    const rest = await Promise.all(
+      parts.slice(1).map((p) => createRun({ group_id: gid, asset_specs: p })),
+    );
+    const newItems: IntakeItem[] = [
+      { runId: run0Id, reply: "" },
+      ...rest.map((r) => ({ runId: r.id, reply: "" })),
+    ];
+    setItems(newItems);
+    newItems.forEach((it) => refresh(it.runId));
+  };
+
+  // Remove a card (e.g. a wrongly-split part). The removed run lingers harmlessly in intake —
+  // the basket advance only confirms runs in the list, so a removed one is never advanced.
+  const removeItem = (runId: string) => {
+    setItems((prev) => prev.filter((it) => it.runId !== runId));
+    setReadyById((prev) => {
+      const next = { ...prev };
+      delete next[runId];
+      return next;
+    });
+  };
+
   const start = async () => {
     const desc = text.trim();
     if (!desc && !file) return;
@@ -93,10 +128,23 @@ export function RequestScreen() {
       setGroupId(gid);
       const created = await createRun({ group_id: gid });
       // Nameplate photo -> vision extraction (with the typed text alongside, so the image never
-      // discards the description); else text intake. Either way item 0's reply.
-      const itemReply = file
-        ? (await uploadNameplate(created.id, file, desc)).message?.content ?? "Read the nameplate from your photo."
-        : (await sendMessage(created.id, { content: desc })).message.content;
+      // discards the description); else text intake. Both responses carry proceed_state + parts.
+      const resp = file
+        ? await uploadNameplate(created.id, file, desc)
+        : await sendMessage(created.id, { content: desc });
+      const itemReply = resp.message?.content ?? "Read the nameplate from your photo.";
+
+      // Auto-split: a multi-part detection fans the N parsed parts into N seeded cards. Fall
+      // back to the single card (with the "N detected, + Add part" reply) if fewer than 2 parts
+      // carry real content — never create empty/guessed cards.
+      const detected = resp.proceed_state === "multi_part_detected" ? (resp.parts ?? []) : [];
+      const seedable = detected.filter(isSeedablePart);
+      if (seedable.length >= 2) {
+        await fanOut(created.id, gid, seedable);
+        setStage("identify");
+        return;
+      }
+
       setItems([{ runId: created.id, reply: itemReply }]);
       refresh(created.id);
       setStage("identify");
@@ -238,7 +286,14 @@ export function RequestScreen() {
           <div className="proc-kicker">{items.length > 1 ? "Your parts" : "Your part"}</div>
 
           {items.map((item) => (
-            <ItemCard key={item.runId} runId={item.runId} initialReply={item.reply} onReady={handleReady} />
+            <ItemCard
+              key={item.runId}
+              runId={item.runId}
+              initialReply={item.reply}
+              onReady={handleReady}
+              // Removable only when there's more than one card — you can't remove the last part.
+              onRemove={items.length > 1 ? removeItem : undefined}
+            />
           ))}
 
           {/* + add another part — a new run created into the SAME basket group. The button and
@@ -289,15 +344,19 @@ export function RequestScreen() {
  *    OR error. An error surfaces the real detail on THIS card (server detail, or the connectivity
  *    line for a true network failure) and the user can edit + retry.
  *  - Reports its ready state UP via onReady so the parent can gate the basket advance on
- *    GENUINE all-sufficient (the parent can't call useRun in a loop). */
+ *    GENUINE all-sufficient (the parent can't call useRun in a loop).
+ *  - onRemove (when provided) renders a remove control so a wrongly-split part can be dropped
+ *    without affecting the others (the raised-stakes guard for auto-split). */
 function ItemCard({
   runId,
   initialReply,
   onReady,
+  onRemove,
 }: {
   runId: string;
   initialReply: string;
   onReady?: (runId: string, ready: boolean) => void;
+  onRemove?: (runId: string) => void;
 }) {
   const qc = useQueryClient();
   const { data: run } = useRun(runId, { enabled: Boolean(runId) });
@@ -349,6 +408,17 @@ function ItemCard({
           )}
           {!ready && reply && <div className="id-meta" style={{ marginTop: 4 }}>{reply}</div>}
         </div>
+        {onRemove && (
+          <button
+            className="proc-btn"
+            data-kind="quiet"
+            style={{ padding: "2px 8px", alignSelf: "flex-start" }}
+            title="Remove this part"
+            onClick={() => onRemove(runId)}
+          >
+            Remove
+          </button>
+        )}
       </div>
 
       {!ready && (
