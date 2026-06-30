@@ -128,6 +128,21 @@ def lead_time_source_for(item: dict, *, key: str = "lead_days") -> str:
     return "extracted" if item.get(key) is not None else "defaulted"
 
 
+# Speed-ranking confidence by lead-time provenance — a fabricated/estimated lead time must
+# not out-rank a genuinely-known one on speed (mirrors the price_tbd -> 0.5 neutral precedent).
+# A real value (extracted/quoted) scores at full weight; a heuristic default is discounted; a
+# placeholder (no real lead time) earns NO speed credit. Unknown/None -> conservative 0.5.
+_LEAD_TIME_SPEED_CONFIDENCE = {"extracted": 1.0, "quoted": 1.0, "defaulted": 0.5, "placeholder": 0.0}
+
+
+def lead_time_speed_confidence(source: Optional[str]) -> float:
+    """How much a candidate's lead time may count toward its SPEED score, by provenance.
+    1.0 (real: extracted/quoted) | 0.5 (estimated: defaulted) | 0.0 (placeholder: no real
+    lead) | 0.5 (unknown/None: conservative). Ranking only — does not change the displayed
+    lead time."""
+    return _LEAD_TIME_SPEED_CONFIDENCE.get(source or "", 0.5)
+
+
 @dataclass
 class SourcingOption:
     vendor_name: str

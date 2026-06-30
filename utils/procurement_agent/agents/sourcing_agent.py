@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Optional
 
 from utils.apollo_client import ApolloClient
-from utils.models import SourcingRun, AssetSpecs, SourcingOption, lead_time_source_for
+from utils.models import SourcingRun, AssetSpecs, SourcingOption, lead_time_source_for, lead_time_speed_confidence
 
 _TIER1_CATALOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
@@ -1173,7 +1173,13 @@ class SourcingAgent:
             price     = o.get("base_price") or 0
             price_tbd = o.get("price_tbd", False)
             price_norm = 0.5 if price_tbd or price <= 0 else 1.0 - min(1.0, price / max(max_price, 1.0))
-            speed_norm = 1.0 - min(1.0, (o.get("lead_time_days") or 7) / 30.0)
+            # Speed from the REAL value only — no `or 7` fabrication. A missing lead earns no
+            # speed signal (0), and provenance gates the rest: a placeholder (fake 7/10) -> 0
+            # credit, a defaulted/estimated lead -> halved, extracted/quoted -> full. So a
+            # fabricated "fast" lead can't out-rank a genuinely-known one in the candidate list.
+            lead_days  = o.get("lead_time_days")
+            speed_norm = 0.0 if lead_days is None else (1.0 - min(1.0, lead_days / 30.0))
+            speed_norm *= lead_time_speed_confidence(o.get("lead_time_source"))
             rel_norm   = (o.get("reliability_score") or 70.0) / 100.0
             return (
                 weights["price"]       * price_norm
