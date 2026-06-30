@@ -894,6 +894,87 @@ class TestMultiPartListHandling:
         assert result["follow_up_question"] is None
 
 
+class TestMultiPartArrayExtraction:
+    """The _EXTRACTION_SYSTEM array instruction makes the model emit a JSON array for 2+ DISTINCT
+    parts (so run()'s list-gate fires) while keeping a single part with comma-separated ATTRIBUTES
+    as one object. Offline, we mock the LLM to return the shapes the prompt is designed to elicit
+    and assert run()'s contract on each — the headline being that a 2-part input no longer reports
+    sufficient=True with one part silently dropped."""
+
+    def test_two_distinct_parts_array_not_dropped_into_success(self):
+        # THE DATA-LOSS HEADLINE: "SKF 6205-2RS1, FLOWSIC610" is a bearing AND a gas-flow analyzer.
+        # The prompt elicits a 2-element array -> run() -> _multi_part_response: sufficient=False,
+        # nothing merged. FLOWSIC610 is no longer silently dropped while the run reports success.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        skf = _extracted({"manufacturer": "SKF", "model": "6205-2RS1", "part_number": "6205-2RS1",
+                          "detected_type": "deep groove ball bearing", "category": "Part"})
+        flowsic = _extracted({"manufacturer": "SICK", "model": "FLOWSIC610", "part_number": "FLOWSIC610",
+                              "detected_type": "gas flow analyzer", "category": "Equipment"})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([skf, flowsic])
+            result = agent.run(_make_run({"manufacturer_confidence": 0, "part_id_confidence": 0}),
+                               {"text": "SKF 6205-2RS1, FLOWSIC610", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False
+        assert "several parts (2 detected)" in result["follow_up_question"]
+        assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
+        # No merge -> neither part is dropped into a partial "success"; both held for re-entry.
+        assert "manufacturer" not in result["asset_specs"]
+
+    def test_single_part_with_comma_attributes_is_one_object_not_split(self):
+        # FALSE-POSITIVE GUARD: "1/2 inch ball valve, NPT threaded" is ONE valve (the comma
+        # separates an attribute, not a second part). The prompt elicits ONE object -> single-part
+        # path, NOT the multi-part message.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        valve = _extracted({"manufacturer": "Apollo", "detected_type": "ball valve", "category": "Part",
+                            "connection_size": "1/2 inch", "model": None, "part_number": None})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(valve)
+            result = agent.run(_make_run(),
+                               {"text": "1/2 inch ball valve, NPT threaded", "images": [], "force_proceed": False})
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+        assert result["asset_specs"]["detected_type"] == "ball valve"   # processed as ONE part
+
+    def test_single_bearing_with_bore_attribute_is_one_object_not_split(self):
+        # FALSE-POSITIVE GUARD #2: "deep groove ball bearing, 25mm bore" -> one bearing (bore is a
+        # dimension, not a second part).
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        bearing = _extracted({"manufacturer": "SKF", "detected_type": "deep groove ball bearing",
+                              "category": "Part", "bore_diameter": "25mm", "model": None, "part_number": None})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(bearing)
+            result = agent.run(_make_run(),
+                               {"text": "deep groove ball bearing, 25mm bore", "images": [], "force_proceed": False})
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+        assert result["asset_specs"]["detected_type"] == "deep groove ball bearing"
+
+    def test_single_part_with_pn_still_sufficient(self):
+        # A lone part is unaffected: "SKF 6205-2RS1" -> one object -> sufficient (over-ask fix
+        # intact), never a false multi-part detection.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        skf = _extracted({"manufacturer": "SKF", "model": "6205-2RS1", "part_number": "6205-2RS1",
+                          "detected_type": "deep groove ball bearing", "category": "Part"})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(skf)
+            result = agent.run(_make_run(),
+                               {"text": "SKF 6205-2RS1", "images": [], "force_proceed": False})
+        assert result["sufficient"] is True
+        assert result["follow_up_question"] is None
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+
+    def test_array_wrapped_single_part_is_unwrapped(self):
+        # If the model over-wraps a lone part as [{...}], run()'s list-of-1 unwrap catches it ->
+        # single-part path, not a spurious multi-part message.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        skf = _extracted({"manufacturer": "SKF", "model": "6205-2RS1", "part_number": "6205-2RS1",
+                          "detected_type": "deep groove ball bearing", "category": "Part"})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([skf])  # array of exactly 1
+            result = agent.run(_make_run(),
+                               {"text": "SKF 6205-2RS1", "images": [], "force_proceed": False})
+        assert result["asset_specs"]["manufacturer"] == "SKF"
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+
+
 # ---------------------------------------------------------------------------
 # Over-ask fix: a confident PART NUMBER uniquely identifies the part, so the category
 # DIMENSION fields (bore_diameter, shaft_size, material_spec) are redundant and must not be

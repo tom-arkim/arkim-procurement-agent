@@ -211,6 +211,24 @@ Rules:
   - description: one line summarizing what the item is, from the input
   - If prior specs are provided, merge carefully: only update fields with new information
 
+MULTIPLE DISTINCT PARTS -> JSON ARRAY:
+If the input describes TWO OR MORE distinct parts/components — items that would each be
+ordered separately (different part numbers, or different component types) — return a JSON
+ARRAY of objects, one object per part, each using exactly the key set above. Example:
+"SKF 6205-2RS1, FLOWSIC610" is a bearing AND a gas-flow analyzer -> return TWO objects.
+
+ONE PART (even with several specs) -> ONE OBJECT:
+A single part described with multiple attributes/specifications separated by commas is still
+ONE object, NOT an array. Commas that separate SPECS (size, bore, material, thread, voltage,
+HP, frame, rating, connection) belong to one part. Examples — each is ONE object:
+  "1/2 inch ball valve, NPT threaded"        -> one valve
+  "deep groove ball bearing, 25mm bore"      -> one bearing
+  "460V 30HP induction motor, 256T frame"    -> one motor
+
+Decide by part IDENTITY, not by the presence of commas: split ONLY when each side names a
+separate component to source; never split one part's spec list. If a single part is given,
+return a single object exactly as specified above.
+
 When the user is responding to a specific clarification question from the agent
 (indicated by "Agent asked: ..." in the input), treat their reply as an authoritative
 direct answer to that question. Score confidence accordingly:
