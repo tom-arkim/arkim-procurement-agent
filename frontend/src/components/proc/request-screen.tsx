@@ -61,6 +61,7 @@ export function RequestScreen() {
   // "+ add another part" inline input.
   const [addText, setAddText] = useState("");
   const [addBusy, setAddBusy] = useState(false);
+  const addRef = useRef<HTMLInputElement>(null);
   // Per-item ready state reported UP by each card (the parent can't call useRun in a loop), so
   // the basket advance can gate on GENUINE all-sufficient.
   const [readyById, setReadyById] = useState<Record<string, boolean>>({});
@@ -122,6 +123,16 @@ export function RequestScreen() {
     }
   };
 
+  // The visible "+ Add part" CTA: with text it adds (same path as Enter); with an EMPTY box it
+  // focuses the input so the click is never a dead no-op. (addBusy still blocks a double-add.)
+  const handleAddClick = () => {
+    if (!addText.trim()) {
+      addRef.current?.focus();
+      return;
+    }
+    addPart();
+  };
+
   // ONE basket action: confirm EVERY item's intake (each enters sourcing under the shared
   // group_id — the whole basket advances), then open the options view. Gated on genuine
   // all-sufficient, so no unresolved item is ever silently dropped or assumed ready.
@@ -151,7 +162,7 @@ export function RequestScreen() {
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) start(); }}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); start(); } }}
               placeholder="Describe the part you need… (e.g. 'air-oil separator for the GA37 compressor')"
               autoFocus
             />
@@ -229,16 +240,18 @@ export function RequestScreen() {
             <ItemCard key={item.runId} runId={item.runId} initialReply={item.reply} onReady={handleReady} />
           ))}
 
-          {/* + add another part — a new run created into the SAME basket group */}
+          {/* + add another part — a new run created into the SAME basket group. The button and
+              Enter share one path (handleAddClick / addPart); an empty box focuses, never no-ops. */}
           <div className="id-actions" style={{ marginTop: 12 }}>
             <input
+              ref={addRef}
               className="proc-idinput"
               value={addText}
               onChange={(e) => setAddText(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") addPart(); }}
               placeholder="Add another part — describe it…"
             />
-            <button className="proc-btn" data-kind="quiet" disabled={addBusy || !addText.trim()} onClick={addPart}>
+            <button className="proc-btn" data-kind="quiet" disabled={addBusy} onClick={handleAddClick}>
               {addBusy ? "Adding…" : "+ Add part"}
             </button>
           </div>
