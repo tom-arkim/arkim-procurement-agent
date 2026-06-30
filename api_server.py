@@ -356,6 +356,22 @@ def _lead_time_label(days: int) -> str:
     return "4+ weeks"
 
 
+def _lead_time_emit(opt: dict) -> Optional[str]:
+    """Honest leadTime for the API: a day-count label ONLY when a real value backs it, else
+    None. A 'placeholder' (T3 pre-quote) or an absent lead_time_days returns None — never the
+    fabricated 'Next day' the old `or 0` produced. A stated 0/1-day lead correctly still shows
+    'Next day'. 'defaulted'/'extracted' values render their number (the UI qualifies via
+    leadTimeSource); a confirmed quote stamps 'quoted' on the overlay (see _quote_overlay)."""
+    source = opt.get("lead_time_source") or "defaulted"   # None (cache-recon path) -> defaulted
+    raw_days = opt.get("lead_time_days")
+    if source == "placeholder" or raw_days is None:
+        return None
+    try:
+        return _lead_time_label(int(raw_days))
+    except (TypeError, ValueError):
+        return None
+
+
 def _vendor_type(merchant_type: str) -> str:
     return {
         "Enterprise":           "NetworkPartner",
@@ -420,7 +436,14 @@ def _transform_option(opt: dict, tier: int, idx: int, quote: Optional[dict] = No
         # fulfilment "buy now" becomes a real ACTION, promote purchase_channel to a
         # SourcingOption model field (it will then drive behaviour, not just display).
         "purchaseChannel":       "marketplace" if (price is not None and is_marketplace(opt.get("source_url"))) else "reference",
-        "leadTime":              _lead_time_label(int(opt.get("lead_time_days") or 0)),
+        # Lead time, HONESTLY (see lead_time_source / models.lead_time_source_for): emit a
+        # day-count ONLY when there's a real value behind it. A "placeholder" (T3 pre-quote — no
+        # lead time exists yet) or an absent lead_time_days -> null, NEVER the fabricated
+        # "Next day" the old `or 0` produced. A "defaulted" heuristic still shows its number but
+        # carries leadTimeSource so the UI (Stage 3) can mark it estimated; "extracted"/"quoted"
+        # are real. leadTimeSource is always present; leadTime may be null.
+        "leadTime":              _lead_time_emit(opt),
+        "leadTimeSource":        opt.get("lead_time_source") or "defaulted",
         "url":                   opt.get("source_url") or "",
         # The listing's actual PN — surfaced so a priced exact/equivalent claim is verifiable.
         "foundPartNumber":       opt.get("found_part_number"),
@@ -554,7 +577,8 @@ def _quote_overlay(quote: dict) -> dict:
         except (TypeError, ValueError):
             pass
     if payload.get("lead_time"):
-        overlay["leadTime"] = payload["lead_time"]   # quote free-text lead overrides label
+        overlay["leadTime"] = payload["lead_time"]        # quote free-text lead overrides label
+        overlay["leadTimeSource"] = "quoted"              # the strongest provenance: a confirmed quote
     if payload.get("terms"):
         overlay["terms"] = payload["terms"]
     return overlay

@@ -1165,6 +1165,7 @@ class TestStateCQuoteOverlay:
         assert b["evidenceState"] == "quoted" and b["quoteConfirmed"] is True
         assert b["price"] == 200.0                             # quote overrides listing 75.0
         assert b["leadTime"] == "2 weeks" and b["terms"] == "Net 30"
+        assert b["leadTimeSource"] == "quoted"                 # a confirmed quote is the strongest provenance
 
     def test_domain_fallback_when_thread_absent(self):
         # A legacy/out-of-thread confirmed quote (NULL thread_id) joins by domain only,
@@ -2045,3 +2046,46 @@ class TestRfqDraftStatusSignal:
         detail = api.get(f"/api/runs/{rid}").json()
         assert "Acme Pumps-t3-0" in detail["tier3_outreach_sent"]            # legacy intact
         assert detail["rfq_draft_status"] == {"Acme Pumps-t3-0": "drafted"}  # real signal added
+
+
+# ---------------------------------------------------------------------------
+# Lead-time provenance, Stage 2 — the transform emits honest values: missing/placeholder
+# lead times are null (NEVER the fabricated "Next day"); defaulted/extracted/quoted carry
+# leadTimeSource so the UI (Stage 3) can qualify them.
+# ---------------------------------------------------------------------------
+
+class TestLeadTimeProvenanceTransform:
+    def _t(self, **opt):
+        from api_server import _transform_option
+        return _transform_option({"vendor_name": "v", **opt}, 2, 0)
+
+    def test_missing_lead_time_is_null_not_next_day(self):
+        # HEADLINE REGRESSION: absent lead_time_days must NOT become the most-confident label.
+        out = self._t(base_price=10.0)                      # no lead_time_days, no source
+        assert out["leadTime"] is None                      # was "Next day" via `or 0`
+        assert out["leadTimeSource"] == "defaulted"
+
+    def test_placeholder_emits_null_no_number(self):
+        # A T3 pre-quote placeholder carries a fake day-count (e.g. 7) — it must NOT show.
+        out = self._t(base_price=0.0, price_tbd=True, lead_time_days=7, lead_time_source="placeholder")
+        assert out["leadTime"] is None
+        assert out["leadTimeSource"] == "placeholder"
+
+    def test_defaulted_shows_number_with_source(self):
+        out = self._t(base_price=10.0, lead_time_days=5, lead_time_source="defaulted")
+        assert out["leadTime"] == "5 days"                  # still shown...
+        assert out["leadTimeSource"] == "defaulted"         # ...but flagged estimated
+
+    def test_extracted_shows_real_number(self):
+        out = self._t(base_price=10.0, lead_time_days=2, lead_time_source="extracted")
+        assert out["leadTime"] == "2 days" and out["leadTimeSource"] == "extracted"
+
+    def test_stated_zero_day_still_renders_next_day(self):
+        # A genuinely-stated 0/1-day lead is real "Next day" — only ABSENT data is suppressed.
+        out = self._t(base_price=10.0, lead_time_days=0, lead_time_source="extracted")
+        assert out["leadTime"] == "Next day" and out["leadTimeSource"] == "extracted"
+
+    def test_missing_source_defaults_conservatively(self):
+        # The known-parts cache path sets lead_time_days but no source -> conservative defaulted.
+        out = self._t(base_price=10.0, lead_time_days=5)    # number present, source absent
+        assert out["leadTime"] == "5 days" and out["leadTimeSource"] == "defaulted"
