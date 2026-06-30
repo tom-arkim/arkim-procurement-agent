@@ -1441,6 +1441,52 @@ class TestGroupIdColumn:
 
 
 # ---------------------------------------------------------------------------
+# group_id minting for N=1 — the per-item basket flow creates each run INTO a group via the
+# opt-in CreateRunRequest.group_id (mint-up-front, client-supplies the UUID). The legacy
+# group-less path is unchanged; the rollup/approval are N-agnostic (work for a 1-item group).
+# ---------------------------------------------------------------------------
+
+class TestGroupIdMintOnCreate:
+    def test_create_run_with_group_id_makes_a_one_item_basket(self, api):
+        # A single run created WITH a group_id is a real 1-item basket: the rollup returns it.
+        rid = _create_run(api, group_id="grp-solo")
+        assert api.get(f"/api/runs/{rid}").json()["group_id"] == "grp-solo"
+        body = api.get("/api/groups/grp-solo").json()
+        assert body["run_count"] == 1
+        assert {r["run_id"] for r in body["runs"]} == {rid}
+
+    def test_second_run_same_group_id_groups_both(self, api):
+        # The incremental "+ add another part" flow: a later run with the SAME group_id joins
+        # the basket — the rollup returns both, joined only by the shared label.
+        a = _create_run(api, group_id="grp-add")
+        b = _create_run(api, group_id="grp-add")
+        body = api.get("/api/groups/grp-add").json()
+        assert body["run_count"] == 2
+        assert {r["run_id"] for r in body["runs"]} == {a, b}
+
+    def test_one_item_basket_total_approval_routes_on_the_single_amount(self, api):
+        # N=1 basket-total approval works end-to-end: routes ONCE on the one line's amount and
+        # advances the single child under the basket decision (not a per-run /approve).
+        rid = _create_run(api, group_id="grp-appr")
+        _ready_child(api, rid, 2000.0)                    # $2k < $5k -> 1 approver
+        r = _approve_basket(api, "grp-appr", "Ann")
+        assert r.status_code == 200
+        assert r.json()["approvers_required"] == 1
+        assert r.json()["status"] == "approved"
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert detail["phase"] == "approved"
+        entry = _read_history(api, rid)[-1]
+        assert entry["approver_role"] == "basket" and entry["basket_approval_id"]
+
+    def test_create_run_without_group_id_stays_group_less(self, api):
+        # REGRESSION: the new field is opt-in — omitting it yields a NULL-group run (legacy),
+        # invisible to any basket rollup (its id is not a group id -> 404).
+        rid = _create_run(api)
+        assert api.get(f"/api/runs/{rid}").json()["group_id"] is None
+        assert api.get(f"/api/groups/{rid}").status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Multi-part Increment 1, Stage 2 — single-vs-multi routing front door (additive).
 # Routes on a PROVIDED part count; the single branch delegates to the unchanged path,
 # the multi branch hits the Stage-3 fan-out seam. No extraction here.

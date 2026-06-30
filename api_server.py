@@ -225,6 +225,10 @@ class CreateRunRequest(BaseModel):
     facility_id: str = "00000000-0000-0000-0000-000000000000"
     urgency_factor: float = Field(0.3, ge=0.0, le=1.0)
     warranty_status: str = "unknown"
+    # Optional basket label so a per-item list can mint a group up front and create each run
+    # into it (the incremental "+ add another part" flow). NULL/omitted -> group-less, exactly
+    # as the legacy single-run path. SECURITY DEBT: client-supplied + unvalidated — see CLEANUP.
+    group_id: Optional[str] = None
 
 
 class CreateRunResponse(BaseModel):
@@ -948,6 +952,7 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
         urgency_factor=body.urgency_factor,
         warranty_status=body.warranty_status,
         company_id=caller.company_id if caller else None,
+        group_id=body.group_id,   # opt-in basket label; None -> group-less (legacy, unchanged)
     )
     with _SessionFactory() as session:
         session.add(run)
