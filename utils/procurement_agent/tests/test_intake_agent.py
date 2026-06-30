@@ -253,6 +253,7 @@ class TestSufficiency:
         motor_specs = _extracted({
             "detected_type":    "induction motor",
             "category":         "Equipment",
+            "part_number":      None,   # spec-based (no PN) -> the dimension requirement applies
             "hp":               None,
             "frame":            "326T",
             "rpm":              "1800",
@@ -272,6 +273,7 @@ class TestSufficiency:
         motor_specs = _extracted({
             "detected_type":    "induction motor",
             "category":         "Equipment",
+            "part_number":      None,   # spec-based (no PN) -> the dimension requirement applies
             "hp":               "30",
             "frame":            None,
             "rpm":              "1800",
@@ -290,6 +292,7 @@ class TestSufficiency:
         seal_specs = _extracted({
             "detected_type":    "mechanical seal",
             "category":         "Part",
+            "part_number":      None,   # spec-based (no PN) -> the dimension requirement applies
             "shaft_size":       None,
             "material_spec":    "Carbon/Silicon Carbide",
             "manufacturer_confidence": 85,
@@ -768,6 +771,7 @@ class TestClarificationLoopFix:
         turn1_response = _extracted({
             "manufacturer":            None,
             "model":                   "PMC11-AA1V1HFVXJA",
+            "part_number":             None,   # model-only (no PN) -> psi still required (spec-based)
             "detected_type":           "pressure sensor",
             "manufacturer_confidence": 0,
             "part_id_confidence":      72,
@@ -794,6 +798,7 @@ class TestClarificationLoopFix:
         turn2_response = _extracted({
             "manufacturer":            "Endress+Hauser",
             "model":                   "PMC11-AA1V1HFVXJA",
+            "part_number":             None,   # still model-only; psi (now supplied) satisfies the category
             "detected_type":           "pressure sensor",
             "psi":                     "150",  # required field for pressure sensor category
             "manufacturer_confidence": 92,
@@ -886,4 +891,60 @@ class TestMultiPartListHandling:
             result = agent.run(_make_run(),
                                {"text": "Grundfos CR32-5", "images": [], "force_proceed": False})
         assert result["sufficient"] is True          # byte-for-byte the existing success path
+        assert result["follow_up_question"] is None
+
+
+# ---------------------------------------------------------------------------
+# Over-ask fix: a confident PART NUMBER uniquely identifies the part, so the category
+# DIMENSION fields (bore_diameter, shaft_size, material_spec) are redundant and must not be
+# re-asked. The skip is narrowed to the PN-present case — the no-PN (spec-based) path is intact.
+# ---------------------------------------------------------------------------
+
+from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+
+
+class TestPartNumberBypassesDimensionCheck:
+    def test_skf_bearing_with_pn_no_bore_is_sufficient(self):
+        # HEADLINE: SKF 6205-2RS1, confident mfg+PN, no bore_diameter -> proceed, NO bore re-ask.
+        specs = {"detected_type": "deep groove ball bearing", "manufacturer": "SKF",
+                 "part_number": "6205-2RS1", "bore_diameter": None}
+        state, missing, caveat = assess_proceed_state(specs, 92, 85)
+        assert state == "proceed_full_confidence" and missing is None
+
+    def test_gusher_seal_with_pn_no_material_is_sufficient(self):
+        # A mechanical seal needs shaft_size + material_spec by category; a PN makes both redundant.
+        specs = {"detected_type": "mechanical seal", "manufacturer": "Gusher",
+                 "part_number": "TYPE-21-S", "shaft_size": None, "material_spec": None}
+        state, missing, caveat = assess_proceed_state(specs, 90, 88)
+        assert state == "proceed_full_confidence" and missing is None
+
+    def test_no_pn_bearing_still_asks_for_bore(self):
+        # REGRESSION: spec-based sourcing (no PN) MUST still require the dimensions.
+        specs = {"detected_type": "bearing", "bore_diameter": None}   # no part_number
+        state, missing, caveat = assess_proceed_state(specs, 90, 75)
+        assert state == "needs_clarification" and missing == "bore_diameter"
+
+    def test_model_only_still_asks_for_dimension(self):
+        # Model alone names a family with dimensioned variants -> does NOT bypass; still asks.
+        specs = {"detected_type": "bearing", "model": "6205", "bore_diameter": None}  # no part_number
+        state, missing, caveat = assess_proceed_state(specs, 90, 75)
+        assert state == "needs_clarification" and missing == "bore_diameter"
+
+    def test_placeholder_part_number_does_not_bypass(self):
+        # "UNKNOWN-PN" is a null value, not a real PN -> no bypass, still asks.
+        specs = {"detected_type": "bearing", "part_number": "UNKNOWN-PN", "bore_diameter": None}
+        state, missing, caveat = assess_proceed_state(specs, 90, 75)
+        assert state == "needs_clarification" and missing == "bore_diameter"
+
+    def test_run_end_to_end_pn_present_is_sufficient_no_followup(self):
+        # The full run() path: a PN'd bearing with no bore -> sufficient, no follow-up question.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        payload = _extracted({"manufacturer": "SKF", "model": None, "part_number": "6205-2RS1",
+                              "detected_type": "deep groove ball bearing", "category": "Part",
+                              "gpm": None, "bore_diameter": None,
+                              "manufacturer_confidence": 92, "part_id_confidence": 85})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(payload)
+            result = agent.run(_make_run(), {"text": "SKF 6205-2RS1 bearing", "images": [], "force_proceed": False})
+        assert result["sufficient"] is True
         assert result["follow_up_question"] is None

@@ -106,9 +106,21 @@ _PROCEED_CAVEAT = (
 
 def _first_missing_required_field(specs: dict) -> Optional[str]:
     detected = (specs.get("detected_type") or "").lower()
+    # A confident part number uniquely identifies the part — its catalog entry fixes every
+    # category DIMENSION (bore_diameter, shaft_size, material_spec…), so re-asking for them is
+    # an over-ask (SKF 6205-2RS1 needs no bore; a Gusher seal needs no material). With a PN
+    # present we skip the dimension requirements but still require detected_type (the category,
+    # needed to source). Only a PART NUMBER qualifies — a model alone names a family that can
+    # still have dimensioned variants. The no-PN path is untouched: spec-based sourcing genuinely
+    # needs the dimensions to find equivalents without a catalog id. (part_id_confidence >= the
+    # threshold is already guaranteed here — this is only reached from that branch of
+    # assess_proceed_state.)
+    pn_present = specs.get("part_number") not in _NULL_VALUES
     for key, fields in CATEGORY_REQUIRED_FIELDS.items():
         if key in detected:
             for field_name in fields:
+                if pn_present and field_name != "detected_type":
+                    continue   # PN is the spec — dimension fields are redundant
                 if specs.get(field_name) in _NULL_VALUES:
                     return field_name
     return None
