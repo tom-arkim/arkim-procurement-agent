@@ -900,3 +900,151 @@ class TestDemoSessionOffNoRegression:
         SF, ORM = api._SessionFactory, api.SourcingRunORM
         with SF() as s:
             assert s.get(ORM, rid).session_id is None
+
+
+# ---------------------------------------------------------------------------
+# RATE LIMITING / RUN CAP (FIX B): under DEMO_MODE a per-session cap bounds the
+# cost-DoS (each sourcing run is ~13 external calls). Cap run creation (POST
+# /api/runs) and the spend trigger (confirm-intake). 429 + Retry-After, not 403.
+# Inert when DEMO_MODE is off. The store is keyed (scope, key) so a future per-IP
+# cap is a new scope+key, not a refactor.
+# ---------------------------------------------------------------------------
+
+class TestDemoRunCreationCap:
+    def test_under_cap_allows_creates(self, demo_on):
+        # Default DEMO_MAX_RUNS_PER_SESSION=10: the first 10 creates all 201.
+        client, _ = demo_on
+        for _ in range(10):
+            assert client.post("/api/runs", json={}).status_code == 201
+
+    def test_over_cap_429_with_retry_after(self, demo_on):
+        # The 11th create in the same session -> 429 with a Retry-After header.
+        client, _ = demo_on
+        for _ in range(10):
+            client.post("/api/runs", json={})
+        r = client.post("/api/runs", json={})
+        assert r.status_code == 429
+        assert r.headers.get("retry-after") is not None
+        assert "limit" in r.json()["detail"].lower()
+
+    def test_cap_is_per_session(self, demo_on):
+        # A second session has its OWN counter — hitting the cap in _SID does not
+        # deny _SID_OTHER (the store is keyed by session, not global).
+        client, _ = demo_on
+        for _ in range(10):
+            client.post("/api/runs", json={})
+        # _SID is at its cap; _SID_OTHER can still create.
+        r = client.post("/api/runs", json={}, headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 201
+
+    def test_cap_env_configurable(self, demo_on, monkeypatch):
+        # The cap is read from the module global at call time -> override it and the
+        # new limit takes effect without a re-import.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_RUNS_PER_SESSION", 2)
+        assert client.post("/api/runs", json={}).status_code == 201
+        assert client.post("/api/runs", json={}).status_code == 201
+        assert client.post("/api/runs", json={}).status_code == 429
+
+    def test_denied_create_does_not_increment(self, demo_on, monkeypatch):
+        # A rejected (429) create does not itself count — the counter stops at the cap
+        # rather than climbing on every rejected retry. Set cap=1: 1 ok, then N x 429,
+        # and a fresh session still gets its full 1.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_RUNS_PER_SESSION", 1)
+        assert client.post("/api/runs", json={}).status_code == 201
+        for _ in range(3):
+            assert client.post("/api/runs", json={}).status_code == 429
+        # A different session is unaffected (proves the 429s didn't bump a global).
+        assert client.post(
+            "/api/runs", json={}, headers={"X-Session-Id": _SID_OTHER}
+        ).status_code == 201
+
+
+class TestDemoSourcingCap:
+    """confirm-intake is the spend trigger (~13 external calls). Capped per session."""
+
+    def _seed_and_confirm(self, client, api, monkeypatch):
+        """Create a run, seed specs, confirm-intake (background mocked offline)."""
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        rid = client.post("/api/runs", json={}).json()["id"]
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            s.get(ORM, rid).asset_specs_json = json.dumps(
+                {"manufacturer": "Goulds", "part_number": "PN-1"})
+            s.commit()
+        return client.post(f"/api/runs/{rid}/confirm-intake")
+
+    def test_under_cap_allows_sourcing(self, demo_on, monkeypatch):
+        # Default DEMO_MAX_SOURCING_PER_SESSION=5: the first 5 confirms all 200.
+        client, api = demo_on
+        for _ in range(5):
+            r = self._seed_and_confirm(client, api, monkeypatch)
+            assert r.status_code == 200
+            assert r.json()["phase"] == "sourcing"
+
+    def test_over_cap_429(self, demo_on, monkeypatch):
+        # The 6th sourcing in the same session -> 429 with Retry-After.
+        client, api = demo_on
+        for _ in range(5):
+            self._seed_and_confirm(client, api, monkeypatch)
+        r = self._seed_and_confirm(client, api, monkeypatch)
+        assert r.status_code == 429
+        assert r.headers.get("retry-after") is not None
+
+    def test_cap_env_configurable(self, demo_on, monkeypatch):
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_SOURCING_PER_SESSION", 2)
+        for _ in range(2):
+            assert self._seed_and_confirm(client, api, monkeypatch).status_code == 200
+        assert self._seed_and_confirm(client, api, monkeypatch).status_code == 429
+
+    def test_409_refire_does_not_count(self, demo_on, monkeypatch):
+        # A confirm-intake on a run already past intake hits 409 BEFORE the cap check,
+        # so it must NOT increment the sourcing counter. With cap=2: confirm rid (200,
+        # counter=1), re-fire rid (409, must not count), confirm rid2 (200 -> counter=2,
+        # only possible if the 409 didn't burn the second slot), then rid3 -> 429.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_SOURCING_PER_SESSION", 2)
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+
+        def _seed(rid):
+            with SF() as s:
+                s.get(ORM, rid).asset_specs_json = json.dumps(
+                    {"manufacturer": "Goulds", "part_number": "PN-1"})
+                s.commit()
+
+        rid = client.post("/api/runs", json={}).json()["id"]
+        _seed(rid)
+        assert client.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        # Re-fire on the same (now sourcing) run -> 409, NOT 429, and doesn't count.
+        assert client.post(f"/api/runs/{rid}/confirm-intake").status_code == 409
+        # A second fresh run can still source (the 409 didn't consume the 2nd slot).
+        rid2 = client.post("/api/runs", json={}).json()["id"]
+        _seed(rid2)
+        assert client.post(f"/api/runs/{rid2}/confirm-intake").status_code == 200
+        # Now the cap (2) is genuinely reached -> a third is 429.
+        rid3 = client.post("/api/runs", json={}).json()["id"]
+        _seed(rid3)
+        assert client.post(f"/api/runs/{rid3}/confirm-intake").status_code == 429
+
+
+class TestDemoRateLimitOffNoRegression:
+    def test_no_run_cap_when_off(self, demo_off, monkeypatch):
+        # With DEMO_MODE off the cap is inert — well past the demo default, no 429.
+        client, api = demo_off
+        for _ in range(15):
+            assert client.post("/api/runs", json={}).status_code == 201
+
+    def test_no_sourcing_cap_when_off(self, demo_off, monkeypatch):
+        client, api = demo_off
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        for _ in range(8):
+            rid = client.post("/api/runs", json={}).json()["id"]
+            SF, ORM = api._SessionFactory, api.SourcingRunORM
+            with SF() as s:
+                s.get(ORM, rid).asset_specs_json = json.dumps(
+                    {"manufacturer": "Goulds", "part_number": "PN-1"})
+                s.commit()
+            assert client.post(f"/api/runs/{rid}/confirm-intake").status_code == 200

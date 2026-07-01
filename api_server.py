@@ -11,6 +11,7 @@ Start with:
 import json
 import os
 import re
+import threading
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -392,6 +393,100 @@ def _demo_run_owned_by_session(run: SourcingRunORM, session_id: Optional[str]) -
     return row_sid == session_id
 
 
+# ---------------------------------------------------------------------------
+# DEMO_MODE rate limiting — per-session spend/run caps (the cost-DoS ceiling)
+# ---------------------------------------------------------------------------
+# A visitor can loop the legit intake -> confirm -> source path; each sourcing run
+# is ~13 external calls (Tavily x6, Anthropic intake/brand-intel, comparison LLMs).
+# Unbounded that is a cost-DoS. Under DEMO_MODE a per-session cap bounds it. The
+# expensive op is confirm-intake (it schedules the background sourcing); run birth
+# (POST /api/runs) is cheap but is also capped to bound row spam and the funnel top.
+#
+# In-process counter store (single-instance ECS demo — no Redis). Counters reset on
+# server restart (CLEANUP: if the demo ever scales to multi-instance, this state
+# must move to a shared store or a visitor just restarts their count per instance).
+# Acceptable for a bounded public demo; spend is also hard-capped by the Apollo
+# block and the per-run external-call shape.
+#
+# Store is keyed by (scope, key) so a NEW cap dimension is an added scope+key, NOT a
+# refactor: today key = session_id (per-session). A future per-IP cap is a second
+# call, e.g. _demo_enforce_cap("runs_per_ip", client_ip, DEMO_MAX_RUNS_PER_IP, ...),
+# reusing the same store + helper unchanged.
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var, falling back to `default` on missing/unparseable (fail
+    to the safe default rather than crashing the boot on a bad config value)."""
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+# Caps are read at import (module globals); tests override via monkeypatch on the
+# module attribute (the helpers resolve them at call time). Defaults bound abuse
+# while leaving headroom for a genuine multi-part demo.
+_DEMO_MAX_RUNS_PER_SESSION: int = _env_int("DEMO_MAX_RUNS_PER_SESSION", 10)
+_DEMO_MAX_SOURCING_PER_SESSION: int = _env_int("DEMO_MAX_SOURCING_PER_SESSION", 5)
+# Seconds hinted in the 429 Retry-After header (the caps are simple totals, not a
+# sliding window, so this is a courtesy hint rather than a precise reset time).
+_DEMO_RETRY_AFTER_SEC: int = _env_int("DEMO_RATE_RETRY_AFTER_SEC", 60)
+
+
+class _DemoRateCounter:
+    """Thread-safe in-process counter for DEMO_MODE rate caps. A counter is keyed by
+    a (scope, key) tuple — `scope` names the dimension ("runs_per_session",
+    "sourcing_per_session", a future "runs_per_ip"...), `key` is the identity within
+    it (session_id, client IP, ...). checked_incr is the atomic check-and-increment:
+    returns the new count, or -1 when the cap is already reached (no increment on a
+    denied attempt — a rejected call never counts against the limit)."""
+
+    def __init__(self) -> None:
+        self._counts: Dict[tuple, int] = {}
+        self._lock = threading.Lock()
+
+    def checked_incr(self, scope: str, key: str, cap: int) -> int:
+        """Atomically: if the (scope, key) count is already >= cap, return -1 (denied,
+        no increment); else increment and return the new count. cap <= 0 means
+        unlimited (returns 0, no increment)."""
+        if cap <= 0:
+            return 0
+        with self._lock:
+            k = (scope, key)
+            cur = self._counts.get(k, 0)
+            if cur >= cap:
+                return -1
+            self._counts[k] = cur + 1
+            return cur + 1
+
+    def reset(self) -> None:
+        with self._lock:
+            self._counts.clear()
+
+
+_DEMO_COUNTERS = _DemoRateCounter()
+
+
+def _demo_enforce_cap(scope: str, key: str, cap: int, label: str) -> None:
+    """Under DEMO_MODE, raise 429 (with Retry-After) if the (scope, key) counter has
+    reached `cap`; otherwise increment it. Inert when DEMO_MODE is off, when cap <= 0
+    (unlimited), or when `key` is empty (no session -> the write path already 422s
+    via Part A; reads don't spend). A new cap dimension (e.g. per client-IP) is a new
+    scope + key passed here — the store and this helper do not change."""
+    if not DEMO_MODE or cap <= 0 or not key:
+        return
+    result = _DEMO_COUNTERS.checked_incr(scope, key, cap)
+    if result < 0:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Demo {label} limit reached ({cap} per session). "
+                "Please start a new browser session to continue the demo."
+            ),
+            headers={"Retry-After": str(_DEMO_RETRY_AFTER_SEC)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1259,6 +1354,8 @@ def create_run(
     rollup — no spend risk, and the demo's basket view needs it). Inert when DEMO_MODE is
     off: asset_specs is honored exactly as today (the real multi-part fan-out unbroken)."""
     demo_sid = _require_demo_session_id(request)   # "" when DEMO_MODE off (-> None below)
+    # DEMO_MODE run-creation cap (bounds row spam + the funnel top). Inert when off.
+    _demo_enforce_cap("runs_per_session", demo_sid, _DEMO_MAX_RUNS_PER_SESSION, "run creation")
     seeded_specs = body.asset_specs
     if DEMO_MODE:
         seeded_specs = None   # forced bare intake — the bypass can't skip the intake gate
@@ -2259,6 +2356,13 @@ def confirm_intake(
                 status_code=422,
                 detail="No asset specs captured yet — complete intake chat first",
             )
+        # DEMO_MODE sourcing cap — the spend trigger. Checked AFTER the 409/422 guards
+        # so only a valid intake->sourcing transition counts (a re-fire on an already-
+        # sourcing run hits 409 first and never reaches here). Before the phase mutate +
+        # background scheduling so a denied 429 leaves the run untouched. Inert when off.
+        _demo_enforce_cap(
+            "sourcing_per_session", demo_sid, _DEMO_MAX_SOURCING_PER_SESSION, "sourcing"
+        )
         specs_dict = json.loads(run.asset_specs_json)
         if exact_only:
             specs_dict["exact_only"] = True
