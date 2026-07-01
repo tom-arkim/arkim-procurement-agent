@@ -354,3 +354,136 @@ class TestEmailBootRefusal:
 
     def test_demo_off_email_off_starts_fine(self, monkeypatch, tmp_path):
         assert self._import_raises_refusal(monkeypatch, tmp_path, "", False) is False
+
+
+# ---------------------------------------------------------------------------
+# APOLLO CREDIT-SPEND BLOCK (FIX 2): under DEMO_MODE the app (a) refuses to
+# boot if APOLLO_API_KEY is present in the env, and (b) constructs SourcingAgent
+# with apollo_api_key="" — overriding ApolloClient's env read so Apollo is
+# disabled even if the key somehow leaks in. Both guards are inert when
+# DEMO_MODE is off. The conftest autouse net sets APOLLO_API_KEY="" for every
+# test, so demo_on boots by default; a refusal can only fire when a test sets a
+# real value (its setenv runs after the autouse setup and wins).
+# ---------------------------------------------------------------------------
+
+class TestApolloBootRefusal:
+    def _import_raises_apollo_refusal(self, monkeypatch, tmp_path, demo_env, apollo_key):
+        """True iff importing api_server raises the Apollo boot refusal.
+
+        api_server reads DEMO_MODE and APOLLO_API_KEY from the env at import.
+        We control both via setenv (robust against the conftest autouse net,
+        which sets APOLLO_API_KEY="" — our setenv runs after it and wins).
+        api_server is popped so it re-imports and re-runs its top-level
+        assertion against the values we just set."""
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        if demo_env is not None:
+            monkeypatch.setenv("DEMO_MODE", demo_env)
+        monkeypatch.setenv("APOLLO_API_KEY", apollo_key)
+        sys.modules.pop("api_server", None)
+        try:
+            _import_api_server_fresh(monkeypatch, tmp_path)
+            return False   # imported without raising
+        except RuntimeError as exc:
+            return "APOLLO_API_KEY must be unset in DEMO_MODE" in str(exc)
+        finally:
+            # Drop api_server so no test reuses a copy bound to the refusal env.
+            sys.modules.pop("api_server", None)
+
+    def test_demo_on_apollo_key_set_refuses_to_start(self, monkeypatch, tmp_path):
+        # A real key under DEMO_MODE -> the boot assertion refuses to start.
+        assert self._import_raises_apollo_refusal(
+            monkeypatch, tmp_path, "true", "real-key") is True
+
+    def test_demo_on_apollo_key_unset_starts_fine(self, monkeypatch, tmp_path):
+        # Empty key under DEMO_MODE -> no refusal (the conftest default state).
+        assert self._import_raises_apollo_refusal(
+            monkeypatch, tmp_path, "true", "") is False
+
+    def test_demo_off_apollo_key_set_starts_fine(self, monkeypatch, tmp_path):
+        # Normal ops: no DEMO_MODE -> the assertion never fires, even with a key.
+        assert self._import_raises_apollo_refusal(
+            monkeypatch, tmp_path, "", "real-key") is False
+
+
+# ---------------------------------------------------------------------------
+# CONSTRUCTION (FIX 2 part b — the suspenders): under DEMO_MODE the background
+# sourcing path constructs SourcingAgent with apollo_api_key="" (NOT None) so
+# ApolloClient's env read is overridden and Apollo is disabled. When DEMO_MODE
+# is off it passes None (falls through to env — unchanged). SourcingAgent is
+# imported function-locally inside _run_sourcing_background, so the recording
+# Mock is patched onto its source module (the same seam as test_api_server's
+# _mock_sourcing_pipeline). An all-empty-tiers result keeps the comparison
+# `work` list empty -> no SpecComparisonAgent call, no network.
+# ---------------------------------------------------------------------------
+
+class TestApolloConstructionForcedOff:
+    _EMPTY_RESULT = {
+        "tier_1": {"results": [], "count": 0},
+        "tier_2": {"results": [], "count": 0},
+        "tier_3": {"results": [], "count": 0},
+    }
+
+    def _recording_sourcing_agent(self, monkeypatch):
+        """Patch SourcingAgent with a recording Mock; return the constructor
+        Mock so a test can inspect call kwargs. .run() returns an all-empty
+        result so the comparison step is a no-op."""
+        import utils.procurement_agent.agents.sourcing_agent as sa_mod
+        agent = Mock()
+        agent.run.return_value = self._EMPTY_RESULT
+        constructor = Mock(return_value=agent)
+        monkeypatch.setattr(sa_mod, "SourcingAgent", constructor)
+        return constructor
+
+    def _seed_specs_and_run(self, api, monkeypatch, tmp_path):
+        """Create a run, seed asset specs on the ORM, point known_parts at an
+        empty temp store (guaranteed cache miss -> the discovery path runs and
+        constructs SourcingAgent), then invoke _run_sourcing_background directly."""
+        from utils import known_parts
+        monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
+
+        client = TestClient(api.app)
+        rid = client.post("/api/runs", json={}).json()["id"]
+        specs = {"manufacturer": "Goulds", "part_number": "3196"}
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as session:
+            run = session.get(ORM, rid)
+            run.asset_specs_json = json.dumps(specs)
+            session.commit()
+
+        constructor = self._recording_sourcing_agent(monkeypatch)
+        api._run_sourcing_background(rid, specs, 0.3, "unknown")
+        return constructor
+
+    def test_construction_forces_apollo_off_under_demo(self, demo_on, monkeypatch, tmp_path):
+        _, api = demo_on
+        constructor = self._seed_specs_and_run(api, monkeypatch, tmp_path)
+        assert constructor.call_count == 1
+        _, kwargs = constructor.call_args
+        # "" (not None) overrides ApolloClient's env read -> Apollo disabled.
+        assert kwargs.get("apollo_api_key") == ""
+
+    def test_construction_passes_none_when_demo_off(self, demo_off, monkeypatch, tmp_path):
+        _, api = demo_off
+        constructor = self._seed_specs_and_run(api, monkeypatch, tmp_path)
+        assert constructor.call_count == 1
+        _, kwargs = constructor.call_args
+        # None falls through to the env read inside ApolloClient (unchanged ops).
+        assert kwargs.get("apollo_api_key") is None
+
+
+# ---------------------------------------------------------------------------
+# LINKAGE: prove the "" actually disables Apollo. ApolloClient.enabled is a
+# property returning bool(self._api_key) — "" is falsy -> disabled. This is the
+# exact construction SourcingAgent performs (self._apollo = ApolloClient(...)),
+# so it proves the forced-off path can't spend, not merely that "" was passed.
+# ---------------------------------------------------------------------------
+
+class TestApolloClientEmptyKeyDisables:
+    def test_empty_key_disables_apollo_client(self):
+        from utils.apollo_client import ApolloClient
+        assert ApolloClient(api_key="").enabled is False
+
+    def test_real_key_enables_apollo_client(self):
+        # Contrast: a real key leaves Apollo enabled (the state DEMO_MODE blocks).
+        from utils.apollo_client import ApolloClient
+        assert ApolloClient(api_key="real-key").enabled is True
