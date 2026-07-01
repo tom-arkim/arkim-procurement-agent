@@ -466,12 +466,36 @@ class IntakeAgent:
 
         return None
 
+    def _apply_pn_manufacturer(self, obj: dict, prior_specs: Optional[dict] = None) -> None:
+        """Infer a manufacturer for ONE extracted part from a known PN prefix, applied PER-PART
+        after extraction (not as a whole-input prompt bias — which used to collapse a multi-part
+        input to one part). Reuses _pn_prefix_hint's prefix matching, scoped to this object's OWN
+        identifier fields (part_number / model / description) plus, when given, prior_specs (the
+        established PN from a prior turn — for a single-part follow-up). Sets manufacturer only
+        when the LLM left it missing or lower-confidence than the prefix lookup; mutates in place.
+        Pass prior_specs ONLY for the single-part case — for a multi-part array each element
+        carries its own PN, and a prior single PN must not re-bias the others."""
+        if not isinstance(obj, dict):
+            return
+        own_text = " ".join(str(obj.get(k) or "") for k in ("part_number", "model", "description"))
+        hint = self._pn_prefix_hint(own_text, prior_specs or {})
+        if not hint:
+            return
+        mfg_name, mfg_conf = hint
+        llm_mfg = obj.get("manufacturer") or ""
+        llm_conf = float(obj.get("manufacturer_confidence") or 0)
+        if llm_mfg in _NULL_VALUES or llm_conf < mfg_conf:
+            obj["manufacturer"] = mfg_name
+            obj["manufacturer_confidence"] = mfg_conf
+
     def _extract_text(self, text: str, prior_specs: dict, prior_question: str | None = None) -> dict:
         if not self._api_key:
             return self._fallback_extract(prior_specs)
 
-        pn_hint = self._pn_prefix_hint(text, prior_specs)
-
+        # NOTE: the pn-prefix manufacturer hint is NOT injected into the prompt — the LLM's
+        # array/attribute rule decides part-count UNBIASED; the manufacturer is inferred PER-PART
+        # after extraction (via _apply_pn_manufacturer). A whole-input hint used to collapse a
+        # multi-part input to one part.
         context = ""
         if prior_specs:
             summary = self._build_context_summary(prior_specs)
@@ -483,18 +507,6 @@ class IntakeAgent:
                 )
             else:
                 context = f"Previously extracted specs:\n{json.dumps(summary)}\n\nUser input: "
-
-        if pn_hint:
-            mfg_name, mfg_conf = pn_hint
-            print(f"[IntakeAgent] PN prefix match -> manufacturer={mfg_name!r} conf={mfg_conf}")
-            hint_prefix = (
-                f"SYSTEM NOTE: A part number in the input matches a known manufacturer prefix — the part "
-                f"bearing that part number is made by {mfg_name}. Set THAT part's manufacturer={mfg_name!r} "
-                f"and manufacturer_confidence={mfg_conf}. This applies ONLY to the matching part. If the input "
-                f"names two or more distinct parts, still return a JSON array with one object per part — do NOT "
-                f"fold the other parts into the matching one.\n\n"
-            )
-            context = hint_prefix + context
 
         try:
             resp = requests.post(
@@ -514,19 +526,14 @@ class IntakeAgent:
             )
             resp.raise_for_status()
             extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
-            # If we have a high-confidence prefix match and the LLM returned a different
-            # or absent manufacturer, override — prefix lookup is more reliable than
-            # LLM inference for known product families. Guarded to a single dict: a LIST is a
-            # multi-part result (one object per part) — the single-part manufacturer override
-            # does not apply, and touching it would crash the array back to a fallback (the
-            # bug that let the pn-hint suppress multi-part detection).
-            if pn_hint and isinstance(extracted, dict):
-                mfg_name, mfg_conf = pn_hint
-                llm_mfg = extracted.get("manufacturer") or ""
-                llm_conf = float(extracted.get("manufacturer_confidence") or 0)
-                if llm_mfg in _NULL_VALUES or llm_conf < mfg_conf:
-                    extracted["manufacturer"] = mfg_name
-                    extracted["manufacturer_confidence"] = mfg_conf
+            # Infer the manufacturer PER-PART from a known PN prefix (prefix lookup beats LLM
+            # inference for known families). A single dict -> apply once, considering the prior
+            # PN too; a LIST (multi-part) -> apply to EACH element on its OWN PN (no prior re-bias).
+            if isinstance(extracted, dict):
+                self._apply_pn_manufacturer(extracted, prior_specs)
+            elif isinstance(extracted, list):
+                for part in extracted:
+                    self._apply_pn_manufacturer(part)
             return extracted
         except Exception as exc:
             print(f"[IntakeAgent] Text extraction failed: {exc}")
@@ -536,8 +543,7 @@ class IntakeAgent:
         if not self._api_key:
             return self._fallback_extract(prior_specs)
 
-        pn_hint = self._pn_prefix_hint(text, prior_specs)
-
+        # See _extract_text: no pn-prefix hint in the prompt — inferred PER-PART after extraction.
         content: list = []
 
         for img_bytes in images[:4]:
@@ -556,22 +562,10 @@ class IntakeAgent:
                                      "confidence_reasoning") and v not in _NULL_VALUES}
             context = f"Previously extracted specs:\n{json.dumps(summary)}\n\n"
 
-        hint_prefix = ""
-        if pn_hint:
-            mfg_name, mfg_conf = pn_hint
-            print(f"[IntakeAgent] PN prefix match (multimodal) -> manufacturer={mfg_name!r} conf={mfg_conf}")
-            hint_prefix = (
-                f"SYSTEM NOTE: A part number in the input matches a known manufacturer prefix — the part "
-                f"bearing that part number is made by {mfg_name}. Set THAT part's manufacturer={mfg_name!r} "
-                f"and manufacturer_confidence={mfg_conf}. This applies ONLY to the matching part. If the input "
-                f"names two or more distinct parts, still return a JSON array with one object per part — do NOT "
-                f"fold the other parts into the matching one.\n\n"
-            )
-
         content.append({
             "type": "text",
             "text": (
-                f"{hint_prefix}{context}Extract all equipment/part specifications visible in the "
+                f"{context}Extract all equipment/part specifications visible in the "
                 f"image(s) and from the text below.\n\n{text or '(no additional text)'}"
             ),
         })
@@ -594,15 +588,13 @@ class IntakeAgent:
             )
             resp.raise_for_status()
             extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
-            # Guarded to a single dict — a LIST is a multi-part result; the single-part override
-            # doesn't apply and touching it would crash the array to a fallback (see _extract_text).
-            if pn_hint and isinstance(extracted, dict):
-                mfg_name, mfg_conf = pn_hint
-                llm_mfg = extracted.get("manufacturer") or ""
-                llm_conf = float(extracted.get("manufacturer_confidence") or 0)
-                if llm_mfg in _NULL_VALUES or llm_conf < mfg_conf:
-                    extracted["manufacturer"] = mfg_name
-                    extracted["manufacturer_confidence"] = mfg_conf
+            # Per-part manufacturer inference (see _extract_text): dict -> once (with prior PN);
+            # list -> each element on its own PN.
+            if isinstance(extracted, dict):
+                self._apply_pn_manufacturer(extracted, prior_specs)
+            elif isinstance(extracted, list):
+                for part in extracted:
+                    self._apply_pn_manufacturer(part)
             return extracted
         except Exception as exc:
             detail = ""

@@ -697,10 +697,12 @@ class TestClarificationLoopFix:
                 "prior_question": "Who is the manufacturer of this equipment?",
             })
 
-        # Fix A: part_conf = max(72, 30) = 72 (floor preserved from prior turn)
-        # mfg_conf = max(0, 90) = 90
-        # assess_proceed_state(merged, 90, 72) → both ≥ 70 → proceed_full_confidence
-        assert result["manufacturer_confidence"] == 90
+        # Fix A: part_conf = max(72, 30) = 72 (floor preserved from prior turn).
+        # mfg_conf = 92: per-object inference recognizes model "PMC11" -> Endress+Hauser at the
+        # prefix confidence (92), which overrides the LLM's 90 (split-first change; the old
+        # whole-input hint scanned only the turn-2 text "Endress Hauser" and missed the model PN).
+        # Both >= 70 either way -> proceed_full_confidence; the intent (proceeds, no re-ask) holds.
+        assert result["manufacturer_confidence"] == 92
         assert result["part_id_confidence"] == 72
         assert result["sufficient"] is True
         assert result["follow_up_question"] is None
@@ -1014,68 +1016,94 @@ class TestMultiPartArrayExtraction:
 
 
 class TestPnHintMultiPartScoping:
-    """The pn-prefix hint (fires when a token matches a known PN prefix, e.g. PMC21 -> E+H) was a
-    SINGULAR note ("This part is manufactured by X") that overrode the array rule and collapsed
-    a multi-part input to one part. The reword scopes the hint to the matching part and preserves
-    the array rule. These assert the injected note (the real fix) + run()'s behaviour on the shapes
-    the reworded hint elicits. (PMC21 -> Endress+Hauser resolves offline via the static prefix map.)"""
+    """The pn-prefix hint used to be a SINGULAR prompt note that biased the LLM to one part and
+    collapsed multi-part input. Split-first (Approach 2) REMOVES the prompt note — the LLM's
+    array/attribute rule decides part-count unbiased — and infers the manufacturer PER-PART after
+    extraction (_apply_pn_manufacturer). These assert the note is gone from the prompt AND that
+    per-object inference sets the manufacturer for single, multi, boundary, and prior-specs cases.
+    (PMC21 -> Endress+Hauser, 22C -> Allen-Bradley resolve offline via the static prefix map.)
 
-    def test_pn_hint_note_is_scoped_text_path(self):
-        # The hint still fires for "Cerabar PMC21" (E+H) but the note is now scoped to the matching
-        # part and preserves the array rule — the old singular "This part is manufactured by" is gone.
+    Note: d0b4c30's note-assertion tests were REPLACED — the prompt note no longer exists; these
+    assert the per-object inference that took its place (flagged in the commit)."""
+
+    def test_no_pn_hint_note_in_prompt_text_path(self):
+        # The singular manufacturer note is GONE from the extraction prompt — the LLM decides
+        # part-count UNBIASED (no "manufactured by" / "SYSTEM NOTE" steering it to one part).
         agent = IntakeAgent(anthropic_api_key="test-key")
         with patch("requests.post") as mock_post:
-            mock_post.return_value = _mock_anthropic_response(
-                _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21",
-                            "detected_type": "pressure transmitter"}))
+            mock_post.return_value = _mock_anthropic_response(_extracted({"model": "PMC21"}))
             agent.run(_make_run(), {"text": "Cerabar PMC21", "images": [], "force_proceed": False})
         prompt = mock_post.call_args_list[0].kwargs["json"]["messages"][0]["content"]
-        assert isinstance(prompt, str)
-        assert "Endress+Hauser" in prompt                        # hint fired (benefit kept)
-        assert "applies ONLY to the matching part" in prompt     # scoped, not whole-input
-        assert "still return a JSON array" in prompt             # array rule preserved
-        assert "This part is manufactured by" not in prompt      # old singular framing removed
+        assert "manufactured by" not in prompt
+        assert "SYSTEM NOTE" not in prompt
 
-    def test_pn_hint_note_is_scoped_image_path(self):
-        # Same reword on the multimodal path (both injection sites fixed).
+    def test_no_pn_hint_note_in_prompt_image_path(self):
         agent = IntakeAgent(anthropic_api_key="test-key")
         with patch("requests.post") as mock_post:
-            mock_post.return_value = _mock_anthropic_response(
-                _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21"}))
+            mock_post.return_value = _mock_anthropic_response(_extracted({"model": "PMC21"}))
             agent.run(_make_run(), {"text": "Cerabar PMC21", "images": [b"\xff\xd8img"], "force_proceed": False})
         content = mock_post.call_args_list[0].kwargs["json"]["messages"][0]["content"]
         textblock = next(c["text"] for c in content if c.get("type") == "text")
-        assert "applies ONLY to the matching part" in textblock
-        assert "still return a JSON array" in textblock
-        assert "This part is manufactured by" not in textblock
+        assert "manufactured by" not in textblock
+        assert "SYSTEM NOTE" not in textblock
 
-    def test_pn_hinted_input_multipart_no_longer_collapses(self):
-        # THE COLLAPSE FIX: with the scoped hint, "Cerabar PMC21, FLOWSIC610" yields a 2-array ->
-        # run() -> multi_part_detected (no longer one E+H part). PMC21's hint scopes to the Cerabar.
-        agent = IntakeAgent(anthropic_api_key="test-key")
-        cerabar = _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21",
-                              "detected_type": "pressure transmitter", "category": "Part"})
-        flowsic = _extracted({"manufacturer": "SICK", "model": "FLOWSIC610", "part_number": "FLOWSIC610",
-                              "detected_type": "gas flow analyzer", "category": "Equipment"})
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = _mock_anthropic_response([cerabar, flowsic])
-            result = agent.run(_make_run({"manufacturer_confidence": 0, "part_id_confidence": 0}),
-                               {"text": "Cerabar PMC21, FLOWSIC610", "images": [], "force_proceed": False})
-        assert result["sufficient"] is False
-        assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
-        assert len(result["multi_part_specs"]) == 2
-        assert "manufacturer" not in result["asset_specs"]   # nothing merged into THIS run
-
-    def test_pn_hinted_single_part_stays_one_object_hint_preserved(self):
-        # NO SPURIOUS SPLIT + benefit kept: a lone "Cerabar PMC21" -> ONE object with
-        # manufacturer=Endress+Hauser inferred, NOT a multi-part detection.
+    def test_single_part_manufacturer_inferred_per_object(self):
+        # BENEFIT KEPT (now per-object): the LLM leaves manufacturer null; the PMC21 prefix on the
+        # part's OWN part_number infers Endress+Hauser after extraction.
         agent = IntakeAgent(anthropic_api_key="test-key")
         with patch("requests.post") as mock_post:
             mock_post.return_value = _mock_anthropic_response(
-                _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21",
-                            "detected_type": "pressure transmitter"}))
+                _extracted({"manufacturer": None, "model": "PMC21", "part_number": "PMC21",
+                            "detected_type": "pressure transmitter", "manufacturer_confidence": 0}))
             result = agent.run(_make_run(), {"text": "Cerabar PMC21", "images": [], "force_proceed": False})
         assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+        assert result["asset_specs"]["manufacturer"] == "Endress+Hauser"
+
+    def test_multipart_collapse_fixed_and_each_part_inferred(self):
+        # THE COLLAPSE FIX + the per-element improvement: "Cerabar PMC21, ... 22C VFD" -> 2-array ->
+        # multi_part_detected; EACH part's manufacturer is inferred from its OWN PN (E+H, Allen-Bradley),
+        # even though the LLM left both null. (The old list-skip guard inferred neither.)
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        eh = _extracted({"manufacturer": None, "model": "PMC21", "part_number": "PMC21",
+                         "detected_type": "pressure transmitter", "category": "Part", "manufacturer_confidence": 0})
+        ab = _extracted({"manufacturer": None, "model": "22C-D010N104", "part_number": "22C-D010N104",
+                         "detected_type": "vfd", "category": "Part", "manufacturer_confidence": 0})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([eh, ab])
+            result = agent.run(_make_run({"manufacturer_confidence": 0, "part_id_confidence": 0}),
+                               {"text": "Cerabar PMC21, 22C-D010N104 drive", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False
+        assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
+        parts = result["multi_part_specs"]
+        assert len(parts) == 2
+        assert parts[0]["manufacturer"] == "Endress+Hauser"     # inferred per-element
+        assert parts[1]["manufacturer"] == "Allen-Bradley"      # inferred per-element (not just the first)
+        assert "manufacturer" not in result["asset_specs"]      # nothing merged into THIS run
+
+    def test_boundary_single_part_with_attribute_commas_infers_mfg(self):
+        # THE CASE THE GATE COULD NOT DO: "Cerabar PMC21, 4-20mA output" is ONE part (the LLM's
+        # attribute rule keeps it single); per-object inference still sets manufacturer=E+H, and it
+        # is NOT split into two. Split-first delegates the part-count decision entirely to the LLM.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(
+                _extracted({"manufacturer": None, "model": "PMC21", "part_number": "PMC21",
+                            "description": "PMC21 pressure transmitter, 4-20mA output",
+                            "detected_type": "pressure transmitter", "manufacturer_confidence": 0}))
+            result = agent.run(_make_run(), {"text": "Cerabar PMC21, 4-20mA output", "images": [], "force_proceed": False})
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+        assert result["asset_specs"]["manufacturer"] == "Endress+Hauser"
+
+    def test_prior_specs_pn_infers_on_followup(self):
+        # PRIOR-SPECS PATH PRESERVED: on a follow-up turn the new extraction has no PN, but an
+        # established part_number in prior_specs (PMC21) still infers the manufacturer per-object.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {"part_number": "PMC21", "manufacturer_confidence": 0, "part_id_confidence": 85}
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(
+                _extracted({"manufacturer": None, "part_number": None, "model": None,
+                            "detected_type": "pressure transmitter", "manufacturer_confidence": 0}))
+            result = agent.run(_make_run(prior), {"text": "it's a pressure transmitter", "images": [], "force_proceed": False})
         assert result["asset_specs"]["manufacturer"] == "Endress+Hauser"
 
 
