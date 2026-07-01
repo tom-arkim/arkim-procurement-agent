@@ -332,3 +332,101 @@ class TestLowFidelity:
         run = _make_run(_seal_specs())
         artifact = agent.run(run, self.TIER3_CANDIDATE, tier=3)
         assert all(c["candidate_value"] is None for c in artifact["comparison"])
+
+
+# ---------------------------------------------------------------------------
+# Proxy-leak guard — the SDK client base_url is app-owned (APP_ANTHROPIC_BASE_URL),
+# NOT the SDK default ANTHROPIC_BASE_URL (Claude Code / LiteLLM proxy config that
+# leaks into the uvicorn subprocess and would 400 on the Claude model name).
+# SpecComparisonAgent is the only agent using the anthropic SDK; every other agent
+# uses requests.post to the hardcoded api.anthropic.com and is immune.
+# ---------------------------------------------------------------------------
+
+class TestProxyLeakGuard:
+    def _captured_client_base_url(self, monkeypatch, env_overrides: dict) -> str:
+        """Drive _extract_specs_from_snippet with a real snippet+fields, capture the
+        anthropic.Anthropic(...) base_url the agent constructs (without making a network
+        call). The SDK client is built just before messages.create; we patch the SDK
+        class to record its construction kwargs and stub create()."""
+        # Isolate env: clear the leaking proxy var, then apply overrides.
+        monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+        monkeypatch.delenv("APP_ANTHROPIC_BASE_URL", raising=False)
+        for k, v in env_overrides.items():
+            monkeypatch.setenv(k, v)
+
+        captured: dict = {}
+
+        class _FakeMessages:
+            def create(self, **kwargs):
+                # No network — return a minimal stub matching the contract used by
+                # _extract_specs_from_snippet (message.content[0].text).
+                content = MagicMock()
+                content.text = json.dumps({"shaft_size": None})
+                msg = MagicMock()
+                msg.content = [content]
+                return msg
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                captured["kwargs"] = kwargs
+                self.messages = _FakeMessages()
+
+        import sys
+        import types
+        fake_anthropic = types.ModuleType("anthropic")
+        fake_anthropic.Anthropic = _FakeClient
+        # _extract_specs_from_snippet does `import anthropic` lazily inside the try;
+        # inject the fake module so that local import resolves to it.
+        monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+
+        agent = SpecComparisonAgent(anthropic_api_key="test-key")
+        # Real snippet + fields so the early `if not snippet or not fields` guard passes.
+        agent._extract_specs_from_snippet(
+            "John Crane MR-1 mechanical seal. Shaft 1-3/8 inch.",
+            ["shaft_size", "material_spec"],
+        )
+        return captured["kwargs"].get("base_url")
+
+    def test_client_base_url_defaults_to_real_anthropic_when_no_env(self, monkeypatch):
+        # No ANTHROPIC_BASE_URL, no APP_ANTHROPIC_BASE_URL -> real Anthropic.
+        url = self._captured_client_base_url(monkeypatch, {})
+        assert url == "https://api.anthropic.com"
+
+    def test_client_base_url_ignores_leaking_anthropic_base_url(self, monkeypatch):
+        # THE BUG: ANTHROPIC_BASE_URL set (Claude Code LiteLLM proxy leaked into the
+        # subprocess). The agent must NOT follow it — it should still hit real Anthropic.
+        url = self._captured_client_base_url(
+            monkeypatch, {"ANTHROPIC_BASE_URL": "http://localhost:4000"}
+        )
+        assert url == "https://api.anthropic.com"
+        assert url != "http://localhost:4000"
+
+    def test_client_base_url_honors_app_owned_override(self, monkeypatch):
+        # Escape hatch: APP_ANTHROPIC_BASE_URL (app-owned, distinct from Claude Code's
+        # ANTHROPIC_BASE_URL) is honored when the app deliberately runs behind a proxy.
+        url = self._captured_client_base_url(
+            monkeypatch,
+            {"APP_ANTHROPIC_BASE_URL": "https://proxy.example.com",
+             "ANTHROPIC_BASE_URL": "http://localhost:4000"},
+        )
+        # App-owned var wins; the leaked ANTHROPIC_BASE_URL is ignored either way.
+        assert url == "https://proxy.example.com"
+
+    def test_extraction_failure_still_non_fatal(self, monkeypatch):
+        # Regression: a client-construction / call failure still returns the all-None
+        # dict (non-fatal) — the proxy-leak fix must not change the silent-skip contract.
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://localhost:4000")
+
+        class _BoomClient:
+            def __init__(self, **kwargs):
+                raise RuntimeError("simulated SDK failure")
+
+        import sys
+        import types
+        fake_anthropic = types.ModuleType("anthropic")
+        fake_anthropic.Anthropic = _BoomClient
+        monkeypatch.setitem(sys.modules, "anthropic", fake_anthropic)
+
+        agent = SpecComparisonAgent(anthropic_api_key="test-key")
+        out = agent._extract_specs_from_snippet("some snippet", ["shaft_size", "hp"])
+        assert out == {"shaft_size": None, "hp": None}
