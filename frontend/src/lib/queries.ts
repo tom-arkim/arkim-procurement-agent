@@ -20,6 +20,7 @@ import {
   listRuns,
   getRun,
   getGroup,
+  getHealth,
   sendMessage,
   uploadNameplate,
   selectCandidate,
@@ -109,6 +110,25 @@ export function useRunLive(runId: string) {
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Backend health / demo state — cached (rarely changes); the UI derives demo_mode from the
+// backend it talks to (single source of truth), used to gate transparency copy.
+// ---------------------------------------------------------------------------
+
+export function useHealth() {
+  return useQuery({
+    queryKey: queryKeys.health.all(),
+    queryFn: getHealth,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** True when the backend is running in DEMO_MODE. Defaults to false until health resolves. */
+export function useDemoMode(): boolean {
+  return useHealth().data?.demo_mode ?? false;
 }
 
 // ---------------------------------------------------------------------------

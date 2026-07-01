@@ -268,12 +268,10 @@ export function RequestScreen() {
 
       {/* WORKING */}
       {stage === "working" && (
-        <div className="proc-working">
-          <ArkimLoader size={36} />
-          <div>
-            <div className="w-t">{file ? "Reading the nameplate…" : "Identifying part…"}</div>
-            <div className="w-s">{file ? "Pulling the part details from your photo." : "Checking service records and manuals."}</div>
-          </div>
+        <div className="proc-loading">
+          <ArkimLoader size={52} />
+          <div className="pl-head">{file ? "Reading the nameplate" : "Identifying part"}</div>
+          <div className="pl-sub">{file ? "Pulling the part details from your photo." : "Checking service records and manuals."}</div>
         </div>
       )}
 

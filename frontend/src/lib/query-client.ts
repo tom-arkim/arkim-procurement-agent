@@ -54,6 +54,9 @@ export const queryKeys = {
   groups: {
     detail: (groupId: string) => ["groups", "detail", groupId] as const,
   },
+  health: {
+    all: () => ["health"] as const,
+  },
   approvalRules: {
     byFacility: (facilityId: string) => ["approval-rules", facilityId] as const,
   },

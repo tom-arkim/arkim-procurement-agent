@@ -832,7 +832,9 @@ class TestStaticEndpoints:
     def test_health(self, api):
         resp = api.get("/api/health")
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "version": "1.0.0-phase1"}
+        # demo_mode reflects the backend's DEMO_MODE (False in the normal test app) so the
+        # frontend can derive the demo state from the backend it talks to.
+        assert resp.json() == {"status": "ok", "version": "1.0.0-phase1", "demo_mode": False}
 
     def test_facilities_shape(self, api):
         resp = api.get("/api/facilities")

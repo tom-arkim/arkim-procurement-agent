@@ -2572,7 +2572,10 @@ def upsert_approval_rule(body: ApprovalRuleIn):
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "1.0.0-phase1"}
+    # demo_mode lets the frontend derive the demo state from the backend it's actually talking
+    # to (single source of truth) — used to gate transparency copy (e.g. drop the gated-off
+    # Tier-1 "Arkim network" mention from the sourcing loader) so the UI matches what runs.
+    return {"status": "ok", "version": "1.0.0-phase1", "demo_mode": DEMO_MODE}
 
 
 @app.get("/api/debug/llm")
