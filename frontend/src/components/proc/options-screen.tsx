@@ -164,7 +164,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
   if (WORKING_PHASES.includes(phase)) {
     return (
       <Shell sub={partLabel} onHome={() => router.push("/")} strip={basketStrip}>
-        <Working label="Finding your best options…" sub="Checking the Arkim network, marketplaces, and specialist suppliers — this can take a minute or two." spin />
+        <SourcingProgress />
       </Shell>
     );
   }
@@ -503,6 +503,54 @@ function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin
         <div className="w-t">{label}</div>
         {sub && <div className="w-s">{sub}</div>}
       </div>
+    </div>
+  );
+}
+
+// The four steps mirror the real sourcing tiers (Arkim network -> marketplaces -> specialist
+// suppliers -> comparison). The labels are honest about what the engine does; the TIMING is
+// approximate — the backend holds phase="sourcing" for the whole run and emits no per-tier
+// events (see the investigation), so this is a frontend-only progression, NOT backend-synced.
+const SOURCING_STEPS = [
+  "Searching the Arkim network",
+  "Scanning marketplaces",
+  "Checking specialist suppliers",
+  "Comparing candidates",
+];
+
+/** Prominent, alive sourcing-in-progress screen for the 30–60s live-search wait. Advances the
+ *  steps on a timer and HOLDS on the last one until results arrive (the parent unmounts this
+ *  when the run flips to comparison), so a step never reads "done" before the data is actually in. */
+function SourcingProgress() {
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    const t = setInterval(
+      () => setStep((s) => Math.min(s + 1, SOURCING_STEPS.length - 1)),
+      9000,
+    );
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="sourcing-progress">
+      <ArkimLoader size={52} />
+      <div className="sp-head">Finding your best options</div>
+      <div className="sp-sub">
+        Searching live across the Arkim network, marketplaces, and specialist suppliers — this can
+        take up to a minute.
+      </div>
+      <ol className="sp-steps">
+        {SOURCING_STEPS.map((label, i) => {
+          const state = i < step ? "done" : i === step ? "active" : "pending";
+          return (
+            <li key={label} className="sp-step" data-state={state}>
+              <span className="sp-dot" aria-hidden="true">
+                {state === "done" && <ProcIcon name="checkCircle" size={15} color="var(--accent)" />}
+              </span>
+              <span className="sp-label">{label}</span>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
