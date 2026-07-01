@@ -104,13 +104,33 @@ app = FastAPI(
     description="REST API for the Arkim production frontend.",
 )
 
+# CORS allowed origins. Localhost is the dev base (kept in every case so normal
+# dev is unaffected); CORS_ALLOW_ORIGINS is a comma-separated escape hatch; under
+# DEMO_MODE the cross-origin demo frontend origin is appended (DEMO_FRONTEND_ORIGIN,
+# default the procurement-dev subdomain) so the browser preflight accepts it.
+# Deduped so an env value that repeats a base origin doesn't list it twice.
+_cors_origins: list[str] = []
+for _o in [
+    "http://localhost:3000",    # Next.js dev server
+    "http://127.0.0.1:3000",
+    "http://localhost:8000",    # same-origin health checks
+]:
+    if _o not in _cors_origins:
+        _cors_origins.append(_o)
+_extra_cors = os.environ.get("CORS_ALLOW_ORIGINS")
+if _extra_cors:
+    for _o in _extra_cors.split(","):
+        _o = _o.strip()
+        if _o and _o not in _cors_origins:
+            _cors_origins.append(_o)
+if DEMO_MODE:
+    _demo_origin = os.environ.get("DEMO_FRONTEND_ORIGIN", "https://procurement-dev.arkim.ai")
+    if _demo_origin not in _cors_origins:
+        _cors_origins.append(_demo_origin)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",    # Next.js dev server
-        "http://127.0.0.1:3000",
-        "http://localhost:8000",    # same-origin health checks
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -185,6 +205,16 @@ async def demo_allowlist_middleware(request: Request, call_next):
 
     Inert when DEMO_MODE is off — the app is called unchanged (no regression)."""
     if not DEMO_MODE:
+        return await call_next(request)
+    # CORS preflight: an OPTIONS request carries no credentials/body and never
+    # reaches application logic — no route in this app handles OPTIONS (all routes
+    # are GET/POST/PUT), so an OPTIONS only ever gets answered by CORSMiddleware
+    # (preflight -> Allow-* headers) or 405s. Letting it pass to CORSMiddleware (the
+    # next layer inward) is the ONLY way a cross-origin demo's browser preflight can
+    # succeed, and it opens no hole: a real attack uses the real method (POST
+    # /execute, etc.), which the allowlist below still 403s. Narrowest possible
+    # carve-out — exactly one method, the preflight method.
+    if request.method == "OPTIONS":
         return await call_next(request)
     if _demo_path_allowed(request.method, request.url.path):
         return await call_next(request)

@@ -539,3 +539,139 @@ class TestDemoIgnoreClientAssetSpecs:
         rid = client.post("/api/runs", json={"asset_specs": self._SPECS}).json()["id"]
         detail = client.get(f"/api/runs/{rid}").json()
         assert detail["asset_specs"] == self._SPECS
+
+
+# ---------------------------------------------------------------------------
+# CORS PREFLIGHT UNDER DEMO_MODE (FIX 2 — cross-origin demo deploy). The demo
+# allowlist middleware is OUTERMOST (runs before CORSMiddleware). Without an
+# OPTIONS exemption every browser preflight 403s (the allowlist has no OPTIONS
+# entries) -> the cross-origin frontend can't reach the API. The fix exempts
+# ONLY OPTIONS — letting preflight reach CORSMiddleware (the next layer inward),
+# which answers it. Every non-OPTIONS request stays under deny-by-default.
+# Safe because no route in the app handles OPTIONS (all routes are GET/POST/PUT):
+# an OPTIONS only ever hits preflight (Allow-* headers) or 405s — never real work.
+# ---------------------------------------------------------------------------
+
+# Default demo frontend origin (must match api_server's DEMO_FRONTEND_ORIGIN default).
+_DEMO_ORIGIN = "https://procurement-dev.arkim.ai"
+
+_PREFLIGHT_HEADERS = {
+    "Origin": _DEMO_ORIGIN,
+    "Access-Control-Request-Method": "POST",
+    "Access-Control-Request-Headers": "content-type",
+}
+
+
+class TestDemoCorsPreflightWorks:
+    def test_options_demo_route_is_not_403(self, demo_on):
+        # Preflight to an allowlisted route reaches CORS and returns CORS headers,
+        # NOT the middleware's 403.
+        client, _ = demo_on
+        r = client.options("/api/runs", headers=_PREFLIGHT_HEADERS)
+        assert r.status_code != 403
+        assert r.status_code in (200, 204)
+        assert r.headers.get("access-control-allow-origin") == _DEMO_ORIGIN
+        assert r.headers.get("access-control-allow-methods") is not None
+
+    def test_options_non_demo_route_reaches_cors(self, demo_on):
+        # Preflight is path-agnostic in CORSMiddleware: even to a denied route it
+        # returns CORS headers (harmless — the REAL request is gated, see below).
+        client, _ = demo_on
+        r = client.options("/api/runs/r1/execute", headers=_PREFLIGHT_HEADERS)
+        assert r.status_code != 403
+        # CORS answered (preflight) — Allow-Origin present.
+        assert r.headers.get("access-control-allow-origin") == _DEMO_ORIGIN
+
+    def test_demo_origin_in_allowed_origins_under_demo(self, demo_on):
+        # The demo frontend origin is in allow_origins under DEMO_MODE (default env).
+        # CORSMiddleware echoes the request Origin when it's an allowed origin.
+        client, _ = demo_on
+        r = client.options("/api/health", headers=_PREFLIGHT_HEADERS)
+        assert r.headers.get("access-control-allow-origin") == _DEMO_ORIGIN
+
+    def test_localhost_origin_works_when_demo_off(self, demo_off):
+        # No regression: with DEMO_MODE off, localhost is still an allowed origin
+        # and the middleware is inert (no 403, CORS answers the localhost preflight).
+        client, _ = demo_off
+        r = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert r.status_code != 403
+        assert r.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+
+class TestDemoCorsNoOptionsBypass:
+    def test_options_does_not_execute_handler(self, demo_on):
+        # OPTIONS to a dangerous route must NOT run the handler — no state change.
+        # /api/runs/{id}/execute advances a run to sourcing; OPTIONS must not.
+        client, api = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        # OPTIONS the execute route — exempted by the preflight carve-out.
+        r = client.options(f"/api/runs/{rid}/execute", headers=_PREFLIGHT_HEADERS)
+        assert r.status_code != 403   # passed the allowlist (OPTIONS exempted)
+        # No handler ran: the run is STILL in intake (execute would move it to
+        # sourcing). A CORS/405 response carries no execute side effect.
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as session:
+            run = session.get(ORM, rid)
+            assert run.current_phase == "intake"   # unchanged — OPTIONS did nothing
+
+    def test_real_execute_still_403_after_options_exempt(self, demo_on):
+        # The whole point: the OPTIONS exemption did NOT open the real-method path.
+        # A real POST /execute is still 403'd by the allowlist.
+        client, _ = demo_on
+        assert client.post("/api/runs/r1/execute").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED RE-PROOF: the OPTIONS exemption must not have weakened any real
+# route. These re-run the exact fail-closed assertions from
+# TestDemoAllowlistFailClosed to prove the gate is intact post-FIX 2.
+# ---------------------------------------------------------------------------
+
+class TestDemoFailClosedAfterCorsExempt:
+    # Re-asserts the dangerous routes are still 403 under DEMO_MODE. Duplicated
+    # rather than parametrized against the original class so a regression here
+    # names the CORS change as the cause, not a vague allowlist failure.
+    def test_execute_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/runs/r1/execute").status_code == 403
+
+    def test_rfq_send_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/rfq-drafts/d1/send").status_code == 403
+
+    def test_put_asset_specs_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.put("/api/runs/r1/asset-specs", json={"asset_specs": {"x": 1}})
+        assert r.status_code == 403
+
+    def test_order_now_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/order-now",
+                        json={"candidate_id": "c", "tier": 1})
+        assert r.status_code == 403
+
+    def test_group_approve_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/groups/g1/approve",
+                        json={"approver_name": "a", "approver_role": "r"})
+        assert r.status_code == 403
+
+    def test_select_candidate_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/select-candidate",
+                        json={"candidate_id": "c", "tier": 1})
+        assert r.status_code == 403
+
+    def test_docs_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/docs").status_code == 403
+
+    def test_unlisted_path_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/api/some-route-that-does-not-exist").status_code == 403
