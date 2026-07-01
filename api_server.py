@@ -18,6 +18,29 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 load_dotenv()
 
+
+def _env_truthy(value: Optional[str]) -> bool:
+    """Strict opt-in parse: only an explicit truthy token is True. Anything else
+    (None, "", "0", "false", "no", junk) -> False, so a flag fails safe/closed."""
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE — public no-login demo spine (procurement-dev.arkim.ai cold outreach)
+# ---------------------------------------------------------------------------
+# Two guards, both active ONLY when env DEMO_MODE is truthy, both completely inert
+# otherwise (every route behaves exactly as today — no regression in normal ops):
+#   1. An allowlist middleware (added below, after `app`) that DENIES-by-default:
+#      only the confirmed demo routes reach their handler; everything else 403s,
+#      including /docs, /openapi.json, mutation/admin/RFQ/email routes, and any
+#      route not on the list (a new route added later is DENIED until listed —
+#      fail-closed, never open). See _DEMO_ALLOWLIST + _demo_path_allowed.
+#   2. A startup boot-refusal assertion (here, at import time) that the email
+#      send gate is OFF under DEMO_MODE — a public demo must not be able to boot
+#      with outbound email enabled. EMAIL_SEND_ENABLED is the canonical send gate
+#      (utils/email_sender.py); this refuses the boot before any request is served.
+DEMO_MODE: bool = _env_truthy(os.environ.get("DEMO_MODE"))
+
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
 from utils.models import SourcingRun
 from utils.marketplace_registry import is_marketplace
@@ -26,6 +49,7 @@ import secrets
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request, Response
 from pydantic import BaseModel, Field
 
 # Auth (ported Cognito identity). get_caller is an OPTIONAL dependency on the customer
@@ -67,6 +91,84 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE allowlist middleware — deny-by-default / fail-closed
+# ---------------------------------------------------------------------------
+# Active ONLY when DEMO_MODE is truthy (read above from the env at import). When
+# off, the middleware short-circuits and calls the app unchanged — byte-for-byte
+# the same behaviour as today (no regression). When on, it permits ONLY the
+# confirmed demo routes and 403s everything else, including routes FastAPI serves
+# automatically (/docs, /openapi.json) and any route not on the list.
+#
+# This is an ALLOWLIST (permit-list), not a blocklist: a route is reachable iff it
+# is explicitly listed. Anything missed — a new route, a typo, an auto-route — is
+# DENIED (403). That is the safety property: a missed route fails closed.
+#
+# Path matching is exact-segment against parameterised PATTERNS, not prefix
+# matching. /api/runs/{run_id} (GET) admits /api/runs/123 but NOT
+# /api/runs/123/execute — the latter has an extra trailing segment and falls
+# through to 403. So an allowed GET on the run cannot be tricked into admitting a
+# denied mutation on the same prefix.
+
+# The confirmed demo surface (verified against the frontend proc/ intake→sourcing
+# →results flow): describe a part → get it identified → see live sourcing results
+# → manage the session. Read-only or run/session-scoped only; nothing that mutates
+# shared/real state, approves, orders, sends, or configures.
+_DEMO_ALLOWLIST: set[tuple[str, str]] = {
+    ("POST", "/api/runs"),
+    ("GET", "/api/runs/{run_id}"),
+    ("POST", "/api/runs/{run_id}/messages"),
+    ("POST", "/api/runs/{run_id}/upload"),
+    ("POST", "/api/runs/{run_id}/confirm-intake"),
+    ("GET", "/api/facilities"),
+    ("GET", "/api/health"),
+    ("GET", "/api/groups/{group_id}"),
+}
+
+
+def _demo_path_allowed(method: str, path: str) -> bool:
+    """True iff (METHOD, path) matches a pattern in _DEMO_ALLOWLIST.
+
+    Match is exact-segment: a pattern segment is either a literal (matched
+    exactly) or a {param} placeholder (matches any single non-empty segment,
+    i.e. no '/'). The full path must be consumed — extra trailing segments on an
+    allowed prefix are NOT admitted (so /api/runs/{id} does not cover
+    /api/runs/{id}/execute). Method is case-sensitive uppercase."""
+    m = method.upper()
+    pat_segs: list[list[str]] = []
+    for pm, pp in _DEMO_ALLOWLIST:
+        if pm != m:
+            continue
+        pat_segs.append(pp.split("/"))
+    if not pat_segs:
+        return False
+    req_segs = path.split("/")
+    for pat in pat_segs:
+        if len(req_segs) != len(pat):
+            continue
+        if all(
+            ps == rs or (ps.startswith("{") and ps.endswith("}") and rs != "")
+            for ps, rs in zip(pat, req_segs)
+        ):
+            return True
+    return False
+
+
+@app.middleware("http")
+async def demo_allowlist_middleware(request: Request, call_next):
+    """Permit ONLY the confirmed demo routes under DEMO_MODE; 403 everything else.
+
+    Inert when DEMO_MODE is off — the app is called unchanged (no regression)."""
+    if not DEMO_MODE:
+        return await call_next(request)
+    if _demo_path_allowed(request.method, request.url.path):
+        return await call_next(request)
+    return Response(
+        content='{"detail":"Forbidden: route not on the demo allowlist"}',
+        status_code=403,
+        media_type="application/json",
+    )
 
 # Ensure tables exist (idempotent)
 Base.metadata.create_all(bind=_engine)
