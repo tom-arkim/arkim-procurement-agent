@@ -42,7 +42,7 @@ type Stage = "entry" | "working" | "identify" | "error";
 /** One part in the request, each backed by its OWN run (the per-item / basket model). The
  *  parent holds the runId + the latest intake reply; specs / partLabel / ready-state are
  *  derived per-card from useRun(runId) (Stage A data layer). */
-type IntakeItem = { runId: string; reply: string };
+type IntakeItem = { runId: string; reply: string; multiPart?: boolean };
 
 export function RequestScreen() {
   const router = useRouter();
@@ -58,6 +58,9 @@ export function RequestScreen() {
   // ItemCard (item 0 included).
   const [items, setItems] = useState<IntakeItem[]>([]);
   const [groupId, setGroupId] = useState<string | null>(null);
+  // The count of parts an auto-split fan-out created (null = not a fan-out) — drives the
+  // "We found N parts…" review instruction. Manual + Add part leaves it null.
+  const [autoSplitCount, setAutoSplitCount] = useState<number | null>(null);
   // "+ add another part" inline input.
   const [addText, setAddText] = useState("");
   const [addBusy, setAddBusy] = useState(false);
@@ -104,6 +107,7 @@ export function RequestScreen() {
       ...rest.map((r) => ({ runId: r.id, reply: "" })),
     ];
     setItems(newItems);
+    setAutoSplitCount(parts.length);   // drives the "We found N parts…" review instruction
     newItems.forEach((it) => refresh(it.runId));
   };
 
@@ -122,6 +126,7 @@ export function RequestScreen() {
     const desc = text.trim();
     if (!desc && !file) return;
     setStage("working");
+    setAutoSplitCount(null);   // fresh submission — only a fan-out sets it
     try {
       // Mint the basket group_id up front; item 0's run is created INTO it, as is every add.
       const gid = crypto.randomUUID();
@@ -137,7 +142,8 @@ export function RequestScreen() {
       // Auto-split: a multi-part detection fans the N parsed parts into N seeded cards. Fall
       // back to the single card (with the "N detected, + Add part" reply) if fewer than 2 parts
       // carry real content — never create empty/guessed cards.
-      const detected = resp.proceed_state === "multi_part_detected" ? (resp.parts ?? []) : [];
+      const multiPartDetected = resp.proceed_state === "multi_part_detected";
+      const detected = multiPartDetected ? (resp.parts ?? []) : [];
       const seedable = detected.filter(isSeedablePart);
       if (seedable.length >= 2) {
         await fanOut(created.id, gid, seedable);
@@ -145,7 +151,9 @@ export function RequestScreen() {
         return;
       }
 
-      setItems([{ runId: created.id, reply: itemReply }]);
+      // Fallback: multi-part was detected but couldn't be seeded (<2 real parts) -> flag the
+      // single card so its heading reads "Multiple parts detected", not "Unidentified part".
+      setItems([{ runId: created.id, reply: itemReply, multiPart: multiPartDetected }]);
       refresh(created.id);
       setStage("identify");
     } catch (e) {
@@ -285,11 +293,19 @@ export function RequestScreen() {
         <div style={{ marginTop: 8 }}>
           <div className="proc-kicker">{items.length > 1 ? "Your parts" : "Your part"}</div>
 
+          {/* Auto-split only: sets the expectation + points at the remove control. */}
+          {autoSplitCount != null && items.length > 1 && (
+            <div className="id-meta" style={{ marginBottom: 4, color: "var(--muted)" }}>
+              We found {autoSplitCount} parts — review each below, and remove any we split by mistake.
+            </div>
+          )}
+
           {items.map((item) => (
             <ItemCard
               key={item.runId}
               runId={item.runId}
               initialReply={item.reply}
+              multiPart={item.multiPart}
               onReady={handleReady}
               // Removable only when there's more than one card — you can't remove the last part.
               onRemove={items.length > 1 ? removeItem : undefined}
@@ -350,11 +366,13 @@ export function RequestScreen() {
 function ItemCard({
   runId,
   initialReply,
+  multiPart,
   onReady,
   onRemove,
 }: {
   runId: string;
   initialReply: string;
+  multiPart?: boolean;
   onReady?: (runId: string, ready: boolean) => void;
   onRemove?: (runId: string) => void;
 }) {
@@ -401,7 +419,7 @@ function ItemCard({
         <span className="id-ic"><ProcIcon name={ready ? "toolbox" : "alert"} size={20} color={ready ? undefined : "var(--st-overdue)"} /></span>
         <div style={{ flex: 1 }}>
           <div className="id-kick">{ready ? "Part identified" : "Need a little more"}</div>
-          <div className="id-name">{label || "Unidentified part"}</div>
+          <div className="id-name">{label || (multiPart ? "Multiple parts detected" : "Unidentified part")}</div>
           {ready && pn && <div className="id-meta">Part no. <b>{pn}</b>{mfg ? <> · {mfg}</> : null}</div>}
           {ready && !pn && specs?.spec_based_sourcing && (
             <div className="id-meta">Matching by category — no exact part number needed.</div>
