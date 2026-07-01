@@ -340,6 +340,32 @@ class TestSendMessage:
         assert body["proceed_state"] is None
         assert body["parts"] is None
 
+    def test_cap_commit_message_used_as_reply(self, api, monkeypatch):
+        # When IntakeAgent returns a commit_message (intake cap / nothing-left), send_message
+        # uses it as the reply text and persists spec_based_sourcing on the specs. The
+        # internal `_`-prefixed ledger keys are persisted to the DB but stripped from the
+        # RunDetail specs display.
+        rid = _create_run(api)
+        _mock_intake(api, monkeypatch, {
+            "sufficient": True,
+            "manufacturer_confidence": 20,
+            "part_id_confidence": 40,
+            "asset_specs": {"detected_type": "valve", "spec_based_sourcing": True,
+                            "_asked_fields": ["part_identity", "manufacturer"],
+                            "_intake_turns": 3},
+            "commit_message": "I'll search on the specs we have; I couldn't confirm the exact manufacturer — you can refine from the results.",
+            "confidence_summary": {"proceed_state": "forced_commit"},
+        })
+        resp = api.post(f"/api/runs/{rid}/messages", json={"content": "no idea"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["message"]["content"].startswith("I'll search on the specs we have")
+        # Internal ledger keys persisted to the DB but stripped from the RunDetail display.
+        detail = api.get(f"/api/runs/{rid}").json()
+        assert "_asked_fields" not in (detail["asset_specs"] or {})
+        assert "_intake_turns" not in (detail["asset_specs"] or {})
+        assert (detail["asset_specs"] or {}).get("spec_based_sourcing") is True
+
     def test_multi_part_surfaces_proceed_state_and_parts(self, api, monkeypatch):
         # A multi-part detection carries proceed_state + the N parsed parts on the wire, so the
         # frontend can fan them into N seeded cards (nothing is merged into THIS run).

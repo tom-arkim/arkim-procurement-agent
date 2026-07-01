@@ -1267,6 +1267,13 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
     # (spec-based and no-PN scenarios are "by design," not typo cases).
     _null_pn_vals = {"", "N/A", "n/a", "null", "None", "UNKNOWN-PN", "Unknown", "unknown"}
     _asset_specs = _parse(run.asset_specs_json)
+    # Strip internal `_`-prefixed ledger keys (intake turn counter / asked-fields ledger) so
+    # they never reach the frontend specs display. They ride on asset_specs_json by design
+    # (the intake over-questioning fix's state vehicle — no separate column) but are not for
+    # display. (spec_based_sourcing / classification_override etc. are NOT `_`-prefixed and
+    # pass through unchanged.)
+    if _asset_specs:
+        _asset_specs = {k: v for k, v in _asset_specs.items() if not str(k).startswith("_")}
     _pn = ((_asset_specs or {}).get("part_number") or "").strip()
     _spec_based = (_asset_specs or {}).get("spec_based_sourcing", False)
     no_exact_match = False
@@ -1679,7 +1686,12 @@ def send_message(run_id: str, body: SendMessageRequest, request: Request):
             proceed_state == "proceed_with_manufacturer_caveat"
             and not (_mfg_c >= 70 and _part_c >= 70 and _has_model and _has_pn)
         )
-        if _emit_caveat:
+        if result.get("commit_message"):
+            # Intake cap / nothing-left-to-ask commit (IntakeAgent set spec_based_sourcing
+            # on the specs). Routes through the spec-based path but with the honest commit
+            # message that flags what could not be confirmed.
+            reply_text = result["commit_message"]
+        elif _emit_caveat:
             reply_text = (
                 "Specs extracted but the manufacturer could not be confirmed. "
                 "Verify the manufacturer in the panel before confirming."

@@ -1161,3 +1161,295 @@ class TestPartNumberBypassesDimensionCheck:
             result = agent.run(_make_run(), {"text": "SKF 6205-2RS1 bearing", "images": [], "force_proceed": False})
         assert result["sufficient"] is True
         assert result["follow_up_question"] is None
+
+
+# ---------------------------------------------------------------------------
+# Over-questioning fix — bounded intake: identity-first opener, never re-ask,
+# hard cap (3) + auto-commit, and the manufacturer→refinement gate (#4).
+# Internal `_`-prefixed ledger keys (_asked_fields, _intake_turns) ride on
+# asset_specs_json (no new column) and are filtered from the extractor context.
+# ---------------------------------------------------------------------------
+
+from utils.procurement_agent.agents.intake_agent import (
+    INTAKE_TURN_CAP,
+    _DEFAULT_QUESTIONS,
+    _spec_based_ready,
+    _has_identity,
+)
+
+
+class TestSpecBasedReadyGate:
+    """The manufacturer-refinement gate (#4) helper: type known + category dims present +
+    no identity → spec-based ready; identity present or dims absent → not ready."""
+
+    def test_valve_with_connection_size_no_identity_is_ready(self):
+        specs = {"detected_type": "ball valve", "connection_size": "2 inch"}
+        assert _spec_based_ready(specs) is True
+
+    def test_valve_missing_connection_size_not_ready(self):
+        specs = {"detected_type": "ball valve", "connection_size": None}
+        assert _spec_based_ready(specs) is False
+
+    def test_identity_present_not_ready(self):
+        # A model or PN means a more specific handle exists → not pure spec-based.
+        specs = {"detected_type": "ball valve", "connection_size": "2 inch", "model": "BV-200"}
+        assert _spec_based_ready(specs) is False
+
+    def test_no_category_not_ready(self):
+        # "pump" has no category entry → can't confirm dims → keep asking.
+        specs = {"detected_type": "pump"}
+        assert _spec_based_ready(specs) is False
+
+    def test_no_detected_type_not_ready(self):
+        assert _spec_based_ready({}) is False
+
+
+class TestManufacturerRefinementGate:
+    """Fix #4 at the assess_proceed_state level: type known + category dims present +
+    mfg unknown + no identity → proceed_spec_based (not blocked_need_either / caveat)."""
+
+    def test_valve_type_and_dims_mfg_unknown_proceeds_spec_based(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "ball valve", "connection_size": "2 inch"}
+        # mfg low, pid in [70,80) — old behavior was blocked_need_either (pid<80).
+        state, missing, caveat = assess_proceed_state(specs, 25, 75)
+        assert state == "proceed_spec_based"
+        assert missing is None
+        assert caveat is None
+
+    def test_valve_type_and_dims_high_pid_proceeds_spec_based_not_caveat(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "ball valve", "connection_size": "2 inch"}
+        # pid>=80 would normally be proceed_with_manufacturer_caveat; dims present → spec-based.
+        state, missing, caveat = assess_proceed_state(specs, 25, 85)
+        assert state == "proceed_spec_based"
+        assert caveat is None
+
+    def test_caveat_still_applies_when_dims_absent(self):
+        # Regression: the existing PMC11-style caveat path is intact when dims are absent.
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "pressure sensor", "model": "PMC11"}  # psi missing, model present
+        state, missing, caveat = assess_proceed_state(specs, 45, 85)
+        assert state == "proceed_with_manufacturer_caveat"
+        assert caveat is not None
+
+    def test_blocked_either_still_applies_when_pid_below_70(self):
+        from utils.procurement_agent.agents.intake_agent import assess_proceed_state
+        specs = {"detected_type": "ball valve", "connection_size": "2 inch"}
+        state, missing, caveat = assess_proceed_state(specs, 25, 55)  # pid<70 → not spec-based ready
+        assert state == "blocked_need_either"
+
+
+class TestIdentityFirstOpener:
+    """Fix #1: on the first clarification turn with no part identity, ask the identity
+    question verbatim (not via the haiku generator)."""
+
+    def test_first_vague_turn_asks_identity_question_verbatim(self):
+        agent = IntakeAgent(anthropic_api_key=None)  # no key → fallback extraction (mfg=0,pid=0)
+        result = agent.run(_make_run(), {"text": "I need a part", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False
+        assert result["follow_up_question"] == _DEFAULT_QUESTIONS["part_identity"]
+        # The opener is recorded in the ledger so it is never re-asked.
+        assert result["asset_specs"].get("_asked_fields") == ["part_identity"]
+        assert result["asset_specs"].get("_intake_turns") == 1
+
+    def test_opener_skipped_when_identity_present_on_first_turn(self):
+        # A first turn that already carries a model/PN must NOT ask the opener — it goes
+        # through the normal field selection.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        # model present → has identity → not opener; blocked_need_either → asks manufacturer.
+        low_conf = _extracted({"manufacturer_confidence": 30, "part_id_confidence": 55})  # model="CR32-5"
+        with patch("requests.post") as mock_post:
+            mock_post.side_effect = [
+                _mock_anthropic_response(low_conf),
+                _mock_anthropic_response(low_conf),  # haiku clarification call
+            ]
+            result = agent.run(_make_run(), {"text": "a pump", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False
+        assert result["follow_up_question"] != _DEFAULT_QUESTIONS["part_identity"]
+        assert "part_identity" not in (result["asset_specs"].get("_asked_fields") or [])
+
+
+class TestNeverReAsk:
+    """Fix #2: an already-asked-and-still-unanswered field is not repeated; if nothing fresh
+    remains to ask, the turn commits to spec-based sourcing."""
+
+    def test_unanswerable_required_field_asked_once_not_repeated(self):
+        # A no-PN bearing whose bore was already asked (in _asked_fields) and is still
+        # unanswerable. The assessor still says needs_clarification (bore missing), but the
+        # picker must NOT re-ask bore — with no other field available it commits spec-based.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {
+            "detected_type":           "bearing",
+            "manufacturer":            "SKF",
+            "bore_diameter":           None,
+            "manufacturer_confidence": 90,
+            "part_id_confidence":      75,
+            "_asked_fields":           ["bore_diameter"],
+            "_intake_turns":           1,
+        }
+        turn = _extracted({
+            "detected_type": "bearing", "manufacturer": "SKF",
+            "model": None, "part_number": None, "bore_diameter": None,
+            "manufacturer_confidence": 90, "part_id_confidence": 75,
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(turn)
+            result = agent.run(_make_run(specs=prior),
+                               {"text": "I don't know the bore", "images": [], "force_proceed": False})
+        # Committed spec-based — NOT another bore question.
+        assert result["sufficient"] is True
+        assert result["follow_up_question"] is None
+        assert result.get("commit_message") is not None
+        assert result["asset_specs"].get("spec_based_sourcing") is True
+        # bore never fabricated.
+        assert result["asset_specs"].get("bore_diameter") in (None, "", "null", "N/A")
+
+    def test_picker_moves_to_next_unasked_dim(self):
+        # Motor missing hp+frame+rpm (voltage present); hp already asked (unanswered) →
+        # ask the next unasked missing dim, not hp again. Motor field order is
+        # [detected_type, hp, voltage, frame, rpm]; voltage present so it is skipped.
+        from utils.procurement_agent.agents.intake_agent import _first_unasked_missing_field
+        specs = {"detected_type": "induction motor", "hp": None,
+                 "voltage": "460V", "frame": None, "rpm": None}
+        assert _first_unasked_missing_field(specs, ["hp"]) == "frame"
+        assert _first_unasked_missing_field(specs, ["hp", "frame"]) == "rpm"
+        assert _first_unasked_missing_field(specs, ["hp", "frame", "rpm"]) is None
+
+
+class TestHardCapAutoCommit:
+    """Fix #3: after INTAKE_TURN_CAP non-sufficient clarification turns, the agent commits
+    to spec-based sourcing instead of asking again."""
+
+    def test_three_vague_turns_auto_commit_spec_based(self):
+        # Totally vague input (no type, no identity), no API key → blocked_need_either each
+        # turn. Turn 1 asks the opener (part_identity), turn 2 asks manufacturer, turn 3
+        # hits the cap and commits spec-based.
+        agent = IntakeAgent(anthropic_api_key=None)
+        run = _make_run()
+
+        # Turn 1 — opener
+        r1 = agent.run(run, {"text": "I need a part", "images": [], "force_proceed": False})
+        assert r1["sufficient"] is False
+        assert r1["follow_up_question"] == _DEFAULT_QUESTIONS["part_identity"]
+        assert r1["asset_specs"]["_intake_turns"] == 1
+
+        # Turn 2 — manufacturer question
+        run2 = _make_run(specs=r1["asset_specs"])
+        r2 = agent.run(run2, {"text": "no idea", "images": [], "force_proceed": False})
+        assert r2["sufficient"] is False
+        assert r2["asset_specs"]["_intake_turns"] == 2
+        assert "manufacturer" in (r2["asset_specs"].get("_asked_fields") or [])
+
+        # Turn 3 — cap reached → auto-commit spec-based
+        run3 = _make_run(specs=r2["asset_specs"])
+        r3 = agent.run(run3, {"text": "still no idea", "images": [], "force_proceed": False})
+        assert r3["sufficient"] is True
+        assert r3["follow_up_question"] is None
+        assert r3.get("commit_message") is not None
+        assert r3["confidence_summary"]["proceed_state"] == "forced_commit"
+        assert r3["asset_specs"].get("spec_based_sourcing") is True
+
+
+class TestValveCaseNoLoop:
+    """The headline valve case: a vague valve input + a 'no preference' answer does NOT loop
+    on the manufacturer question — it commits spec-based within the cap via the
+    manufacturer-refinement gate (#4)."""
+
+    def test_valve_no_preference_commits_spec_based(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+
+        # Turn 1: "I need a ball valve" — type known, no connection_size, no identity.
+        # mfg low, pid ~60 → blocked_need_either; first turn + no identity → opener asks
+        # part_identity (NOT manufacturer).
+        turn1 = _extracted({
+            "manufacturer": None, "model": None, "part_number": None,
+            "detected_type": "ball valve", "connection_size": None,
+            "manufacturer_confidence": 25, "part_id_confidence": 60,
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(turn1)
+            r1 = agent.run(_make_run(), {"text": "I need a ball valve", "images": [], "force_proceed": False})
+        assert r1["sufficient"] is False
+        assert r1["follow_up_question"] == _DEFAULT_QUESTIONS["part_identity"]
+
+        # Turn 2: "no preference on brand, it's a 2 inch valve" — dims now present, still no
+        # identity. mfg<70, pid>=70, _spec_based_ready → proceed_spec_based (NO manufacturer
+        # re-ask, NO loop).
+        turn2 = _extracted({
+            "manufacturer": None, "model": None, "part_number": None,
+            "detected_type": "ball valve", "connection_size": "2 inch",
+            "manufacturer_confidence": 25, "part_id_confidence": 78,
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(turn2)
+            r2 = agent.run(_make_run(specs=r1["asset_specs"]),
+                           {"text": "no preference on brand, it's a 2 inch valve",
+                            "images": [], "force_proceed": False})
+        assert r2["sufficient"] is True
+        assert r2["follow_up_question"] is None
+        assert r2["confidence_summary"]["proceed_state"] == "proceed_spec_based"
+        assert r2["asset_specs"].get("spec_based_sourcing") is True
+
+
+class TestInternalKeysFiltered:
+    """The `_`-prefixed ledger keys must not leak into the extractor context summary."""
+
+    def test_build_context_summary_excludes_internal_keys(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        prior = {
+            "manufacturer": "SKF", "model": "6205-2RS1",
+            "manufacturer_confidence": 90, "part_id_confidence": 85,
+            "_asked_fields": ["part_identity"], "_intake_turns": 2,
+        }
+        summary = agent._build_context_summary(prior)
+        assert "_asked_fields" not in summary
+        assert "_intake_turns" not in summary
+        # Real spec fields still present.
+        assert summary["manufacturer"] == "SKF"
+
+    def test_run_does_not_call_haiku_for_opener(self):
+        # The opener is verbatim — the haiku clarification endpoint is NOT hit on turn 1
+        # when the opener fires (only the extraction call).
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        turn1 = _extracted({
+            "manufacturer": None, "model": None, "part_number": None,
+            "detected_type": "ball valve", "connection_size": None,
+            "manufacturer_confidence": 25, "part_id_confidence": 60,
+        })
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(turn1)
+            agent.run(_make_run(), {"text": "I need a ball valve", "images": [], "force_proceed": False})
+        # Exactly one call (extraction only) — no haiku clarification call for the opener.
+        assert mock_post.call_count == 1
+
+
+class TestCleanPnRegression:
+    """Regression: the existing clean-PN paths (SKF/AB style) still reach sufficient normally
+    with no clarification, no commit, and no internal ledger keys on a fresh run."""
+
+    def test_skf_bearing_with_pn_sufficient_no_ledger(self):
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        payload = _extracted({"manufacturer": "SKF", "model": None, "part_number": "6205-2RS1",
+                              "detected_type": "deep groove ball bearing", "category": "Part",
+                              "bore_diameter": None,
+                              "manufacturer_confidence": 92, "part_id_confidence": 85})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(payload)
+            result = agent.run(_make_run(), {"text": "SKF 6205-2RS1 bearing", "images": [], "force_proceed": False})
+        assert result["sufficient"] is True
+        assert result["follow_up_question"] is None
+        assert result.get("commit_message") is None
+        assert result["confidence_summary"]["proceed_state"] == "proceed_full_confidence"
+        # No internal ledger keys on a fresh sufficient run.
+        assert "_asked_fields" not in result["asset_specs"]
+        assert "_intake_turns" not in result["asset_specs"]
+        # spec_based_sourcing not set on a PN-identified part.
+        assert "spec_based_sourcing" not in result["asset_specs"]
+
+    def test_has_identity_helper(self):
+        assert _has_identity({"manufacturer": "SKF"}) is True
+        assert _has_identity({"model": "CR32-5"}) is True
+        assert _has_identity({"part_number": "6205-2RS1"}) is True
+        assert _has_identity({"detected_type": "bearing"}) is False
+        assert _has_identity({}) is False
