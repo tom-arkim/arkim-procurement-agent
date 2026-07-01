@@ -51,6 +51,9 @@ export const queryKeys = {
   facilities: {
     all: () => ["facilities"] as const,
   },
+  groups: {
+    detail: (groupId: string) => ["groups", "detail", groupId] as const,
+  },
   approvalRules: {
     byFacility: (facilityId: string) => ["approval-rules", facilityId] as const,
   },

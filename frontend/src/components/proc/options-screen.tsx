@@ -13,13 +13,14 @@
 
 import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useRunLive, useOrderNow, useOrders } from "@/lib/queries";
+import Link from "next/link";
+import { useRunLive, useOrderNow, useOrders, useGroup } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
 import { QuotesSection } from "./quotes-section";
 import { OrderSection } from "./order-section";
-import type { Candidate, ComparisonArtifact, Phase } from "@/types";
+import type { Candidate, ComparisonArtifact, Phase, BasketRunRow } from "@/types";
 import { RailPartContext } from "./part-context";
 
 const SOURCED_PHASES: Phase[] = [
@@ -155,16 +156,21 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const specs = run.asset_specs;
   const partLabel = [specs?.manufacturer, specs?.model || specs?.part_number].filter(Boolean).join(" ") || "your part";
 
+  // Basket status strip — only when this run belongs to a multi-part basket (group_id present).
+  // Rendered on every loaded state (working + results) so the user can hop between parts and is
+  // never stranded. A single-part run (group_id null) mounts no strip and never fetches the group.
+  const basketStrip = run.group_id ? <BasketStrip groupId={run.group_id} activeRunId={runId} /> : null;
+
   if (WORKING_PHASES.includes(phase)) {
     return (
-      <Shell sub={partLabel} onHome={() => router.push("/")}>
+      <Shell sub={partLabel} onHome={() => router.push("/")} strip={basketStrip}>
         <Working label="Finding your best options…" sub="Checking the Arkim network, marketplaces, and specialist suppliers — this can take a minute or two." spin />
       </Shell>
     );
   }
   if (!SOURCED_PHASES.includes(phase)) {
     return (
-      <Shell sub={partLabel} onHome={() => router.push("/")}>
+      <Shell sub={partLabel} onHome={() => router.push("/")} strip={basketStrip}>
         <Working label="This request isn't ready for options yet." sub="Describe the part and start sourcing first." />
       </Shell>
     );
@@ -341,7 +347,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
   );
 
   return (
-    <Shell sub={`${partLabel}${specs?.part_number ? ` · ${specs.part_number}` : ""}`} onHome={() => router.push("/")}>
+    <Shell sub={`${partLabel}${specs?.part_number ? ` · ${specs.part_number}` : ""}`} onHome={() => router.push("/")} strip={basketStrip}>
       {/* Committed: foreground the order status — the decision is made, so the status is
           what the page is about; the shortlist collapses into the record below. Uncommitted:
           the candidate list leads (the working decision surface) and OrderSection stays at
@@ -421,7 +427,7 @@ function CollapsedRecord({
   );
 }
 
-function Shell({ children, sub, onHome }: { children: React.ReactNode; sub?: string; onHome?: () => void }) {
+function Shell({ children, sub, onHome, strip }: { children: React.ReactNode; sub?: string; onHome?: () => void; strip?: React.ReactNode }) {
   return (
     <div className="proc-max">
       {onHome && (
@@ -433,7 +439,58 @@ function Shell({ children, sub, onHome }: { children: React.ReactNode; sub?: str
         </button>
       )}
       <ProcHead title={<>Here are your <b>best options</b></>} sub={sub} />
+      {strip}
       {children}
+    </div>
+  );
+}
+
+/** Honest per-part status for a basket chip: "picked $X" when a candidate is selected, else a
+ *  phase-derived label. No invented richness (the rollup gives phase, not a count). */
+function basketRowStatus(row: BasketRunRow): string {
+  if (row.error) return "Error";
+  if (row.selected_amount > 0) return `Picked ${procMoney(row.selected_amount)}`;
+  const byPhase: Record<string, string> = {
+    pending_intake: "Identifying", intake: "Identifying", inventory: "Checking stock",
+    sourcing: "Sourcing", comparison: "Options ready",
+    pending_first_approval: "Needs approval", pending_second_approval: "Needs approval",
+    approved: "Approved", executing: "Ordering", fulfilling: "Ordering",
+    completed: "Done", cancelled: "Cancelled", error: "Error",
+  };
+  return byPhase[row.phase ?? ""] ?? "—";
+}
+
+/** Basket status strip — shows every part in the group with its real per-part status, the active
+ *  part highlighted. Owns useGroup (only mounts when group_id is present). Renders nothing for a
+ *  1-run group (not a multi-part basket). Labels/status are the rollup's real values — never guessed. */
+function BasketStrip({ groupId, activeRunId }: { groupId: string; activeRunId: string }) {
+  const { data: rollup } = useGroup(groupId);
+  if (!rollup || rollup.run_count <= 1) return null;
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", margin: "2px 0 18px" }}>
+      {rollup.runs.map((row, i) => {
+        const active = row.run_id === activeRunId;
+        return (
+          <Link
+            key={row.run_id ?? i}
+            href={`/parts/${row.run_id}`}
+            style={{
+              display: "inline-flex", flexDirection: "column", gap: 1,
+              padding: "6px 12px", borderRadius: "var(--r)", textDecoration: "none",
+              border: `1px solid ${active ? "var(--accent-line)" : "var(--border)"}`,
+              background: active ? "var(--accent-fill)" : "var(--bg-1)",
+              color: active ? "var(--accent-text)" : "var(--fg-2)",
+            }}
+          >
+            <span style={{ fontWeight: 600, fontSize: 13, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {row.part || "Unidentified part"}
+            </span>
+            <span style={{ fontSize: 11, color: active ? "var(--accent-text)" : "var(--muted)" }}>
+              {basketRowStatus(row)}
+            </span>
+          </Link>
+        );
+      })}
     </div>
   );
 }

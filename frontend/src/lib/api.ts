@@ -38,6 +38,7 @@ import type {
   SendMessageRequest,
   SendMessageResponse,
   SourcingRunDetail,
+  BasketRollup,
   SourcingRunListItem,
 } from "@/types";
 
@@ -114,6 +115,11 @@ export async function listRuns(params?: {
 
 export async function getRun(runId: string): Promise<SourcingRunDetail> {
   return request(`/runs/${runId}`);
+}
+
+/** Basket rollup for a group — per-part label/phase/selected_amount + basket status/total. */
+export async function getGroup(groupId: string): Promise<BasketRollup> {
+  return request(`/groups/${groupId}`);
 }
 
 export async function sendMessage(

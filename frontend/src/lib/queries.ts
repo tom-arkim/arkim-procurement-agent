@@ -19,6 +19,7 @@ import {
   createRun,
   listRuns,
   getRun,
+  getGroup,
   sendMessage,
   uploadNameplate,
   selectCandidate,
@@ -105,6 +106,27 @@ export function useRunLive(runId: string) {
     // Sourcing takes 1–2 min of real provider calls; users often tab away while
     // waiting. Keep polling in the background, and refetch on window focus, so the
     // run advances to its options view without a manual refresh.
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Basket rollup (the N runs sharing a group_id) — powers the basket status strip.
+// No-ops for a single-part run (no gid -> disabled, never calls GET /api/groups).
+// ---------------------------------------------------------------------------
+
+export function useGroup(groupId: string | null | undefined) {
+  return useQuery({
+    queryKey: queryKeys.groups.detail(groupId ?? ""),
+    queryFn: () => getGroup(groupId as string),
+    enabled: Boolean(groupId),
+    // Poll while the basket is still progressing, so a sibling's status advances live.
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      const active = ["all_intake", "sourcing_in_progress", "all_awaiting_approval", "mixed"];
+      return status && active.includes(status) ? 5_000 : false;
+    },
     refetchIntervalInBackground: true,
     refetchOnWindowFocus: true,
   });

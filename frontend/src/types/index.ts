@@ -222,6 +222,9 @@ export interface SourcingRunDetail {
   warranty: Warranty;
   facility_id: string;
   facility_state: string;
+  /** Basket label — runs sharing one group_id form a basket. Null/absent on single-part runs.
+   *  Already sent by the backend (RunDetail); drives the basket status strip. */
+  group_id?: string | null;
   asset_specs?: AssetSpecs;
   inventory_result?: Record<string, unknown>;
   sourcing_results?: SourcingResults;
@@ -260,6 +263,24 @@ export interface ChatMessage {
 // ---------------------------------------------------------------------------
 // API request / response shapes
 // ---------------------------------------------------------------------------
+
+/** One row of the basket rollup (GET /api/groups/{gid}) — mirrors the backend BasketRunRow. */
+export interface BasketRunRow {
+  run_id: string | null;
+  part: string | null;            // real intake label or honest placeholder; null only on a degraded row
+  phase: string | null;
+  selected_amount: number;        // 0.0 until a candidate is selected (never faked)
+  error: string | null;           // set when the row degraded (fail-soft), else null
+}
+
+/** Basket rollup (GET /api/groups/{gid}) — mirrors the backend BasketRollup. */
+export interface BasketRollup {
+  group_id: string;
+  status: string;
+  basket_total: number;
+  run_count: number;
+  runs: BasketRunRow[];
+}
 
 export interface CreateRunRequest {
   facility_id?: string;
