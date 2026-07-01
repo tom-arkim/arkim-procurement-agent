@@ -41,6 +41,17 @@ def _env_truthy(value: Optional[str]) -> bool:
 #      (utils/email_sender.py); this refuses the boot before any request is served.
 DEMO_MODE: bool = _env_truthy(os.environ.get("DEMO_MODE"))
 
+if DEMO_MODE:
+    # Import the canonical send gate (read once at email_sender import). Under
+    # DEMO_MODE it MUST be off — refuse to start otherwise. This runs at uvicorn
+    # boot (module import), before the app takes any request.
+    from utils import email_sender as _email_sender_for_assertion
+    if _email_sender_for_assertion.EMAIL_SEND_ENABLED:
+        raise RuntimeError(
+            "Refusing to start: email send must be disabled in DEMO_MODE "
+            "(EMAIL_SEND_ENABLED is true). Unset it before launching the demo."
+        )
+
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
 from utils.models import SourcingRun
 from utils.marketplace_registry import is_marketplace

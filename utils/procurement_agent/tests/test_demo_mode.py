@@ -305,3 +305,52 @@ class TestDemoModeOffNoRegression:
     def test_create_run_still_201_when_off(self, demo_off):
         client, _ = demo_off
         assert client.post("/api/runs", json={}).status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# EMAIL ASSERTION: under DEMO_MODE the app refuses to boot if email send is on.
+# The conftest safety net forces EMAIL_SEND_ENABLED off for every test, so the
+# only way a refusal can fire here is the value the test sets on the module
+# attribute at import time.
+# ---------------------------------------------------------------------------
+
+class TestEmailBootRefusal:
+    def _import_raises_refusal(self, monkeypatch, tmp_path, demo_env, email_on):
+        """True iff importing api_server under the given env raises the refusal.
+
+        api_server reads DEMO_MODE from the env at import, and reads the email
+        gate as `email_sender.EMAIL_SEND_ENABLED` (the module attribute) at
+        import. We control both: DEMO_MODE via setenv, the email gate via a
+        direct setattr on the email_sender module (robust against the conftest
+        autouse safety net, which forces the attribute False — our setattr runs
+        after it and wins). api_server is popped so it re-imports and re-runs
+        its top-level assertion against the values we just set."""
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        if demo_env is not None:
+            monkeypatch.setenv("DEMO_MODE", demo_env)
+        import utils.email_sender as _es
+        monkeypatch.setattr(_es, "EMAIL_SEND_ENABLED", bool(email_on))
+        sys.modules.pop("api_server", None)
+        try:
+            _import_api_server_fresh(monkeypatch, tmp_path)
+            return False   # imported without raising
+        except RuntimeError as exc:
+            return "email send must be disabled in DEMO_MODE" in str(exc)
+        finally:
+            # Restore email_sender to the conftest-safe OFF state for the rest of
+            # the session, and drop api_server so no test reuses a bad copy.
+            sys.modules.pop("api_server", None)
+            monkeypatch.setattr(_es, "EMAIL_SEND_ENABLED", False)
+
+    def test_demo_on_email_on_refuses_to_start(self, monkeypatch, tmp_path):
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "true", True) is True
+
+    def test_demo_on_email_off_starts_fine(self, monkeypatch, tmp_path):
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "true", False) is False
+
+    def test_demo_off_email_on_starts_fine(self, monkeypatch, tmp_path):
+        # Normal ops: no DEMO_MODE -> the assertion never fires, even with email on.
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "", True) is False
+
+    def test_demo_off_email_off_starts_fine(self, monkeypatch, tmp_path):
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "", False) is False
