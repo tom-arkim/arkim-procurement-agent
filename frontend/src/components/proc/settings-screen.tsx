@@ -35,7 +35,7 @@ const FIELDS: Field[] = [
   { k: "company", label: "Receiving company name", placeholder: "Company name as it should appear on packages" },
   { k: "address", label: "Street address", placeholder: "123 Industrial Blvd" },
   { k: "city", label: "City, state, zip", placeholder: "City, CA 90000" },
-  { k: "attention", label: "Attention / point of contact", placeholder: "Name and role — e.g. Sam Torres — Maintenance", hint: "(shown on the shipping label)" },
+  { k: "attention", label: "Attention / point of contact", placeholder: "Name and role — e.g. Receiving — Maintenance", hint: "(shown on the shipping label)" },
   { k: "hours", label: "Receiving hours", placeholder: "Mon–Fri, 7:00 AM – 3:30 PM", hint: "(shown to suppliers)" },
   { k: "instructions", label: "Delivery instructions", placeholder: "Dock number, liftgate requirements, call-ahead…", hint: "(optional)", multiline: true },
 ];
