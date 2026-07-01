@@ -487,3 +487,55 @@ class TestApolloClientEmptyKeyDisables:
         # Contrast: a real key leaves Apollo enabled (the state DEMO_MODE blocks).
         from utils.apollo_client import ApolloClient
         assert ApolloClient(api_key="real-key").enabled is True
+
+
+# ---------------------------------------------------------------------------
+# SOURCING-BYPASS BLOCK (FIX 3): under DEMO_MODE create_run ignores client-
+# supplied asset_specs (forced bare intake) — a script can't POST specs then
+# confirm-intake straight into a full sourcing run with no intake LLM call.
+# group_id is still honored (basket-label only, no spend risk; the demo basket
+# view needs it). Inert when DEMO_MODE is off: asset_specs honored as today.
+# ---------------------------------------------------------------------------
+
+class TestDemoIgnoreClientAssetSpecs:
+    _SPECS = {"manufacturer": "Goulds", "part_number": "3196"}
+
+    def test_demo_on_ignores_seeded_specs_bare_intake(self, demo_on):
+        # The run is created (route works) but carries NO specs — the seed ignored.
+        client, _ = demo_on
+        r = client.post("/api/runs", json={"asset_specs": self._SPECS})
+        assert r.status_code == 201
+        assert r.json()["phase"] == "intake"
+        rid = r.json()["id"]
+        detail = client.get(f"/api/runs/{rid}").json()
+        assert detail["asset_specs"] is None
+
+    def test_demo_on_seeded_specs_cannot_skip_intake(self, demo_on):
+        # The bypass is closed: with specs ignored, confirm-intake's 422 "no specs"
+        # guard fires instead of advancing to sourcing.
+        client, _ = demo_on
+        rid = client.post("/api/runs", json={"asset_specs": self._SPECS}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/confirm-intake")
+        assert r.status_code == 422
+        assert "spec" in r.json()["detail"].lower()
+
+    def test_demo_on_group_id_preserved_with_specs_ignored(self, demo_on):
+        # group_id is honored even when asset_specs is dropped — the basket view
+        # (allowlisted, used by the demo) still groups this run.
+        client, api = demo_on
+        gid = "11111111-2222-3333-4444-555555555555"
+        rid = client.post(
+            "/api/runs", json={"group_id": gid, "asset_specs": self._SPECS}
+        ).json()["id"]
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as session:
+            run = session.get(ORM, rid)
+            assert run.group_id == gid          # basket label preserved
+            assert run.asset_specs_json is None  # seed still ignored
+
+    def test_demo_off_honors_seeded_specs_no_regression(self, demo_off):
+        # Normal ops: asset_specs is honored exactly as today (real fan-out unbroken).
+        client, _ = demo_off
+        rid = client.post("/api/runs", json={"asset_specs": self._SPECS}).json()["id"]
+        detail = client.get(f"/api/runs/{rid}").json()
+        assert detail["asset_specs"] == self._SPECS

@@ -1127,14 +1127,27 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
     """Create a new sourcing run and return it in intake phase.
 
     D2 prereq #1 (keys only): stamp the run's tenant key (company PIN) from the verified
-    Caller when one is present — NEVER from the body. No token (today's demo) -> NULL."""
+    Caller when one is present — NEVER from the body. No token (today's demo) -> NULL.
+
+    DEMO_MODE spend-abuse guard (FIX 3): a public no-login demo must not let a client
+    birth a run already carrying asset_specs — that would let a script POST specs then
+    confirm-intake straight into a full sourcing run (Tavily x6 + Anthropic + brand-intel
+    + comparison LLMs) with NO intake LLM call and attacker-chosen specs, a cheaper-per-
+    iteration path to the most expensive capability that bypasses the "describe in plain
+    words" intake gate bounding what gets sourced. Under DEMO_MODE the seed is ignored
+    (forced bare intake); group_id is still honored (it only labels runs for the basket
+    rollup — no spend risk, and the demo's basket view needs it). Inert when DEMO_MODE is
+    off: asset_specs is honored exactly as today (the real multi-part fan-out unbroken)."""
+    seeded_specs = body.asset_specs
+    if DEMO_MODE:
+        seeded_specs = None   # forced bare intake — the bypass can't skip the intake gate
     run = _new_run_orm(
         facility_id=body.facility_id,
         urgency_factor=body.urgency_factor,
         warranty_status=body.warranty_status,
         company_id=caller.company_id if caller else None,
         group_id=body.group_id,   # opt-in basket label; None -> group-less (legacy, unchanged)
-        asset_specs=body.asset_specs,   # opt-in seed; None -> bare intake run (legacy, unchanged)
+        asset_specs=seeded_specs,   # opt-in seed; None -> bare intake run (legacy, unchanged)
     )
     with _SessionFactory() as session:
         session.add(run)
