@@ -44,6 +44,31 @@ _UNKNOWN_MANUFACTURERS = {"Unknown", "unknown", "N/A", "n/a", "", None}
 
 
 # ---------------------------------------------------------------------------
+# DEMO_MODE — public no-login demo spine (mirrors api_server._env_truthy)
+# ---------------------------------------------------------------------------
+# The seed Tier 1 catalog (data/mock_tier1_suppliers.json) holds FABRICATED
+# distributors — invented vendors, fake prices, and some dead/parked domains
+# (e.g. industrialcontrolsolutions.com, nationalseal.com). For a public demo
+# whose pitch is REAL sourcing, surfacing a top "Arkim Network, in-stock,
+# $875, 2-day" recommendation that lands on a GoDaddy for-sale page is the
+# worst-case demo failure. Under DEMO_MODE, Tier 1 is therefore LIVE-ONLY:
+# the seed catalog is not read and the synthetic brand-intelligence Tier 1
+# fallback (_seeded_tier1_candidates — a fabricated-but-URL-less "Arkim
+# Network, OEM authorized, confirm pricing in 30 min" vendor) is gated off.
+# Tier 2/3 (live Tavily + LLM) carry the demo; genuine brand-intelligence
+# anchors still surface in Tier 3 via _seeded_tier3_candidates (untouched).
+# INERT when DEMO_MODE is off: the catalog loads and the fallback runs
+# byte-for-byte as today (normal dev/prod operation unchanged). Strict opt-in
+# parse matches api_server._env_truthy / email_sender._env_truthy (only
+# 1/true/yes/on -> True; everything else fails safe to False).
+
+def _demo_mode_active() -> bool:
+    """True iff env DEMO_MODE is a truthy token (1/true/yes/on). Read at call
+    time so tests can set/unset the env before invoking agent.run()."""
+    return (os.environ.get("DEMO_MODE") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# ---------------------------------------------------------------------------
 # Fix 2 — Part number normalization
 # ---------------------------------------------------------------------------
 
@@ -424,7 +449,16 @@ class SourcingAgent:
     # ------------------------------------------------------------------
 
     def _run_tier1(self, specs: AssetSpecs, weights: dict) -> list[dict]:
-        """Match against the Arkim onboarded supplier catalog (Fix 2: normalized PN)."""
+        """Match against the Arkim onboarded supplier catalog (Fix 2: normalized PN).
+
+        Under DEMO_MODE: LIVE-ONLY Tier 1 — return [] without reading the seed
+        catalog (fabricated vendors / dead domains) or the synthetic fallback
+        (gated separately in _seeded_tier1_candidates). Tier 2/3 carry the demo.
+        Inert when DEMO_MODE is off (catalog + fallback run as today).
+        """
+        if _demo_mode_active():
+            print("[SourcingAgent] DEMO_MODE: Tier 1 live-only — seed catalog + synthetic fallback gated off")
+            return []
         try:
             with open(_TIER1_CATALOG_PATH, "r") as fh:
                 catalog = json.load(fh)
@@ -1096,10 +1130,20 @@ class SourcingAgent:
         Called only when the catalog match returns nothing, so real catalog
         entries always take precedence over this synthetic fallback.
 
+        Under DEMO_MODE: gated off (return []) — this synthetic vendor
+        (is_mock=True, source_url=None, "Arkim Network — OEM authorized,
+        confirmed pricing in 30 min") is fabricated even without a dead URL,
+        so it doesn't belong in a real-sourcing demo. Belt-and-suspenders:
+        _run_tier1 already returns [] under DEMO_MODE before reaching here,
+        but this guard makes the intent explicit and covers any future caller.
+        Inert when DEMO_MODE is off.
+
         is_mock: reserved for future filtering (production exclusion,
         programmatic distinction when real Tier 1 vendors exist). For demos,
         mock vendors render normally.
         """
+        if _demo_mode_active():
+            return []
         try:
             from utils.brand_intelligence import get_brand_relationships
             from utils.sourcing_archieved.scoring import _detect_equip_type

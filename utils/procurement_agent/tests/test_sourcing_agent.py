@@ -760,3 +760,187 @@ class TestDedupByUrl:
         assert t1["results"][0].get("rejection_reason") is None
         assert t3["results"][0].get("rejection_reason") == "duplicate_in_higher_tier"
         assert n == 1
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE Tier 1 — live-only: the fabricated seed catalog + synthetic
+# brand-intelligence Tier 1 fallback are gated off so a public real-sourcing
+# demo surfaces only genuinely-discovered (live Tavily Tier 2/3) vendors.
+# Inert when DEMO_MODE is off: catalog + fallback run byte-for-byte as today.
+# ---------------------------------------------------------------------------
+
+# A catalog built from the REAL fabricated seed entries (data/mock_tier1_suppliers.json)
+# so the DEMO_MODE-on tests prove those exact dead-domain / placeholder vendors
+# (industrialcontrolsolutions.com, nationalseal.com, Acme) do NOT surface.
+_FAB_CATALOG = {
+    "suppliers": [
+        {
+            "name":            "National Seal & Bearing Co.",
+            "location":        "Chicago, IL",
+            "website":         "https://nationalseal.com",   # dead/parked
+            "reliability_score": 95.0,
+            "contact_email":   "orders@nationalseal.com",
+            "inventory": [
+                {"part_number": "6205-2RS-C3", "manufacturer": "SKF",
+                 "description": "Deep groove ball bearing 25x52x15mm",
+                 "price": 18.50, "lead_days": 1, "in_stock": True},
+            ],
+        },
+        {
+            "name":            "Industrial Control Solutions",
+            "location":        "Dallas, TX",
+            "website":         "https://industrialcontrolsolutions.com",  # GoDaddy parked
+            "reliability_score": 92.0,
+            "contact_email":   "sales@indcontrolsolutions.com",
+            "inventory": [
+                {"part_number": "22B-D6P0N104", "manufacturer": "Allen-Bradley",
+                 "description": "PowerFlex 40 VFD 3HP 460V 3-phase",
+                 "price": 875.00, "lead_days": 3, "in_stock": True},
+            ],
+        },
+        {
+            "name":            "Acme Industrial Supply",
+            "location":        "Houston, TX",
+            "website":         "https://acmeindustrial.com",   # placeholder
+            "reliability_score": 93.0,
+            "contact_email":   "orders@acmeindustrial.com",
+            "inventory": [
+                {"part_number": "4Z248", "manufacturer": "Dayton",
+                 "description": "Industrial motor 1HP 1800RPM 56 frame",
+                 "price": 285.00, "lead_days": 2, "in_stock": True},
+            ],
+        },
+    ]
+}
+
+_FAB_VENDORS = {
+    "National Seal & Bearing Co.",
+    "Industrial Control Solutions",
+    "Acme Industrial Supply",
+}
+
+
+class TestTier1DemoModeLiveOnly:
+    """DEMO_MODE ON -> Tier 1 surfaces NO fabricated/seed vendor (no dead
+    domain, no is_mock priced Tier 1 card) even for a part that TODAY hits the
+    catalog. Tier 2/3 (mocked here) are untouched."""
+
+    def test_skf_part_surfaces_no_fabricated_tier1_under_demo(self, tmp_path, monkeypatch):
+        catalog_file = tmp_path / "mock_tier1_suppliers.json"
+        catalog_file.write_text(json.dumps(_FAB_CATALOG))
+        monkeypatch.setenv("DEMO_MODE", "1")
+
+        agent = SourcingAgent()
+        run = _make_run(specs={
+            "manufacturer": "SKF", "model": "6205-2RS", "part_number": "6205-2RS-C3",
+            "voltage": "N/A", "category": "Part", "detected_type": "bearing",
+        })
+
+        with patch("utils.procurement_agent.agents.sourcing_agent._TIER1_CATALOG_PATH",
+                   str(catalog_file)):
+            with patch.object(agent, "_run_tier2", return_value=[]):
+                with patch.object(agent, "_run_tier3", return_value=[]):
+                    result = agent.run(run)
+
+        t1 = result["tier_1"]
+        assert t1["count"] == 0, f"DEMO_MODE Tier 1 must be empty, got: {t1['results']}"
+        assert t1["results"] == []
+        # Belt-and-suspenders: no fabricated vendor name, no dead-domain URL,
+        # no is_mock priced Tier 1 card anywhere in Tier 1.
+        for r in t1["results"]:
+            assert r.get("vendor_name") not in _FAB_VENDORS
+            assert "industrialcontrolsolutions.com" not in (r.get("source_url") or "")
+            assert "nationalseal.com" not in (r.get("source_url") or "")
+            assert not (r.get("is_mock") and not r.get("price_tbd", True))
+
+    def test_allen_bradley_part_surfaces_no_fabricated_tier1_under_demo(self, tmp_path, monkeypatch):
+        catalog_file = tmp_path / "mock_tier1_suppliers.json"
+        catalog_file.write_text(json.dumps(_FAB_CATALOG))
+        monkeypatch.setenv("DEMO_MODE", "true")
+
+        agent = SourcingAgent()
+        run = _make_run(specs={
+            "manufacturer": "Allen-Bradley", "model": "PowerFlex 40",
+            "part_number": "22B-D6P0N104", "voltage": "460V",
+            "category": "Part", "detected_type": "VFD",
+        })
+
+        with patch("utils.procurement_agent.agents.sourcing_agent._TIER1_CATALOG_PATH",
+                   str(catalog_file)):
+            with patch.object(agent, "_run_tier2", return_value=[]):
+                with patch.object(agent, "_run_tier3", return_value=[]):
+                    result = agent.run(run)
+
+        assert result["tier_1"]["count"] == 0
+        assert result["tier_1"]["results"] == []
+
+    def test_seeded_tier1_fallback_gated_off_under_demo(self, monkeypatch):
+        """A manufacturer with NO catalog match but a brand-intelligence
+        authorized_service_brands entry: today the synthetic fallback surfaces
+        a mock 'Arkim Network — OEM authorized' Tier 1 vendor. Under DEMO_MODE
+        it must return [] (no fabricated-but-URL-less vendor either)."""
+        monkeypatch.setenv("DEMO_MODE", "1")
+
+        agent = SourcingAgent()
+        # No catalog patch needed -> real catalog file; Endress+Hauser is not in
+        # it, so the only path to a Tier 1 result is _seeded_tier1_candidates.
+        run = _make_run(specs={
+            "manufacturer": "Endress+Hauser", "model": "Cerabar M PMC11",
+            "part_number": "PMC11-AA1V1HFVXJA", "voltage": "N/A",
+            "category": "Part", "detected_type": "pressure transmitter",
+        })
+
+        with patch.object(agent, "_run_tier2", return_value=[]):
+            with patch.object(agent, "_run_tier3", return_value=[]):
+                result = agent.run(run)
+
+        t1 = result["tier_1"]
+        assert t1["count"] == 0, f"DEMO_MODE Tier 1 fallback must be gated, got: {t1['results']}"
+        # No synthetic is_mock 'Arkim Network' Tier 1 card.
+        assert not any(r.get("is_mock") for r in t1["results"])
+
+    def test_demo_mode_off_is_inert_catalog_still_works(self, tmp_path, monkeypatch):
+        """DEMO_MODE OFF -> byte-for-byte today: the catalog loads and a real
+        catalog match surfaces (regression guard for the dev/prod path)."""
+        catalog_file = tmp_path / "mock_tier1_suppliers.json"
+        catalog_file.write_text(json.dumps(_FAB_CATALOG))
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+
+        agent = SourcingAgent()
+        run = _make_run(specs={
+            "manufacturer": "SKF", "model": "6205-2RS", "part_number": "6205-2RS-C3",
+            "voltage": "N/A", "category": "Part", "detected_type": "bearing",
+        })
+
+        with patch("utils.procurement_agent.agents.sourcing_agent._TIER1_CATALOG_PATH",
+                   str(catalog_file)):
+            with patch.object(agent, "_run_tier2", return_value=[]):
+                with patch.object(agent, "_run_tier3", return_value=[]):
+                    result = agent.run(run)
+
+        # Catalog match (SKF by manufacturer) surfaces exactly as today.
+        assert result["tier_1"]["count"] >= 1
+        names = {r["vendor_name"] for r in result["tier_1"]["results"]}
+        assert "National Seal & Bearing Co." in names
+
+    def test_demo_mode_falsy_tokens_are_inert(self, tmp_path, monkeypatch):
+        """Non-truthy DEMO_MODE tokens (0/false/no/empty) must NOT activate the
+        gate — fails safe to today's catalog behaviour."""
+        catalog_file = tmp_path / "mock_tier1_suppliers.json"
+        catalog_file.write_text(json.dumps(_FAB_CATALOG))
+
+        agent = SourcingAgent()
+        run = _make_run(specs={
+            "manufacturer": "SKF", "model": "6205-2RS", "part_number": "6205-2RS-C3",
+            "voltage": "N/A", "category": "Part", "detected_type": "bearing",
+        })
+
+        for off in ("0", "false", "no", "", "junk"):
+            monkeypatch.setenv("DEMO_MODE", off)
+            with patch("utils.procurement_agent.agents.sourcing_agent._TIER1_CATALOG_PATH",
+                       str(catalog_file)):
+                with patch.object(agent, "_run_tier2", return_value=[]):
+                    with patch.object(agent, "_run_tier3", return_value=[]):
+                        result = agent.run(run)
+            assert result["tier_1"]["count"] >= 1, \
+                f"DEMO_MODE={off!r} must be inert (catalog still works)"
