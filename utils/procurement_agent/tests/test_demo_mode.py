@@ -1048,3 +1048,143 @@ class TestDemoRateLimitOffNoRegression:
                     {"manufacturer": "Goulds", "part_number": "PN-1"})
                 s.commit()
             assert client.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# INPUT CAPS (FIX C): bound per-request work. Always-on where sensible (a prod cap
+# protects everyone; no legitimate demo input exceeds it). 422 on exceed.
+# Plus the carve-out: the print() of visitor free text to stdout is removed (a live
+# PII-in-logs exposure once public — folds into the deferred structured-capture pass,
+# but the unstructured leak shouldn't wait for it).
+# ---------------------------------------------------------------------------
+
+class TestDemoInputCaps:
+    def test_message_content_over_cap_is_422(self, demo_on, monkeypatch):
+        # SendMessageRequest.content max_length=4000. A 4001-char body -> 422 (Pydantic),
+        # before IntakeAgent is ever constructed.
+        client, api = demo_on
+        constructor = Mock(return_value=Mock())  # would-record if reached; must NOT be
+        monkeypatch.setattr(api, "IntakeAgent", constructor)
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/messages",
+                        json={"content": "x" * 4001})
+        assert r.status_code == 422
+        constructor.assert_not_called()
+
+    def test_message_content_at_cap_is_ok(self, demo_on, monkeypatch):
+        # Exactly 4000 chars is allowed (the bound is inclusive).
+        client, api = demo_on
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "Which manufacturer?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/messages", json={"content": "x" * 4000})
+        assert r.status_code == 200
+
+    def test_group_id_over_cap_is_422(self, demo_on):
+        # CreateRunRequest.group_id max_length=64. A 65-char group_id -> 422.
+        client, _ = demo_on
+        r = client.post("/api/runs", json={"group_id": "g" * 65})
+        assert r.status_code == 422
+
+    def test_facility_id_over_cap_is_422(self, demo_on):
+        # CreateRunRequest.facility_id max_length=64. A 65-char facility_id -> 422.
+        client, _ = demo_on
+        r = client.post("/api/runs", json={"facility_id": "f" * 65})
+        assert r.status_code == 422
+
+    def test_parts_over_cap_is_422(self, demo_off):
+        # IntakeRequest.parts max_length=10. An 11-part body -> 422 (route is demo-
+        # unreachable but the cap protects the prod fan-out; tested demo_off so the
+        # /api/requests front door isn't allowlist-403'd).
+        client, _ = demo_off
+        r = client.post("/api/requests", json={"parts": [{} for _ in range(11)]})
+        assert r.status_code == 422
+
+    def test_upload_over_size_cap_is_422(self, demo_on, monkeypatch):
+        # DEMO_MAX_UPLOAD_BYTES default 10MB; an 10MB+1 byte upload -> 422 before any
+        # vision extraction. Mock IntakeAgent to prove it never ran.
+        client, api = demo_on
+        constructor = Mock(return_value=Mock())
+        monkeypatch.setattr(api, "IntakeAgent", constructor)
+        rid = client.post("/api/runs", json={}).json()["id"]
+        too_big = b"\x00" * (10 * 1024 * 1024 + 1)
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("big.png", too_big, "image/png")},
+            data={"text": "a pump"},
+        )
+        assert r.status_code == 422
+        assert "too large" in r.json()["detail"].lower()
+        constructor.assert_not_called()
+
+    def test_upload_at_size_cap_is_ok(self, demo_on, monkeypatch):
+        # Exactly 10MB is allowed (inclusive bound); a mocked extraction returns so the
+        # handler completes 200 without a live vision call.
+        client, api = demo_on
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        exactly = b"\x00" * (10 * 1024 * 1024)
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("ok.png", exactly, "image/png")},
+            data={"text": "a pump"},
+        )
+        assert r.status_code == 200
+
+    def test_upload_text_over_cap_is_422(self, demo_on, monkeypatch):
+        # The multipart "text" Form field is capped at 4000 chars too.
+        client, api = demo_on
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=Mock()))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("np.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"text": "x" * 4001},
+        )
+        assert r.status_code == 422
+
+    def test_upload_size_cap_env_configurable(self, demo_on, monkeypatch):
+        # The cap is a module global read at call time -> override it and a small upload
+        # breaches the new tiny limit.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_UPLOAD_BYTES", 16)
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=Mock()))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("np.png", b"x" * 32, "image/png")},
+            data={"text": ""},
+        )
+        assert r.status_code == 422
+
+
+class TestDemoNoVisitorTextInLogs:
+    """The print() of visitor free text to stdout is removed (PII-in-logs exposure).
+    A send_message must not echo the visitor's text to stdout. We assert the visitor's
+    text never appears in captured stdout for a send_message call."""
+
+    def test_send_message_does_not_print_visitor_text(self, demo_on, monkeypatch, capsys):
+        client, api = demo_on
+        secret = "SUPER-SECRET-PII-MARKER-DO-NOT-LEAK"
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "Which manufacturer?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        client.post(f"/api/runs/{rid}/messages", json={"content": secret})
+        out = capsys.readouterr().out + capsys.readouterr().err
+        assert secret not in out

@@ -433,6 +433,9 @@ _DEMO_MAX_SOURCING_PER_SESSION: int = _env_int("DEMO_MAX_SOURCING_PER_SESSION", 
 # Seconds hinted in the 429 Retry-After header (the caps are simple totals, not a
 # sliding window, so this is a courtesy hint rather than a precise reset time).
 _DEMO_RETRY_AFTER_SEC: int = _env_int("DEMO_RATE_RETRY_AFTER_SEC", 60)
+# Upload size cap (FIX C) — max bytes for POST /api/runs/{id}/upload, enforced
+# read-then-check before vision extraction. Default 10MB (a nameplate photo).
+_DEMO_MAX_UPLOAD_BYTES: int = _env_int("DEMO_MAX_UPLOAD_BYTES", 10 * 1024 * 1024)
 
 
 class _DemoRateCounter:
@@ -552,13 +555,13 @@ class MaintenanceSubmission(BaseModel):
 
 
 class CreateRunRequest(BaseModel):
-    facility_id: str = "00000000-0000-0000-0000-000000000000"
+    facility_id: str = Field("00000000-0000-0000-0000-000000000000", max_length=64)
     urgency_factor: float = Field(0.3, ge=0.0, le=1.0)
     warranty_status: str = "unknown"
     # Optional basket label so a per-item list can mint a group up front and create each run
     # into it (the incremental "+ add another part" flow). NULL/omitted -> group-less, exactly
     # as the legacy single-run path. SECURITY DEBT: client-supplied + unvalidated — see CLEANUP.
-    group_id: Optional[str] = None
+    group_id: Optional[str] = Field(None, max_length=64)
     # Optional pre-extracted asset_specs to SEED the run at birth (multi-part fan-out seeds each
     # card from the already-parsed per-part specs — no re-extraction). None -> bare intake run,
     # exactly the legacy path.
@@ -583,14 +586,18 @@ class IntakeRequest(BaseModel):
     routes single-vs-multi; the part CONTENTS are not parsed here — intake yields one
     asset_specs per run today, and multi-part extraction is a separate later concern. An
     empty or single-element `parts` takes the existing single-run path verbatim."""
-    parts: List[Dict[str, Any]] = []
-    facility_id: str = "00000000-0000-0000-0000-000000000000"
+    parts: List[Dict[str, Any]] = Field(default_factory=list, max_length=10)
+    facility_id: str = Field("00000000-0000-0000-0000-000000000000", max_length=64)
     urgency_factor: float = Field(0.3, ge=0.0, le=1.0)
     warranty_status: str = "unknown"
 
 
 class SendMessageRequest(BaseModel):
-    content: str
+    # Always-on cap (FIX C): a 4000-char limit bounds per-request work (a pathological
+    # description could fan out into many sourcing calls / a huge LLM prompt) and
+    # protects both demo and prod — no legitimate part description exceeds it. 422 on
+    # exceed (Pydantic).
+    content: str = Field(..., max_length=4000)
     role: str = "user"
 
 
@@ -1626,7 +1633,12 @@ def send_message(run_id: str, body: SendMessageRequest, request: Request):
 
     # Run IntakeAgent
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    print(f"[send_message] run={run_id} api_key_present={bool(api_key)} text={body.content[:60]!r}")
+    # NOTE: do NOT log visitor free text (body.content) to stdout — it may contain
+    # PII (names, facility addresses, real part numbers) and a public no-login demo
+    # has no consent gate. The api_key_present / sufficiency / confidence signals are
+    # also dropped here; structured interaction capture + a deliberate PII policy are
+    # a separate (deferred) pass — for now the visitor's text simply never reaches the
+    # logs from this path. See CLEANUP / the demo data-capture plan.
     agent = IntakeAgent(anthropic_api_key=api_key)
     run_obj = SourcingRun(
         id=run_id,
@@ -1645,12 +1657,10 @@ def send_message(run_id: str, body: SendMessageRequest, request: Request):
         # draft + "Message failed" toast). Broad catch is intentional: any agent /
         # upstream (Anthropic) failure maps to a Bad Gateway.
         traceback.print_exc()
-        print(f"[send_message] IntakeAgent error for run={run_id} — returning 502")
         raise HTTPException(
             status_code=502,
             detail="Intake processing failed — please retry.",
         )
-    print(f"[send_message] sufficient={result['sufficient']} mfg_conf={result['manufacturer_confidence']} part_conf={result['part_id_confidence']}")
 
     # Determine reply — do NOT auto-advance on sufficient=True.
     # The confirm-intake endpoint owns the intake → sourcing transition.
@@ -1725,7 +1735,7 @@ async def upload_nameplate(
     run_id: str,
     request: Request,
     file: UploadFile = File(...),
-    text: str = Form(""),
+    text: str = Form("", max_length=4000),
 ):
     """
     Upload a nameplate image for vision extraction.
@@ -1750,6 +1760,16 @@ async def upload_nameplate(
         )
 
     contents = await file.read()
+    # Upload size cap (FIX C): reject an oversized image before the (expensive) vision
+    # extraction runs. Read-then-check: the bytes are buffered (Starlette spills >1MB
+    # to a spool file, so memory isn't unbounded), but the cap stops the work before
+    # the LLM call. DEMO_MAX_UPLOAD_BYTES env-configurable; default 10MB (a nameplate
+    # photo). Always-on — a prod upload cap is sensible too. 422 on exceed.
+    if len(contents) > _DEMO_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Image too large (max {_DEMO_MAX_UPLOAD_BYTES} bytes) — use a smaller photo.",
+        )
     now = datetime.now(timezone.utc).isoformat()
 
     thread = _messages.setdefault(run_id, [])
