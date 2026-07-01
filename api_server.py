@@ -28,8 +28,8 @@ def _env_truthy(value: Optional[str]) -> bool:
 # ---------------------------------------------------------------------------
 # DEMO_MODE — public no-login demo spine (procurement-dev.arkim.ai cold outreach)
 # ---------------------------------------------------------------------------
-# Two guards, both active ONLY when env DEMO_MODE is truthy, both completely inert
-# otherwise (every route behaves exactly as today — no regression in normal ops):
+# Guards active ONLY when env DEMO_MODE is truthy, all completely inert otherwise
+# (every route behaves exactly as today — no regression in normal ops):
 #   1. An allowlist middleware (added below, after `app`) that DENIES-by-default:
 #      only the confirmed demo routes reach their handler; everything else 403s,
 #      including /docs, /openapi.json, mutation/admin/RFQ/email routes, and any
@@ -39,17 +39,30 @@ def _env_truthy(value: Optional[str]) -> bool:
 #      send gate is OFF under DEMO_MODE — a public demo must not be able to boot
 #      with outbound email enabled. EMAIL_SEND_ENABLED is the canonical send gate
 #      (utils/email_sender.py); this refuses the boot before any request is served.
+#   3. A startup boot-refusal assertion that APOLLO_API_KEY is unset under DEMO_MODE
+#      — a public demo must not spend Apollo credits (org_enrich, ~1/match). The
+#      SourcingAgent reads APOLLO_API_KEY from os.environ directly (apollo_client.py)
+#      regardless of what api_server passes to its constructor, so "leave it unset"
+#      is not a strong enough guard — refuse to boot if it is present. See FIX 2(b)
+#      for the belt: the construction path forces Apollo off too.
 DEMO_MODE: bool = _env_truthy(os.environ.get("DEMO_MODE"))
 
 if DEMO_MODE:
-    # Import the canonical send gate (read once at email_sender import). Under
-    # DEMO_MODE it MUST be off — refuse to start otherwise. This runs at uvicorn
-    # boot (module import), before the app takes any request.
+    # Boot-refusal guards (run at uvicorn boot / module import, before any request).
+    # Each refuses to start if a capability that a public no-login demo must not
+    # exercise is left enabled in the env — fail loud at boot rather than silently
+    # spend/egress. Inert when DEMO_MODE is off (normal dev/prod operation unchanged).
     from utils import email_sender as _email_sender_for_assertion
     if _email_sender_for_assertion.EMAIL_SEND_ENABLED:
         raise RuntimeError(
             "Refusing to start: email send must be disabled in DEMO_MODE "
             "(EMAIL_SEND_ENABLED is true). Unset it before launching the demo."
+        )
+    if os.environ.get("APOLLO_API_KEY"):
+        raise RuntimeError(
+            "Refusing to start: APOLLO_API_KEY must be unset in DEMO_MODE "
+            "(Apollo credits would be spent on every sourcing run). "
+            "Remove it from the demo environment before launching."
         )
 
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
@@ -834,9 +847,17 @@ def _run_sourcing_background(
         try:
             from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
             from utils.models import SourcingRun as _SourcingRunModel
+            # Under DEMO_MODE force Apollo OFF at construction: pass apollo_api_key=""
+            # (NOT None — None falls through to the env read inside ApolloClient and
+            # would re-enable Apollo if APOLLO_API_KEY were in the env). "" is `not None`,
+            # so it overrides the env read and ApolloClient.enabled is False. The boot
+            # assertion (part a) refuses to start with APOLLO_API_KEY set at all; this is
+            # the suspenders — even if that env somehow leaks in, this path can't spend.
+            # When DEMO_MODE is off, construct exactly as today (None -> env read, unchanged).
             agent = SourcingAgent(
                 tavily_api_key=os.environ.get("TAVILY_API_KEY"),
                 anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+                apollo_api_key="" if DEMO_MODE else None,
             )
             run_model = _SourcingRunModel(
                 id=run_id,
