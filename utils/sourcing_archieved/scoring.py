@@ -19,6 +19,7 @@ from utils.sourcing_archieved.constants import (
 from utils.brand_intelligence import (
     get_wrong_category_terms,
     get_parent_brand,
+    get_manufacturer_aliases,
 )
 
 
@@ -27,8 +28,26 @@ from utils.brand_intelligence import (
 # ---------------------------------------------------------------------------
 
 def _is_collection_url(url: str) -> bool:
-    u = url.lower()
-    return any(p in u for p in _COLLECTION_URL_PATTERNS)
+    """Detect collection / category / search pages vs direct product pages.
+
+    Checks only the URL path and query components — not the full URL string —
+    to avoid false positives when collection patterns appear in domain names
+    (e.g., "pumpcatalog.com" contains "catalog" but is not a collection URL).
+    """
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url.lower())
+        path   = parsed.path
+        query  = f"?{parsed.query}" if parsed.query else ""
+        path_patterns  = [p for p in _COLLECTION_URL_PATTERNS if p.startswith("/")]
+        query_patterns = [p for p in _COLLECTION_URL_PATTERNS if p.startswith("?") or p.startswith("&")]
+        if any(p in path for p in path_patterns):
+            return True
+        if query and any(p in query for p in query_patterns):
+            return True
+        return False
+    except Exception:
+        return False
 
 
 def _is_low_value_landing_page(url: str, snippet: str, searched_pn: str) -> bool:
@@ -59,10 +78,16 @@ def _is_low_value_landing_page(url: str, snippet: str, searched_pn: str) -> bool
 # ---------------------------------------------------------------------------
 
 def _detect_equip_type(specs) -> str:
-    """Return the primary equipment-type keyword from detected_type or description."""
+    """Return the primary equipment-type keyword from detected_type or description.
+
+    # TODO: consistency audit between brand_intelligence categories and
+    # detect_equip_type entries pending -- current entries are reactive to known
+    # gaps, not exhaustive.
+    """
     ctx = (getattr(specs, 'detected_type', None) or specs.description or '').lower()
     for kw in ("motor", "pump", "compressor", "blower", "conveyor",
-               "vfd", "starter", "bearing", "seal", "coupling", "belt", "contactor", "sensor"):
+               "vfd", "starter", "bearing", "seal", "coupling", "belt", "contactor",
+               "flow meter", "flowmeter", "transmitter", "sensor"):
         if kw in ctx:
             return kw
     return ""
@@ -133,6 +158,55 @@ def _counterfeit_suitability_penalty(url: str,
 
 
 # ---------------------------------------------------------------------------
+# PN match classification (5-tier)
+# ---------------------------------------------------------------------------
+
+PN_MATCH_POINTS: dict[str, int] = {
+    "exact":      40,
+    "normalized": 40,  # delimiter difference only — same PN
+    "stem":       25,  # same model family
+    "substring":  15,  # weaker snippet evidence
+    "none":        0,
+}
+
+
+def _classify_pn_match(searched_pn: str, found_pn: Optional[str],
+                       snippet: str, manufacturer: Optional[str]) -> str:
+    """Return the match tier for a vendor's found_pn against the searched PN.
+
+    Tiers: "exact" | "normalized" | "stem" | "substring" | "none"
+    "none" with a non-null found_pn is the only case that warrants a mismatch penalty.
+    """
+    from utils.procurement_agent.agents.sourcing_agent import (
+        normalize_part_number, stem_part_number,
+    )
+    if not searched_pn:
+        return "none"
+
+    searched_upper = searched_pn.upper().strip()
+    found_upper    = (found_pn or "").upper().strip()
+
+    if found_upper and found_upper == searched_upper:
+        return "exact"
+
+    searched_norm = normalize_part_number(searched_pn)
+    found_norm    = normalize_part_number(found_pn) if found_pn else ""
+    if found_norm and searched_norm == found_norm:
+        return "normalized"
+
+    searched_stem = stem_part_number(searched_pn, manufacturer)
+    found_stem    = stem_part_number(found_pn, manufacturer) if found_pn else None
+    if searched_stem and found_stem and searched_stem == found_stem:
+        return "stem"
+
+    snippet_norm = normalize_part_number(snippet) if snippet else ""
+    if searched_norm and snippet_norm and searched_norm in snippet_norm:
+        return "substring"
+
+    return "none"
+
+
+# ---------------------------------------------------------------------------
 # Main suitability score
 # ---------------------------------------------------------------------------
 
@@ -151,21 +225,24 @@ def _compute_suitability_score(specs, snippet: str, url: str,
       Authorized dist : 0-20 pts  (bonus for authorized distributor / service center)
       Direct URL      : 0-10 pts  (product page vs list/search page)
     """
-    s       = (snippet or "").lower()
-    u_lower = url.lower()
+    s = (snippet or "").lower()
 
     _spn_early = (specs.part_number or "").upper().strip()
     if _is_low_value_landing_page(url, snippet, _spn_early):
         return 0.0
 
-    # Guardrail 0: niche mismatch -- hard 0.0 when 2+ wrong-category terms appear.
+    # Guardrail 0: niche mismatch — hard 0.0 when 3+ wrong-category terms appear in
+    # the snippet.  Counts only snippet hits (not URL hits) to avoid false-positives
+    # on catalog vendors with multi-category navigation breadcrumbs in their URLs
+    # (e.g., /products/motors-pumps-seals/).  Threshold of 3 distinguishes genuinely
+    # off-topic content from incidental category mentions on broad-line distributors.
     dtype_lower = (getattr(specs, "detected_type", "") or specs.description or "").lower()
     _equip_kw = _detect_equip_type(specs)
     if _equip_kw:
         _bad_terms = get_wrong_category_terms(specs.manufacturer, _equip_kw)
         if _bad_terms:
-            hit_count = sum(1 for t in _bad_terms if t in s or t in u_lower)
-            if hit_count >= 2:
+            snippet_hits = sum(1 for t in _bad_terms if t in s)
+            if snippet_hits >= 3:
                 return 0.0
 
     # Guardrail 0b: motor-without-electric verification
@@ -176,20 +253,12 @@ def _compute_suitability_score(specs, snippet: str, url: str,
             return 0.0
 
     # PN match (primary key)
-    searched_pn = (specs.part_number or "").upper().strip()
-    found_upper = (found_pn or "").upper().strip()
-    pn_exact   = bool(found_upper and found_upper == searched_pn)
-    pn_in_snip = bool(searched_pn and searched_pn.lower() in s)
-    pn_alt     = bool(found_pn and not pn_exact)
-
-    if pn_exact:
-        pn_pts = 40
-    elif pn_in_snip:
-        pn_pts = 25
-    elif pn_alt:
-        pn_pts = 10
-    else:
-        pn_pts = 0
+    searched_pn    = (specs.part_number or "").upper().strip()
+    pn_match_level = _classify_pn_match(
+        searched_pn, found_pn, snippet,
+        getattr(specs, "manufacturer", None),
+    )
+    pn_pts = PN_MATCH_POINTS[pn_match_level]
 
     # Equipment type match
     detected = (getattr(specs, "detected_type", "") or "").lower()
@@ -200,9 +269,16 @@ def _compute_suitability_score(specs, snippet: str, url: str,
             matched  = sum(1 for w in words if w in s)
             type_pts = round(15 * matched / len(words))
 
-    # Manufacturer match
-    mfg     = (specs.manufacturer or "").lower()
-    mfg_pts = 10 if (mfg and mfg not in ("unknown", "n/a", "null") and mfg in s) else 0
+    # Manufacturer match — check all known aliases so vendor pages referencing a
+    # brand line (e.g., "Crown Triton") match specs that use the parent corporate
+    # name (e.g., "Hyundai Heavy Industries").
+    mfg = (specs.manufacturer or "").lower()
+    mfg_pts = 0
+    if mfg and mfg not in ("unknown", "n/a", "null"):
+        for _alias in get_manufacturer_aliases(specs.manufacturer):
+            if _alias.lower() in s:
+                mfg_pts = 10
+                break
 
     # Parent brand bonus: brand intelligence resolves child brand -> parent company.
     _parent = get_parent_brand(mfg.strip(), _detect_equip_type(specs))
@@ -237,7 +313,7 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     is_coll = _is_collection_url(url)
     url_pts = 0 if is_coll else 10
 
-    pn_mismatch_penalty = 30 if pn_alt else 0
+    pn_mismatch_penalty = 30 if (pn_match_level == "none" and found_pn) else 0
 
     home_bonus = _home_field_bonus(specs, url, snippet)
 

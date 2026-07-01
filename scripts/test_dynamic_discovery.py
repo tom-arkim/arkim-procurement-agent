@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.models import AssetSpecs
-from utils.sourcing import _build_search_query, _vendor_authority_score, _VENDOR_DOMAINS
+from utils.sourcing_archieved import _build_search_query, _vendor_authority_score, _VENDOR_DOMAINS
 
 try:
     from tavily import TavilyClient

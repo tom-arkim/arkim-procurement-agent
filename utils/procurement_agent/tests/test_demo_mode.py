@@ -1,0 +1,1190 @@
+"""
+DEMO_MODE allowlist middleware + email boot-refusal tests (the public demo spine).
+
+Two guards, both active ONLY when DEMO_MODE is truthy, both inert otherwise:
+  1. deny-by-default allowlist middleware in api_server — only the confirmed
+     demo routes reach their handler; everything else 403s (incl. /docs,
+     /openapi.json, mutation/admin/RFQ/email routes, and any unlisted route).
+     Fail-closed: a route not explicitly listed is DENIED, never open.
+  2. startup boot-refusal: api_server will not import under DEMO_MODE if
+     EMAIL_SEND_ENABLED is true (a public demo must not boot with email on).
+
+Isolation: each test imports api_server under a controlled env (DEMO_MODE /
+EMAIL_SEND_ENABLED set BEFORE a clean re-import, since the module reads them at
+import time) and points persistence + supplier_registry at a per-test temp DB, so
+the module's import-time create_all/_migrate_schema/_seed never touch real data.
+The standard `api` fixture in test_api_server.py imports with DEMO_MODE unset
+(inert) and is unaffected by anything here.
+"""
+import json
+import sys
+from unittest.mock import Mock
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import sessionmaker
+
+
+# Valid DEMO_MODE X-Session-Id tokens (16–64 chars of [A-Za-z0-9-]) — two distinct
+# ones so a test can prove cross-session isolation (A cannot read B's runs).
+_SID = "0123456789abcdef-test-session"
+_SID_OTHER = "other-session-0123456789abcdef"
+
+
+def _import_api_server_fresh(monkeypatch, tmp_path):
+    """Import api_server under a controlled env + isolated DB, regardless of
+    whether it was already imported earlier in the session.
+
+    The caller is expected to have set DEMO_MODE / EMAIL_SEND_ENABLED on the env
+    BEFORE calling (the module reads them at import time). Returns the imported
+    module with persistence globals re-bound to the temp DB so create_all /
+    _migrate_schema / _seed never touch real data."""
+    import importlib
+    from utils.procurement_agent.state import persistence
+
+    engine = persistence._make_engine(f"sqlite:///{tmp_path / 'demo.sqlite'}")
+    TestSession = sessionmaker(bind=engine, expire_on_commit=False)
+    persistence.Base.metadata.create_all(engine)
+    monkeypatch.setattr(persistence, "_engine", engine)
+    monkeypatch.setattr(persistence, "_SessionFactory", TestSession)
+
+    from utils import supplier_registry
+    monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(supplier_registry, "_DB_PATH", str(tmp_path / "supplier_registry.sqlite"))
+
+    # api_server reads env at import; force a clean re-import so it sees the env
+    # the test just set. Reload, then rebind the names api_server bound at import.
+    sys.modules.pop("api_server", None)
+    import api_server
+    importlib.reload(api_server)
+    monkeypatch.setattr(api_server, "_engine", engine)
+    monkeypatch.setattr(api_server, "_SessionFactory", TestSession)
+    monkeypatch.setattr(api_server, "_messages", {})
+    return api_server
+
+
+@pytest.fixture
+def demo_off(monkeypatch, tmp_path):
+    """api_server with DEMO_MODE unset — the middleware is INERT (no regression)."""
+    monkeypatch.delenv("DEMO_MODE", raising=False)
+    monkeypatch.setenv("EMAIL_SEND_ENABLED", "")
+    api = _import_api_server_fresh(monkeypatch, tmp_path)
+    assert api.DEMO_MODE is False
+    return TestClient(api.app), api
+
+
+@pytest.fixture
+def demo_on(monkeypatch, tmp_path):
+    """api_server with DEMO_MODE=true and email OFF — the allowlist is ACTIVE.
+
+    The TestClient carries a default X-Session-Id (a valid demo token) so the existing
+    allowlist/handler-reachability tests that POST /api/runs keep working now that a
+    DEMO_MODE write requires the header. Session-isolation tests that need a DIFFERENT
+    session override the header per-request (httpx merges with request headers winning);
+    tests that need NO header construct a fresh TestClient(api.app) without the default."""
+    monkeypatch.setenv("DEMO_MODE", "true")
+    monkeypatch.setenv("EMAIL_SEND_ENABLED", "")   # boot-refusal would fire otherwise
+    api = _import_api_server_fresh(monkeypatch, tmp_path)
+    assert api.DEMO_MODE is True
+    return TestClient(api.app, headers={"X-Session-Id": _SID}), api
+
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED (the property that matters most): dangerous routes -> 403, not 200.
+# ---------------------------------------------------------------------------
+
+class TestDemoAllowlistFailClosed:
+    def test_execute_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/runs/r1/execute").status_code == 403
+
+    def test_rfq_send_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/rfq-drafts/d1/send").status_code == 403
+
+    def test_put_asset_specs_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.put("/api/runs/r1/asset-specs", json={"asset_specs": {"x": 1}})
+        assert r.status_code == 403
+
+    def test_order_now_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/order-now", json={"candidate_id": "c", "tier": 1})
+        assert r.status_code == 403
+
+    def test_group_approve_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/groups/g1/approve",
+                        json={"approver_name": "a", "approver_role": "r"})
+        assert r.status_code == 403
+
+    def test_approval_rules_post_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/approval-rules",
+                        json={"facility_id": "f", "threshold": 0})
+        assert r.status_code == 403
+
+    def test_debug_llm_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/api/debug/llm").status_code == 403
+
+    def test_select_candidate_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/select-candidate",
+                        json={"candidate_id": "c", "tier": 1})
+        assert r.status_code == 403
+
+    def test_approve_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/approve",
+                        json={"approver_name": "a", "approver_role": "r"})
+        assert r.status_code == 403
+
+    def test_admin_ping_is_403(self, demo_on):
+        # defense-in-depth: allowlist-blocks even though require_admin already gates it.
+        client, _ = demo_on
+        assert client.get("/api/admin/ping").status_code == 403
+
+    def test_dev_reseed_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/dev/reseed-handoffs").status_code == 403
+
+    def test_requests_front_door_is_403(self, demo_on):
+        # /api/requests is NOT used by the proc demo frontend -> stays BLOCK.
+        client, _ = demo_on
+        r = client.post("/api/requests", json={"parts": []})
+        assert r.status_code == 403
+
+    def test_request_confirmation_is_403(self, demo_on):
+        # Mock-only but not called by the proc demo path -> stays BLOCK.
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/request-confirmation", json={"candidate_ids": ["c"]})
+        assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# SCHEMA-LEAK CLOSED: /docs + /openapi.json -> 403 (the auto-route catch).
+# ---------------------------------------------------------------------------
+
+class TestDemoSchemaLeakClosed:
+    def test_docs_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/docs").status_code == 403
+
+    def test_openapi_json_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/openapi.json").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# DENY-BY-DEFAULT PROOF: it's an allowlist, not a blocklist. A path nobody
+# listed and nobody explicitly tested is still 403 -> a missed route fails closed.
+# ---------------------------------------------------------------------------
+
+class TestDemoDenyByDefault:
+    def test_unlisted_made_up_path_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/api/some-route-that-does-not-exist-in-allowlist").status_code == 403
+
+    def test_unlisted_made_up_mutation_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/totally-uninvented-route").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# ALLOWLIST WORKS: each confirmed demo route reaches its handler (not 403).
+# ---------------------------------------------------------------------------
+
+class TestDemoAllowlistWorks:
+    def test_health_reaches_handler(self, demo_on):
+        client, _ = demo_on
+        r = client.get("/api/health")
+        assert r.status_code == 200
+        assert r.json()["status"] == "ok"
+
+    def test_facilities_reaches_handler(self, demo_on):
+        client, _ = demo_on
+        r = client.get("/api/facilities")
+        assert r.status_code == 200
+        assert isinstance(r.json(), list) and r.json()
+
+    def test_create_run_reaches_handler(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs", json={"facility_id": "fac-stockton"})
+        assert r.status_code == 201
+        assert r.json()["phase"] == "intake"
+
+    def test_get_run_reaches_handler(self, demo_on):
+        client, _ = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.get(f"/api/runs/{rid}")
+        assert r.status_code == 200
+        assert r.json()["id"] == rid
+
+    def test_messages_reaches_handler(self, demo_on, monkeypatch):
+        client, api = demo_on
+        # Mock IntakeAgent so the handler returns without a live Anthropic call.
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "Which manufacturer?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/messages", json={"content": "a pump"})
+        assert r.status_code == 200   # reaches handler (not 403)
+
+    def test_confirm_intake_reaches_handler(self, demo_on, monkeypatch):
+        client, api = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        # Seed specs so confirm-intake passes the 422 "no specs" guard and the
+        # 409 phase guard — proving the handler actually ran (a 422/409 here would
+        # be a handler response, not the middleware's 403).
+        SF = api._SessionFactory
+        ORM = api.SourcingRunORM
+        with SF() as s:
+            run = s.get(ORM, rid)
+            run.asset_specs_json = json.dumps({"manufacturer": "Goulds", "part_number": "PN-1"})
+            s.commit()
+        # Keep the background sourcing task offline (no Tavily/Anthropic key).
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        r = client.post(f"/api/runs/{rid}/confirm-intake")
+        assert r.status_code == 200
+        assert r.json()["phase"] == "sourcing"
+
+    def test_groups_get_reaches_handler(self, demo_on):
+        client, _ = demo_on
+        # Unknown group -> 404 from the handler, NOT 403 from the middleware.
+        # (A 404 is a handler response — proves the route is allowlisted.)
+        r = client.get("/api/groups/no-such-group")
+        assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# PATH-MATCH SAFETY: the matcher must not let extra trailing segments through an
+# allow rule. /api/runs/{id}/execute is DENIED under the /api/runs/{id} GET rule.
+# ---------------------------------------------------------------------------
+
+class TestDemoPathMatchSafety:
+    def test_execute_under_run_get_rule_is_denied(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/api/runs/r1/execute").status_code == 403
+        assert client.post("/api/runs/r1/execute").status_code == 403
+
+    def test_extra_segment_on_health_is_denied(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/api/health/extra").status_code == 403
+
+    def test_extra_segment_on_facilities_is_denied(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/api/facilities/extra").status_code == 403
+
+    def test_method_mismatch_is_denied(self, demo_on):
+        client, _ = demo_on
+        # GET /api/runs is not on the list (only POST /api/runs is).
+        assert client.get("/api/runs").status_code == 403
+        # PUT /api/health is not on the list (only GET is).
+        assert client.put("/api/health").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE OFF (no regression): with DEMO_MODE unset the middleware is inert —
+# every route behaves exactly as today. A blocked-under-demo route returns its
+# NORMAL (non-403) response, not the spine's 403.
+# ---------------------------------------------------------------------------
+
+class TestDemoModeOffNoRegression:
+    def test_debug_llm_reaches_handler_when_off(self, demo_off):
+        client, _ = demo_off
+        # /api/debug/llm is 403 under DEMO_MODE; with it off the handler runs and
+        # returns 200 (ok:false — no key in the test env), NOT 403.
+        r = client.get("/api/debug/llm")
+        assert r.status_code != 403
+        assert r.status_code == 200
+
+    def test_docs_served_when_off(self, demo_off):
+        client, _ = demo_off
+        # /docs is 403 under DEMO_MODE; with it off FastAPI serves it normally.
+        assert client.get("/docs").status_code == 200
+
+    def test_openapi_served_when_off(self, demo_off):
+        client, _ = demo_off
+        r = client.get("/openapi.json")
+        assert r.status_code == 200
+        assert "paths" in r.json()
+
+    def test_create_run_still_201_when_off(self, demo_off):
+        client, _ = demo_off
+        assert client.post("/api/runs", json={}).status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# EMAIL ASSERTION: under DEMO_MODE the app refuses to boot if email send is on.
+# The conftest safety net forces EMAIL_SEND_ENABLED off for every test, so the
+# only way a refusal can fire here is the value the test sets on the module
+# attribute at import time.
+# ---------------------------------------------------------------------------
+
+class TestEmailBootRefusal:
+    def _import_raises_refusal(self, monkeypatch, tmp_path, demo_env, email_on):
+        """True iff importing api_server under the given env raises the refusal.
+
+        api_server reads DEMO_MODE from the env at import, and reads the email
+        gate as `email_sender.EMAIL_SEND_ENABLED` (the module attribute) at
+        import. We control both: DEMO_MODE via setenv, the email gate via a
+        direct setattr on the email_sender module (robust against the conftest
+        autouse safety net, which forces the attribute False — our setattr runs
+        after it and wins). api_server is popped so it re-imports and re-runs
+        its top-level assertion against the values we just set."""
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        if demo_env is not None:
+            monkeypatch.setenv("DEMO_MODE", demo_env)
+        import utils.email_sender as _es
+        monkeypatch.setattr(_es, "EMAIL_SEND_ENABLED", bool(email_on))
+        sys.modules.pop("api_server", None)
+        try:
+            _import_api_server_fresh(monkeypatch, tmp_path)
+            return False   # imported without raising
+        except RuntimeError as exc:
+            return "email send must be disabled in DEMO_MODE" in str(exc)
+        finally:
+            # Restore email_sender to the conftest-safe OFF state for the rest of
+            # the session, and drop api_server so no test reuses a bad copy.
+            sys.modules.pop("api_server", None)
+            monkeypatch.setattr(_es, "EMAIL_SEND_ENABLED", False)
+
+    def test_demo_on_email_on_refuses_to_start(self, monkeypatch, tmp_path):
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "true", True) is True
+
+    def test_demo_on_email_off_starts_fine(self, monkeypatch, tmp_path):
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "true", False) is False
+
+    def test_demo_off_email_on_starts_fine(self, monkeypatch, tmp_path):
+        # Normal ops: no DEMO_MODE -> the assertion never fires, even with email on.
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "", True) is False
+
+    def test_demo_off_email_off_starts_fine(self, monkeypatch, tmp_path):
+        assert self._import_raises_refusal(monkeypatch, tmp_path, "", False) is False
+
+
+# ---------------------------------------------------------------------------
+# APOLLO CREDIT-SPEND BLOCK (FIX 2): under DEMO_MODE the app (a) refuses to
+# boot if APOLLO_API_KEY is present in the env, and (b) constructs SourcingAgent
+# with apollo_api_key="" — overriding ApolloClient's env read so Apollo is
+# disabled even if the key somehow leaks in. Both guards are inert when
+# DEMO_MODE is off. The conftest autouse net sets APOLLO_API_KEY="" for every
+# test, so demo_on boots by default; a refusal can only fire when a test sets a
+# real value (its setenv runs after the autouse setup and wins).
+# ---------------------------------------------------------------------------
+
+class TestApolloBootRefusal:
+    def _import_raises_apollo_refusal(self, monkeypatch, tmp_path, demo_env, apollo_key):
+        """True iff importing api_server raises the Apollo boot refusal.
+
+        api_server reads DEMO_MODE and APOLLO_API_KEY from the env at import.
+        We control both via setenv (robust against the conftest autouse net,
+        which sets APOLLO_API_KEY="" — our setenv runs after it and wins).
+        api_server is popped so it re-imports and re-runs its top-level
+        assertion against the values we just set."""
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+        if demo_env is not None:
+            monkeypatch.setenv("DEMO_MODE", demo_env)
+        monkeypatch.setenv("APOLLO_API_KEY", apollo_key)
+        sys.modules.pop("api_server", None)
+        try:
+            _import_api_server_fresh(monkeypatch, tmp_path)
+            return False   # imported without raising
+        except RuntimeError as exc:
+            return "APOLLO_API_KEY must be unset in DEMO_MODE" in str(exc)
+        finally:
+            # Drop api_server so no test reuses a copy bound to the refusal env.
+            sys.modules.pop("api_server", None)
+
+    def test_demo_on_apollo_key_set_refuses_to_start(self, monkeypatch, tmp_path):
+        # A real key under DEMO_MODE -> the boot assertion refuses to start.
+        assert self._import_raises_apollo_refusal(
+            monkeypatch, tmp_path, "true", "real-key") is True
+
+    def test_demo_on_apollo_key_unset_starts_fine(self, monkeypatch, tmp_path):
+        # Empty key under DEMO_MODE -> no refusal (the conftest default state).
+        assert self._import_raises_apollo_refusal(
+            monkeypatch, tmp_path, "true", "") is False
+
+    def test_demo_off_apollo_key_set_starts_fine(self, monkeypatch, tmp_path):
+        # Normal ops: no DEMO_MODE -> the assertion never fires, even with a key.
+        assert self._import_raises_apollo_refusal(
+            monkeypatch, tmp_path, "", "real-key") is False
+
+
+# ---------------------------------------------------------------------------
+# CONSTRUCTION (FIX 2 part b — the suspenders): under DEMO_MODE the background
+# sourcing path constructs SourcingAgent with apollo_api_key="" (NOT None) so
+# ApolloClient's env read is overridden and Apollo is disabled. When DEMO_MODE
+# is off it passes None (falls through to env — unchanged). SourcingAgent is
+# imported function-locally inside _run_sourcing_background, so the recording
+# Mock is patched onto its source module (the same seam as test_api_server's
+# _mock_sourcing_pipeline). An all-empty-tiers result keeps the comparison
+# `work` list empty -> no SpecComparisonAgent call, no network.
+# ---------------------------------------------------------------------------
+
+class TestApolloConstructionForcedOff:
+    _EMPTY_RESULT = {
+        "tier_1": {"results": [], "count": 0},
+        "tier_2": {"results": [], "count": 0},
+        "tier_3": {"results": [], "count": 0},
+    }
+
+    def _recording_sourcing_agent(self, monkeypatch):
+        """Patch SourcingAgent with a recording Mock; return the constructor
+        Mock so a test can inspect call kwargs. .run() returns an all-empty
+        result so the comparison step is a no-op."""
+        import utils.procurement_agent.agents.sourcing_agent as sa_mod
+        agent = Mock()
+        agent.run.return_value = self._EMPTY_RESULT
+        constructor = Mock(return_value=agent)
+        monkeypatch.setattr(sa_mod, "SourcingAgent", constructor)
+        return constructor
+
+    def _seed_specs_and_run(self, api, monkeypatch, tmp_path):
+        """Create a run, seed asset specs on the ORM, point known_parts at an
+        empty temp store (guaranteed cache miss -> the discovery path runs and
+        constructs SourcingAgent), then invoke _run_sourcing_background directly."""
+        from utils import known_parts
+        monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
+
+        client = TestClient(api.app, headers={"X-Session-Id": _SID})
+        rid = client.post("/api/runs", json={}).json()["id"]
+        specs = {"manufacturer": "Goulds", "part_number": "3196"}
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as session:
+            run = session.get(ORM, rid)
+            run.asset_specs_json = json.dumps(specs)
+            session.commit()
+
+        constructor = self._recording_sourcing_agent(monkeypatch)
+        api._run_sourcing_background(rid, specs, 0.3, "unknown")
+        return constructor
+
+    def test_construction_forces_apollo_off_under_demo(self, demo_on, monkeypatch, tmp_path):
+        _, api = demo_on
+        constructor = self._seed_specs_and_run(api, monkeypatch, tmp_path)
+        assert constructor.call_count == 1
+        _, kwargs = constructor.call_args
+        # "" (not None) overrides ApolloClient's env read -> Apollo disabled.
+        assert kwargs.get("apollo_api_key") == ""
+
+    def test_construction_passes_none_when_demo_off(self, demo_off, monkeypatch, tmp_path):
+        _, api = demo_off
+        constructor = self._seed_specs_and_run(api, monkeypatch, tmp_path)
+        assert constructor.call_count == 1
+        _, kwargs = constructor.call_args
+        # None falls through to the env read inside ApolloClient (unchanged ops).
+        assert kwargs.get("apollo_api_key") is None
+
+
+# ---------------------------------------------------------------------------
+# LINKAGE: prove the "" actually disables Apollo. ApolloClient.enabled is a
+# property returning bool(self._api_key) — "" is falsy -> disabled. This is the
+# exact construction SourcingAgent performs (self._apollo = ApolloClient(...)),
+# so it proves the forced-off path can't spend, not merely that "" was passed.
+# ---------------------------------------------------------------------------
+
+class TestApolloClientEmptyKeyDisables:
+    def test_empty_key_disables_apollo_client(self):
+        from utils.apollo_client import ApolloClient
+        assert ApolloClient(api_key="").enabled is False
+
+    def test_real_key_enables_apollo_client(self):
+        # Contrast: a real key leaves Apollo enabled (the state DEMO_MODE blocks).
+        from utils.apollo_client import ApolloClient
+        assert ApolloClient(api_key="real-key").enabled is True
+
+
+# ---------------------------------------------------------------------------
+# SOURCING-BYPASS BLOCK (FIX 3): under DEMO_MODE create_run ignores client-
+# supplied asset_specs (forced bare intake) — a script can't POST specs then
+# confirm-intake straight into a full sourcing run with no intake LLM call.
+# group_id is still honored (basket-label only, no spend risk; the demo basket
+# view needs it). Inert when DEMO_MODE is off: asset_specs honored as today.
+# ---------------------------------------------------------------------------
+
+class TestDemoIgnoreClientAssetSpecs:
+    _SPECS = {"manufacturer": "Goulds", "part_number": "3196"}
+
+    def test_demo_on_ignores_seeded_specs_bare_intake(self, demo_on):
+        # The run is created (route works) but carries NO specs — the seed ignored.
+        client, _ = demo_on
+        r = client.post("/api/runs", json={"asset_specs": self._SPECS})
+        assert r.status_code == 201
+        assert r.json()["phase"] == "intake"
+        rid = r.json()["id"]
+        detail = client.get(f"/api/runs/{rid}").json()
+        assert detail["asset_specs"] is None
+
+    def test_demo_on_seeded_specs_cannot_skip_intake(self, demo_on):
+        # The bypass is closed: with specs ignored, confirm-intake's 422 "no specs"
+        # guard fires instead of advancing to sourcing.
+        client, _ = demo_on
+        rid = client.post("/api/runs", json={"asset_specs": self._SPECS}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/confirm-intake")
+        assert r.status_code == 422
+        assert "spec" in r.json()["detail"].lower()
+
+    def test_demo_on_group_id_preserved_with_specs_ignored(self, demo_on):
+        # group_id is honored even when asset_specs is dropped — the basket view
+        # (allowlisted, used by the demo) still groups this run.
+        client, api = demo_on
+        gid = "11111111-2222-3333-4444-555555555555"
+        rid = client.post(
+            "/api/runs", json={"group_id": gid, "asset_specs": self._SPECS}
+        ).json()["id"]
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as session:
+            run = session.get(ORM, rid)
+            assert run.group_id == gid          # basket label preserved
+            assert run.asset_specs_json is None  # seed still ignored
+
+    def test_demo_off_honors_seeded_specs_no_regression(self, demo_off):
+        # Normal ops: asset_specs is honored exactly as today (real fan-out unbroken).
+        client, _ = demo_off
+        rid = client.post("/api/runs", json={"asset_specs": self._SPECS}).json()["id"]
+        detail = client.get(f"/api/runs/{rid}").json()
+        assert detail["asset_specs"] == self._SPECS
+
+
+# ---------------------------------------------------------------------------
+# CORS PREFLIGHT UNDER DEMO_MODE (FIX 2 — cross-origin demo deploy). The demo
+# allowlist middleware is OUTERMOST (runs before CORSMiddleware). Without an
+# OPTIONS exemption every browser preflight 403s (the allowlist has no OPTIONS
+# entries) -> the cross-origin frontend can't reach the API. The fix exempts
+# ONLY OPTIONS — letting preflight reach CORSMiddleware (the next layer inward),
+# which answers it. Every non-OPTIONS request stays under deny-by-default.
+# Safe because no route in the app handles OPTIONS (all routes are GET/POST/PUT):
+# an OPTIONS only ever hits preflight (Allow-* headers) or 405s — never real work.
+# ---------------------------------------------------------------------------
+
+# Default demo frontend origin (must match api_server's DEMO_FRONTEND_ORIGIN default).
+_DEMO_ORIGIN = "https://procurement-dev.arkim.ai"
+
+_PREFLIGHT_HEADERS = {
+    "Origin": _DEMO_ORIGIN,
+    "Access-Control-Request-Method": "POST",
+    "Access-Control-Request-Headers": "content-type",
+}
+
+
+class TestDemoCorsPreflightWorks:
+    def test_options_demo_route_is_not_403(self, demo_on):
+        # Preflight to an allowlisted route reaches CORS and returns CORS headers,
+        # NOT the middleware's 403.
+        client, _ = demo_on
+        r = client.options("/api/runs", headers=_PREFLIGHT_HEADERS)
+        assert r.status_code != 403
+        assert r.status_code in (200, 204)
+        assert r.headers.get("access-control-allow-origin") == _DEMO_ORIGIN
+        assert r.headers.get("access-control-allow-methods") is not None
+
+    def test_options_non_demo_route_reaches_cors(self, demo_on):
+        # Preflight is path-agnostic in CORSMiddleware: even to a denied route it
+        # returns CORS headers (harmless — the REAL request is gated, see below).
+        client, _ = demo_on
+        r = client.options("/api/runs/r1/execute", headers=_PREFLIGHT_HEADERS)
+        assert r.status_code != 403
+        # CORS answered (preflight) — Allow-Origin present.
+        assert r.headers.get("access-control-allow-origin") == _DEMO_ORIGIN
+
+    def test_demo_origin_in_allowed_origins_under_demo(self, demo_on):
+        # The demo frontend origin is in allow_origins under DEMO_MODE (default env).
+        # CORSMiddleware echoes the request Origin when it's an allowed origin.
+        client, _ = demo_on
+        r = client.options("/api/health", headers=_PREFLIGHT_HEADERS)
+        assert r.headers.get("access-control-allow-origin") == _DEMO_ORIGIN
+
+    def test_localhost_origin_works_when_demo_off(self, demo_off):
+        # No regression: with DEMO_MODE off, localhost is still an allowed origin
+        # and the middleware is inert (no 403, CORS answers the localhost preflight).
+        client, _ = demo_off
+        r = client.options(
+            "/api/health",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert r.status_code != 403
+        assert r.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+
+class TestDemoCorsNoOptionsBypass:
+    def test_options_does_not_execute_handler(self, demo_on):
+        # OPTIONS to a dangerous route must NOT run the handler — no state change.
+        # /api/runs/{id}/execute advances a run to sourcing; OPTIONS must not.
+        client, api = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        # OPTIONS the execute route — exempted by the preflight carve-out.
+        r = client.options(f"/api/runs/{rid}/execute", headers=_PREFLIGHT_HEADERS)
+        assert r.status_code != 403   # passed the allowlist (OPTIONS exempted)
+        # No handler ran: the run is STILL in intake (execute would move it to
+        # sourcing). A CORS/405 response carries no execute side effect.
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as session:
+            run = session.get(ORM, rid)
+            assert run.current_phase == "intake"   # unchanged — OPTIONS did nothing
+
+    def test_real_execute_still_403_after_options_exempt(self, demo_on):
+        # The whole point: the OPTIONS exemption did NOT open the real-method path.
+        # A real POST /execute is still 403'd by the allowlist.
+        client, _ = demo_on
+        assert client.post("/api/runs/r1/execute").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# FAIL-CLOSED RE-PROOF: the OPTIONS exemption must not have weakened any real
+# route. These re-run the exact fail-closed assertions from
+# TestDemoAllowlistFailClosed to prove the gate is intact post-FIX 2.
+# ---------------------------------------------------------------------------
+
+class TestDemoFailClosedAfterCorsExempt:
+    # Re-asserts the dangerous routes are still 403 under DEMO_MODE. Duplicated
+    # rather than parametrized against the original class so a regression here
+    # names the CORS change as the cause, not a vague allowlist failure.
+    def test_execute_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/runs/r1/execute").status_code == 403
+
+    def test_rfq_send_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.post("/api/rfq-drafts/d1/send").status_code == 403
+
+    def test_put_asset_specs_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.put("/api/runs/r1/asset-specs", json={"asset_specs": {"x": 1}})
+        assert r.status_code == 403
+
+    def test_order_now_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/order-now",
+                        json={"candidate_id": "c", "tier": 1})
+        assert r.status_code == 403
+
+    def test_group_approve_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/groups/g1/approve",
+                        json={"approver_name": "a", "approver_role": "r"})
+        assert r.status_code == 403
+
+    def test_select_candidate_is_403(self, demo_on):
+        client, _ = demo_on
+        r = client.post("/api/runs/r1/select-candidate",
+                        json={"candidate_id": "c", "tier": 1})
+        assert r.status_code == 403
+
+    def test_docs_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/docs").status_code == 403
+
+    def test_unlisted_path_is_403(self, demo_on):
+        client, _ = demo_on
+        assert client.get("/api/some-route-that-does-not-exist").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# SESSION ISOLATION + IDOR (FIX A): under DEMO_MODE an ephemeral per-visitor
+# X-Session-Id is stamped on a run at birth and scoped on every read/write, so a
+# leaked run/group id can't let another visitor read or act on someone else's run.
+# Existence-oracle discipline: a mismatched/missing/NULL-session access returns 404,
+# NOT 403 (a 404 is indistinguishable from "no such id"). All guards inert when off.
+# ---------------------------------------------------------------------------
+
+class TestDemoSessionWriteRequiresHeader:
+    def test_create_without_session_header_is_422(self, demo_on):
+        # A DEMO_MODE write (run birth) MUST carry a valid X-Session-Id so the run can
+        # be scoped to its creator. A fresh client with no default header -> 422.
+        _, api = demo_on
+        client = TestClient(api.app)   # no default session header
+        r = client.post("/api/runs", json={})
+        assert r.status_code == 422
+        assert "session" in r.json()["detail"].lower()
+
+    def test_create_with_malformed_session_is_422(self, demo_on):
+        # Charset/length bounded — junk is rejected, not silently accepted.
+        _, api = demo_on
+        client = TestClient(api.app)
+        r = client.post("/api/runs", json={}, headers={"X-Session-Id": "bad id!!"})
+        assert r.status_code == 422
+        assert "session" in r.json()["detail"].lower()
+
+    def test_create_with_valid_session_is_201(self, demo_on):
+        # A valid header births the run normally (the allowlist test still holds).
+        client, _ = demo_on   # default header is _SID
+        r = client.post("/api/runs", json={})
+        assert r.status_code == 201
+        assert r.json()["phase"] == "intake"
+
+
+class TestDemoSessionReadIsolation:
+    def test_get_run_same_session_200(self, demo_on):
+        # Owner reads their own run -> 200.
+        client, _ = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        assert client.get(f"/api/runs/{rid}").status_code == 200
+
+    def test_get_run_cross_session_404_not_403(self, demo_on):
+        # The core IDOR fix: a different session gets 404 (NOT 403 — no existence oracle).
+        client, _ = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.get(f"/api/runs/{rid}", headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+    def test_get_run_no_session_header_404(self, demo_on):
+        # No header at all -> can't own anything -> 404 (not 422 on a read; the
+        # 422 requirement is write-only). A misconfigured frontend sees 404s, not errors.
+        _, api = demo_on
+        client_with_sid, _ = demo_on
+        rid = client_with_sid.post("/api/runs", json={}).json()["id"]
+        client = TestClient(api.app)   # no default header
+        assert client.get(f"/api/runs/{rid}").status_code == 404
+
+    def test_get_run_unknown_id_404(self, demo_on):
+        # A genuinely-nonexistent id is also 404 — indistinguishable from not-owned.
+        client, _ = demo_on
+        assert client.get("/api/runs/no-such-run-id").status_code == 404
+
+    def test_null_session_row_404_to_demo_visitor(self, demo_on):
+        # A row with NULL session_id (a seeded maintenance run, or any pre-column run)
+        # is not owned by any demo visitor -> 404. Seeds a NULL-session run directly on
+        # the ORM (the way _seed_demo_maintenance_run does, bypassing the session stamp).
+        client, api = demo_on
+        import uuid as _uuid
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            s.add(ORM(
+                id=str(_uuid.uuid4()),
+                facility_id="fac-stockton",
+                current_phase="intake",
+                urgency_factor=0.3,
+                warranty_status="unknown",
+                session_id=None,   # the seeded-run shape
+                initiated_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc),
+                updated_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc),
+            ))
+            s.commit()
+            null_rid = s.query(ORM).filter(ORM.session_id.is_(None)).first().id
+        # Any demo visitor (any session) -> 404, never the run's detail.
+        assert client.get(f"/api/runs/{null_rid}").status_code == 404
+        assert client.get(
+            f"/api/runs/{null_rid}", headers={"X-Session-Id": _SID_OTHER}
+        ).status_code == 404
+
+
+class TestDemoSessionRunActionIsolation:
+    """messages / upload / confirm-intake are scoped to the run's owner: a cross-session
+    caller gets 404, not 403 (no oracle). The session check runs BEFORE any other guard."""
+
+    def test_messages_cross_session_404(self, demo_on, monkeypatch):
+        client, api = demo_on
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "Which manufacturer?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/messages", json={"content": "a pump"},
+                        headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+        agent.run.assert_not_called()   # the handler never reached IntakeAgent
+
+    def test_confirm_intake_cross_session_404(self, demo_on, monkeypatch):
+        client, api = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        # Seed specs so the only thing that could 422 is the session check — proves the
+        # session 404 fires first (a 422 here would mean the session guard ran second).
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            run = s.get(ORM, rid)
+            run.asset_specs_json = json.dumps({"manufacturer": "Goulds", "part_number": "PN-1"})
+            s.commit()
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        r = client.post(f"/api/runs/{rid}/confirm-intake",
+                        headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+    def test_upload_cross_session_404(self, demo_on, monkeypatch):
+        client, api = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        # A tiny in-memory image; the session 404 fires before any vision extraction.
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("np.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"text": "a pump"},
+            headers={"X-Session-Id": _SID_OTHER},
+        )
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+
+class TestDemoSessionGroupIsolation:
+    """GET /api/groups/{group_id} is scoped to the requesting session by FILTERING the
+    basket's runs to those the session owns. A visitor only ever sees their OWN runs in
+    any basket — even an attacker who learns a victim's group_id AND injects their own
+    run into it sees only their own run, never the victim's (no leak, no DoS)."""
+
+    def test_group_same_session_200(self, demo_on):
+        client, _ = demo_on
+        gid = "11111111-2222-3333-4444-555555555555"
+        client.post("/api/runs", json={"group_id": gid})
+        r = client.get(f"/api/groups/{gid}")
+        assert r.status_code == 200
+        assert r.json()["run_count"] == 1
+
+    def test_group_cross_session_404(self, demo_on):
+        client, _ = demo_on
+        gid = "22222222-3333-4444-5555-666666666666"
+        client.post("/api/runs", json={"group_id": gid})   # owned by _SID
+        r = client.get(f"/api/groups/{gid}", headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+    def test_group_filters_to_session_owned_runs_only(self, demo_on):
+        # Attacker (_SID_OTHER) injects a run into the victim's (_SID) basket. Each
+        # session's GET shows ONLY its own runs — the attacker never sees the victim's
+        # run, and the victim's basket view excludes the attacker's injected run.
+        client, _ = demo_on
+        gid = "33333333-4444-5555-6666-777777777777"
+        victim_rid = client.post("/api/runs", json={"group_id": gid}).json()["id"]
+        attacker_rid = client.post(
+            "/api/runs", json={"group_id": gid}, headers={"X-Session-Id": _SID_OTHER}
+        ).json()["id"]
+        # Victim sees only their own run (attacker's injected run filtered out).
+        v = client.get(f"/api/groups/{gid}").json()
+        assert v["run_count"] == 1
+        assert v["runs"][0]["run_id"] == victim_rid
+        # Attacker sees only their own run (victim's run never leaks).
+        a = client.get(f"/api/groups/{gid}", headers={"X-Session-Id": _SID_OTHER}).json()
+        assert a["run_count"] == 1
+        assert a["runs"][0]["run_id"] == attacker_rid
+
+
+class TestDemoSessionOffNoRegression:
+    """With DEMO_MODE off: no session_id is stamped, no scoping runs — every route
+    behaves exactly as today. No header is required or honored."""
+
+    def test_create_no_header_201_when_off(self, demo_off):
+        client, _ = demo_off
+        assert client.post("/api/runs", json={}).status_code == 201
+
+    def test_get_run_no_header_200_when_off(self, demo_off):
+        client, _ = demo_off
+        rid = client.post("/api/runs", json={}).json()["id"]
+        assert client.get(f"/api/runs/{rid}").status_code == 200
+
+    def test_get_run_with_header_200_when_off(self, demo_off):
+        # A header is IGNORED when DEMO_MODE is off (no scoping) — sending one is harmless.
+        client, _ = demo_off
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.get(f"/api/runs/{rid}", headers={"X-Session-Id": _SID})
+        assert r.status_code == 200
+
+    def test_session_id_not_stamped_when_off(self, demo_off):
+        # The column stays NULL when DEMO_MODE is off (no demo plumbing active).
+        client, api = demo_off
+        rid = client.post("/api/runs", json={}).json()["id"]
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            assert s.get(ORM, rid).session_id is None
+
+
+# ---------------------------------------------------------------------------
+# RATE LIMITING / RUN CAP (FIX B): under DEMO_MODE a per-session cap bounds the
+# cost-DoS (each sourcing run is ~13 external calls). Cap run creation (POST
+# /api/runs) and the spend trigger (confirm-intake). 429 + Retry-After, not 403.
+# Inert when DEMO_MODE is off. The store is keyed (scope, key) so a future per-IP
+# cap is a new scope+key, not a refactor.
+# ---------------------------------------------------------------------------
+
+class TestDemoRunCreationCap:
+    def test_under_cap_allows_creates(self, demo_on):
+        # Default DEMO_MAX_RUNS_PER_SESSION=10: the first 10 creates all 201.
+        client, _ = demo_on
+        for _ in range(10):
+            assert client.post("/api/runs", json={}).status_code == 201
+
+    def test_over_cap_429_with_retry_after(self, demo_on):
+        # The 11th create in the same session -> 429 with a Retry-After header.
+        client, _ = demo_on
+        for _ in range(10):
+            client.post("/api/runs", json={})
+        r = client.post("/api/runs", json={})
+        assert r.status_code == 429
+        assert r.headers.get("retry-after") is not None
+        assert "limit" in r.json()["detail"].lower()
+
+    def test_cap_is_per_session(self, demo_on):
+        # A second session has its OWN counter — hitting the cap in _SID does not
+        # deny _SID_OTHER (the store is keyed by session, not global).
+        client, _ = demo_on
+        for _ in range(10):
+            client.post("/api/runs", json={})
+        # _SID is at its cap; _SID_OTHER can still create.
+        r = client.post("/api/runs", json={}, headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 201
+
+    def test_cap_env_configurable(self, demo_on, monkeypatch):
+        # The cap is read from the module global at call time -> override it and the
+        # new limit takes effect without a re-import.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_RUNS_PER_SESSION", 2)
+        assert client.post("/api/runs", json={}).status_code == 201
+        assert client.post("/api/runs", json={}).status_code == 201
+        assert client.post("/api/runs", json={}).status_code == 429
+
+    def test_denied_create_does_not_increment(self, demo_on, monkeypatch):
+        # A rejected (429) create does not itself count — the counter stops at the cap
+        # rather than climbing on every rejected retry. Set cap=1: 1 ok, then N x 429,
+        # and a fresh session still gets its full 1.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_RUNS_PER_SESSION", 1)
+        assert client.post("/api/runs", json={}).status_code == 201
+        for _ in range(3):
+            assert client.post("/api/runs", json={}).status_code == 429
+        # A different session is unaffected (proves the 429s didn't bump a global).
+        assert client.post(
+            "/api/runs", json={}, headers={"X-Session-Id": _SID_OTHER}
+        ).status_code == 201
+
+
+class TestDemoSourcingCap:
+    """confirm-intake is the spend trigger (~13 external calls). Capped per session."""
+
+    def _seed_and_confirm(self, client, api, monkeypatch):
+        """Create a run, seed specs, confirm-intake (background mocked offline)."""
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        rid = client.post("/api/runs", json={}).json()["id"]
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            s.get(ORM, rid).asset_specs_json = json.dumps(
+                {"manufacturer": "Goulds", "part_number": "PN-1"})
+            s.commit()
+        return client.post(f"/api/runs/{rid}/confirm-intake")
+
+    def test_under_cap_allows_sourcing(self, demo_on, monkeypatch):
+        # Default DEMO_MAX_SOURCING_PER_SESSION=5: the first 5 confirms all 200.
+        client, api = demo_on
+        for _ in range(5):
+            r = self._seed_and_confirm(client, api, monkeypatch)
+            assert r.status_code == 200
+            assert r.json()["phase"] == "sourcing"
+
+    def test_over_cap_429(self, demo_on, monkeypatch):
+        # The 6th sourcing in the same session -> 429 with Retry-After.
+        client, api = demo_on
+        for _ in range(5):
+            self._seed_and_confirm(client, api, monkeypatch)
+        r = self._seed_and_confirm(client, api, monkeypatch)
+        assert r.status_code == 429
+        assert r.headers.get("retry-after") is not None
+
+    def test_cap_env_configurable(self, demo_on, monkeypatch):
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_SOURCING_PER_SESSION", 2)
+        for _ in range(2):
+            assert self._seed_and_confirm(client, api, monkeypatch).status_code == 200
+        assert self._seed_and_confirm(client, api, monkeypatch).status_code == 429
+
+    def test_409_refire_does_not_count(self, demo_on, monkeypatch):
+        # A confirm-intake on a run already past intake hits 409 BEFORE the cap check,
+        # so it must NOT increment the sourcing counter. With cap=2: confirm rid (200,
+        # counter=1), re-fire rid (409, must not count), confirm rid2 (200 -> counter=2,
+        # only possible if the 409 didn't burn the second slot), then rid3 -> 429.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_SOURCING_PER_SESSION", 2)
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+
+        def _seed(rid):
+            with SF() as s:
+                s.get(ORM, rid).asset_specs_json = json.dumps(
+                    {"manufacturer": "Goulds", "part_number": "PN-1"})
+                s.commit()
+
+        rid = client.post("/api/runs", json={}).json()["id"]
+        _seed(rid)
+        assert client.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        # Re-fire on the same (now sourcing) run -> 409, NOT 429, and doesn't count.
+        assert client.post(f"/api/runs/{rid}/confirm-intake").status_code == 409
+        # A second fresh run can still source (the 409 didn't consume the 2nd slot).
+        rid2 = client.post("/api/runs", json={}).json()["id"]
+        _seed(rid2)
+        assert client.post(f"/api/runs/{rid2}/confirm-intake").status_code == 200
+        # Now the cap (2) is genuinely reached -> a third is 429.
+        rid3 = client.post("/api/runs", json={}).json()["id"]
+        _seed(rid3)
+        assert client.post(f"/api/runs/{rid3}/confirm-intake").status_code == 429
+
+
+class TestDemoRateLimitOffNoRegression:
+    def test_no_run_cap_when_off(self, demo_off, monkeypatch):
+        # With DEMO_MODE off the cap is inert — well past the demo default, no 429.
+        client, api = demo_off
+        for _ in range(15):
+            assert client.post("/api/runs", json={}).status_code == 201
+
+    def test_no_sourcing_cap_when_off(self, demo_off, monkeypatch):
+        client, api = demo_off
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        for _ in range(8):
+            rid = client.post("/api/runs", json={}).json()["id"]
+            SF, ORM = api._SessionFactory, api.SourcingRunORM
+            with SF() as s:
+                s.get(ORM, rid).asset_specs_json = json.dumps(
+                    {"manufacturer": "Goulds", "part_number": "PN-1"})
+                s.commit()
+            assert client.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# INPUT CAPS (FIX C): bound per-request work. Always-on where sensible (a prod cap
+# protects everyone; no legitimate demo input exceeds it). 422 on exceed.
+# Plus the carve-out: the print() of visitor free text to stdout is removed (a live
+# PII-in-logs exposure once public — folds into the deferred structured-capture pass,
+# but the unstructured leak shouldn't wait for it).
+# ---------------------------------------------------------------------------
+
+class TestDemoInputCaps:
+    def test_message_content_over_cap_is_422(self, demo_on, monkeypatch):
+        # SendMessageRequest.content max_length=4000. A 4001-char body -> 422 (Pydantic),
+        # before IntakeAgent is ever constructed.
+        client, api = demo_on
+        constructor = Mock(return_value=Mock())  # would-record if reached; must NOT be
+        monkeypatch.setattr(api, "IntakeAgent", constructor)
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/messages",
+                        json={"content": "x" * 4001})
+        assert r.status_code == 422
+        constructor.assert_not_called()
+
+    def test_message_content_at_cap_is_ok(self, demo_on, monkeypatch):
+        # Exactly 4000 chars is allowed (the bound is inclusive).
+        client, api = demo_on
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "Which manufacturer?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/messages", json={"content": "x" * 4000})
+        assert r.status_code == 200
+
+    def test_group_id_over_cap_is_422(self, demo_on):
+        # CreateRunRequest.group_id max_length=64. A 65-char group_id -> 422.
+        client, _ = demo_on
+        r = client.post("/api/runs", json={"group_id": "g" * 65})
+        assert r.status_code == 422
+
+    def test_facility_id_over_cap_is_422(self, demo_on):
+        # CreateRunRequest.facility_id max_length=64. A 65-char facility_id -> 422.
+        client, _ = demo_on
+        r = client.post("/api/runs", json={"facility_id": "f" * 65})
+        assert r.status_code == 422
+
+    def test_parts_over_cap_is_422(self, demo_off):
+        # IntakeRequest.parts max_length=10. An 11-part body -> 422 (route is demo-
+        # unreachable but the cap protects the prod fan-out; tested demo_off so the
+        # /api/requests front door isn't allowlist-403'd).
+        client, _ = demo_off
+        r = client.post("/api/requests", json={"parts": [{} for _ in range(11)]})
+        assert r.status_code == 422
+
+    def test_upload_over_size_cap_is_422(self, demo_on, monkeypatch):
+        # DEMO_MAX_UPLOAD_BYTES default 10MB; an 10MB+1 byte upload -> 422 before any
+        # vision extraction. Mock IntakeAgent to prove it never ran.
+        client, api = demo_on
+        constructor = Mock(return_value=Mock())
+        monkeypatch.setattr(api, "IntakeAgent", constructor)
+        rid = client.post("/api/runs", json={}).json()["id"]
+        too_big = b"\x00" * (10 * 1024 * 1024 + 1)
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("big.png", too_big, "image/png")},
+            data={"text": "a pump"},
+        )
+        assert r.status_code == 422
+        assert "too large" in r.json()["detail"].lower()
+        constructor.assert_not_called()
+
+    def test_upload_at_size_cap_is_ok(self, demo_on, monkeypatch):
+        # Exactly 10MB is allowed (inclusive bound); a mocked extraction returns so the
+        # handler completes 200 without a live vision call.
+        client, api = demo_on
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        exactly = b"\x00" * (10 * 1024 * 1024)
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("ok.png", exactly, "image/png")},
+            data={"text": "a pump"},
+        )
+        assert r.status_code == 200
+
+    def test_upload_text_over_cap_is_422(self, demo_on, monkeypatch):
+        # The multipart "text" Form field is capped at 4000 chars too.
+        client, api = demo_on
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=Mock()))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("np.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"text": "x" * 4001},
+        )
+        assert r.status_code == 422
+
+    def test_upload_size_cap_env_configurable(self, demo_on, monkeypatch):
+        # The cap is a module global read at call time -> override it and a small upload
+        # breaches the new tiny limit.
+        client, api = demo_on
+        monkeypatch.setattr(api, "_DEMO_MAX_UPLOAD_BYTES", 16)
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=Mock()))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("np.png", b"x" * 32, "image/png")},
+            data={"text": ""},
+        )
+        assert r.status_code == 422
+
+
+class TestDemoNoVisitorTextInLogs:
+    """The print() of visitor free text to stdout is removed (PII-in-logs exposure).
+    A send_message must not echo the visitor's text to stdout. We assert the visitor's
+    text never appears in captured stdout for a send_message call."""
+
+    def test_send_message_does_not_print_visitor_text(self, demo_on, monkeypatch, capsys):
+        client, api = demo_on
+        secret = "SUPER-SECRET-PII-MARKER-DO-NOT-LEAK"
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "Which manufacturer?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        client.post(f"/api/runs/{rid}/messages", json={"content": secret})
+        out = capsys.readouterr().out + capsys.readouterr().err
+        assert secret not in out

@@ -8,6 +8,28 @@ time so that _patch_sourcing_keys() in chat_app.py takes effect.
 
 import re
 
+NON_US_TLDS = (
+    ".cn", ".uk", ".de", ".fr", ".it", ".es", ".nl",
+    ".pl", ".ru", ".jp", ".kr", ".tw", ".hk", ".sg",
+    ".au", ".nz", ".br", ".mx", ".in", ".tr", ".za",
+    # Nordic and Central European: major distributors (DigiKey, Mouser, Farnell)
+    # maintain localized storefronts on these TLDs with non-USD pricing.
+    ".se", ".no", ".fi", ".dk", ".be", ".at", ".ch",
+    ".ie", ".pt", ".gr",
+)
+
+NON_US_DOMAIN_HINTS = (
+    "antlets", "made-in-china", "indiamart", "tradeindia",
+    "europages", "manufacturer.com.cn",
+    # UK/European industrial distributors that operate on .com TLDs with non-USD pricing
+    "farnell", "rs-online", "rsonline", "element14", "rs-components",
+    "rscomponents", "distrelec", "buerklin", "mouser.co",
+    # EU specialist distributors confirmed to appear in E+H sourcing runs
+    "tme.eu", "tme.com", "automation24",
+    # Note: "conrad" excluded from hints — substring match would hit unrelated .com domains
+    # (e.g. conradson.com). Add as explicit host entry in _KNOWN_VENDOR_HOSTS when needed.
+)
+
 from utils.sourcing_archieved.constants import (
     _VENDOR_DOMAINS,
     _BLACKLISTED_DOMAINS,
@@ -79,7 +101,7 @@ def _build_search_query(specs, search_mode: str = "exact") -> str:
             elif known:
                 parts.append(f"{specs.manufacturer} {specs.model}")
 
-        parts.append("price buy")
+        parts.append("price buy USA")
         return " ".join(filter(None, parts))
     else:
         pn  = specs.part_number
@@ -90,16 +112,22 @@ def _build_search_query(specs, search_mode: str = "exact") -> str:
         else:
             pn_term = ""
         base = " ".join(p for p in [mfg, mdl, pn_term] if p)
-        return f"{base} distributor price buy"
+        return f"{base} US distributor price buy"
 
 
-def _build_tier2_query(specs) -> str:
-    """Build an asset-specific national specialist discovery query.
+def _build_tier3_query(specs) -> str:
+    """Build an asset-specific national specialist discovery query (brief Section 8.3 Tier 3).
 
-    Equipment: boolean AND/OR targeting authorized distributors and service centers.
-             When brand intelligence returns authorized_service_brands, those brand names
-             are added as an OR anchor so Tavily surfaces the OEM channel directly.
-    Parts: cross-reference and stockist focused -- no "service center" requirement.
+    Formerly named _build_tier2_query — see commit history for rename context.
+
+    Tavily treats its query parameter as natural language — Boolean operators
+    (AND, OR, parenthetical grouping) are literal text, not logical operators.
+    This function produces quoted-anchor queries: high-signal terms are quoted
+    phrases, unquoted tail words (authorized distributor buy USA) shape semantic
+    ranking without forcing exact matches.
+
+    Equipment: type + manufacturer + PN (when present) + model + auth brands + spec anchors
+    Parts:     type + PN + manufacturer + auth brands
     """
     detected = (getattr(specs, "detected_type", None) or "").lower()
     desc     = (specs.description or "").lower()
@@ -111,57 +139,55 @@ def _build_tier2_query(specs) -> str:
     if not niche_term:
         niche_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
 
-    # Fetch authorized_service_brands for Equipment queries so we can anchor on OEM channel
+    # Fetch authorized_service_brands for both Equipment and Part queries.
     _auth_brands: list[str] = []
     known_mfg = specs.manufacturer not in ("Unknown", "N/A", "null", None)
-    if known_mfg and _equip_kw and specs.category == "Equipment":
+    if known_mfg and _equip_kw:
         try:
             _br = get_brand_relationships(specs.manufacturer, _equip_kw)
             _auth_brands = _br.get("authorized_service_brands") or []
         except Exception:
             pass
 
-    pn        = specs.part_number
-    known_pn  = pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown", None)
+    pn       = specs.part_number
+    known_pn = pn and pn not in ("N/A", "UNKNOWN-PN", "Unknown", None)
 
     if specs.category == "Part":
-        q_parts = [
-            '("authorized distributor" OR "stocking distributor" OR stockist OR "in stock" OR "cross-reference" OR interchange)',
-            f'"{niche_term}"',
-        ]
+        q_parts: list[str] = [f'"{niche_term}"']
         if known_pn:
             q_parts.append(f'"{pn}"')
         if known_mfg:
             q_parts.append(f'"{specs.manufacturer}"')
+        for ab in _auth_brands[:4]:
+            if ab:
+                q_parts.append(f'"{ab}"')
         if "seal" in ctx:
-            q_parts.append('("seal cross reference" OR "aftermarket" OR "equivalent" OR "interchange")')
-        return " AND ".join(q_parts)
-    else:
-        # Build manufacturer anchor: always keep broad word matching so vendors that say
-        # "authorized stocking dealer" or "service center" (not the exact phrase
-        # "authorized distributor") continue to surface.  Brand names from brand
-        # intelligence are ORed in as supplements — not replacements — so the query
-        # expands when known channel partners are available.
+            q_parts.append("cross-reference aftermarket interchange")
+        q_parts.append("authorized distributor buy USA")
         if _auth_brands:
-            _brand_terms = " OR ".join(
-                f'"{ab}"' for ab in _auth_brands[:4] if ab
-            )
-            auth_anchor = f'(authorized OR distributor OR "service center" OR {_brand_terms})'
-        else:
-            auth_anchor = '(authorized OR distributor OR "service center")'
-
-        q_parts = [auth_anchor, f'"{niche_term}"']
+            print(f"[Sourcing] Tier 3 Part query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
+        return " ".join(q_parts)
+    else:
+        q_parts = [f'"{niche_term}"']
         if known_mfg:
             q_parts.append(f'"{specs.manufacturer}"')
+        # Include PN for Equipment when present -- previously this was always dropped
+        if known_pn:
+            q_parts.append(f'"{pn}"')
+        model = (specs.model or "").strip()
+        if model and model not in ("N/A", "Unknown", "null", ""):
+            q_parts.append(f'"{model}"')
+        for ab in _auth_brands[:4]:
+            if ab:
+                q_parts.append(f'"{ab}"')
         if specs.hp and specs.hp not in ("N/A", "None", "null"):
-            q_parts.append(f'"{re.sub(r"\\s+", "", specs.hp).upper()}"')
+            q_parts.append(re.sub(r"\s+", "", specs.hp).upper())
         elif getattr(specs, "gpm", None):
-            q_parts.append(f'"{re.sub(r"\\s+", "", specs.gpm).upper()}"')
-
-        query = " AND ".join(q_parts)
+            q_parts.append(re.sub(r"\s+", "", specs.gpm).upper())
+        q_parts.append("authorized distributor buy USA")
         if _auth_brands:
-            print(f"[Sourcing] Tier 2 query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
-        return query
+            print(f"[Sourcing] Tier 3 query anchored on {len(_auth_brands)} authorized brand(s): {_auth_brands[:4]}")
+        return " ".join(q_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +210,10 @@ def _vendor_authority_score(url: str, content: str, title: str = "") -> float:
     score = 0.0
     try:
         hostname = urlparse(u_lower).hostname or ""
+        if any(hostname.endswith(tld) for tld in NON_US_TLDS):
+            return 0.0
+        if any(hint in hostname for hint in NON_US_DOMAIN_HINTS):
+            return 0.0
         if any(d in hostname for d in _VENDOR_DOMAINS):
             score += 60.0
     except Exception:

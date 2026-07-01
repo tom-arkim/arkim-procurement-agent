@@ -1,0 +1,215 @@
+"""
+Local live harness — run SourcingAgent over representative parts and dump a
+per-candidate review table (Tier 3 focus: suitability_status / is_us_confirmed /
+rejection_reason), then the supplier_registry Apollo cache after the runs.
+
+Untracked dev tooling. Makes LIVE Anthropic + Tavily + Apollo calls and populates
+data/supplier_registry.sqlite (additive Apollo-cache migration on first run).
+Does NOT persist sourcing runs to the DB — it only prints.
+
+Usage:
+    uv run python scripts/review_sourcing.py            # all parts below
+    uv run python scripts/review_sourcing.py 0          # only PARTS[0]
+    uv run python scripts/review_sourcing.py 0 2        # PARTS[0] and PARTS[2]
+    uv run python scripts/review_sourcing.py 2 --refresh  # re-enrich (force fresh Apollo)
+    uv run python scripts/review_sourcing.py 2 --escalate # named-contact escalation (1 enrich credit/supplier)
+
+--refresh expires the Apollo cache (backdates apollo_enriched_at on non-onboarded
+rows) so the clarifier re-fetches and re-persists fields (incl. apollo_org_name),
+exercising the live name-consistency rescue gate. Non-destructive; only the
+domains in this run actually re-enrich (spends ~ this run's Tier 3 in credits).
+"""
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+
+from utils.models import SourcingRun
+from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+from utils import supplier_registry
+
+PARTS = [
+    {
+        "label": "Gusher mechanical seal (Akman scenario)",
+        "specs": {
+            "manufacturer": "Gusher Pumps", "model": "Type 21",
+            "part_number": "TYPE21", "voltage": "N/A", "category": "Part",
+            "detected_type": "mechanical seal",
+            "description": "Mechanical seal for Gusher centrifugal pump",
+            "material_spec": "Carbon/Silicon Carbide",
+            "warranty_status": "unknown",
+        },
+    },
+    {
+        "label": "Endress+Hauser PMC11 pressure transmitter",
+        "specs": {
+            "manufacturer": "Endress+Hauser", "model": "PMC11",
+            "part_number": "PMC11-AA1V1HFVXJA", "voltage": "24VDC",
+            "category": "Part", "detected_type": "pressure transmitter",
+            "description": "Pressure transmitter, ceramic sensor, 0-1bar, 4-20mA",
+            "warranty_status": "unknown",
+        },
+    },
+    {
+        "label": "Baldor motor (aftermarket-viable)",
+        "specs": {
+            "manufacturer": "Baldor", "model": "EM3770T",
+            "part_number": "EM3770T", "voltage": "230/460V",
+            "category": "Part", "detected_type": "motor",
+            "description": "7.5 HP 3-phase TEFC industrial motor",
+            "warranty_status": "unknown",
+        },
+    },
+]
+
+
+def _domain(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        return (urlparse(url).hostname or "").replace("www.", "")
+    except Exception:
+        return ""
+
+
+def _yn(v) -> str:
+    """Compact bool for the table: Y / N, or '-' when absent (e.g. tier 1/2)."""
+    if v is None:
+        return "-"
+    return "Y" if v else "N"
+
+
+def _run_one(agent: SourcingAgent, label: str, specs: dict, escalate: bool = False) -> None:
+    print("\n" + "=" * 110)
+    print(f"PART: {label}")
+    print("=" * 110)
+    run = SourcingRun(
+        id=f"review-{abs(hash(label)) % 10**8}",
+        facility_id="fac-stockton",
+        initiated_by_user_id="review-script",
+        initiated_at=datetime.now(timezone.utc),
+        current_phase="sourcing",
+        urgency_factor=0.5,
+        warranty_status=specs.get("warranty_status", "unknown"),
+        asset_specs_json=specs,
+    )
+    res = agent.run(run)
+
+    if escalate:
+        # Triggered named-contact escalation (LIVE Apollo people-search + 1 enrich
+        # credit per default-selected Tier 3 supplier). Off the default path.
+        for c in (res.get("tier_3") or {}).get("results", []):
+            if c.get("default_outreach_selected"):
+                agent._escalate_contact(c)
+
+    for tier in ("tier_1", "tier_2", "tier_3"):
+        block = res.get(tier) or {}
+        rows = block.get("results") or []
+        print(f"\n-- {tier}  ({block.get('count')} candidates, status={block.get('status')}) --")
+        hdr = (f"{'vendor':24} {'suit_status':16} {'rank':7} {'sel':4} {'cnf':4} "
+               f"{'contact (method:email)':30} {'primary (status:email)':30} "
+               f"{'rejection_reason':16} {'suit%':>5}  note/flag")
+        print(hdr)
+        print("-" * len(hdr))
+        for c in rows:
+            note = c.get("suitability_note") or c.get("apollo_flag") or "-"
+            if c.get("contact_method"):
+                contact = f"{c['contact_method']}:{c.get('resolved_contact_email') or '-'}"
+            else:
+                contact = "-"
+            pstatus = c.get("primary_contact_status")
+            primary = f"{pstatus}:{c.get('primary_contact_email') or '-'}" if pstatus else "-"
+            print(f"{(c.get('vendor_name') or '')[:23]:24} "
+                  f"{str(c.get('suitability_status') or '-')[:16]:16} "
+                  f"{str(c.get('suitability_rank_tier') or '-'):7} "
+                  f"{_yn(c.get('default_outreach_selected')):4} "
+                  f"{_yn(c.get('requires_outreach_confirmation')):4} "
+                  f"{contact[:29]:30} "
+                  f"{primary[:29]:30} "
+                  f"{str(c.get('rejection_reason') or '-')[:15]:16} "
+                  f"{float(c.get('suitability_score') or 0):5.0f}  "
+                  f"{note}")
+    print("\nfilters_applied:", res.get("filters_applied"))
+    print("tier3_capability_pivot:", res.get("tier3_capability_pivot"))
+
+
+def _dump_registry() -> None:
+    print("\n" + "=" * 110)
+    print("SUPPLIER_REGISTRY APOLLO CACHE (after runs)")
+    print("=" * 110)
+    rows = supplier_registry.all_entries()
+    enriched = [r for r in rows if r.get("apollo_enriched_at")]
+    print(f"{len(rows)} total rows; {len(enriched)} with Apollo data\n")
+    hdr = (f"{'name':32} {'domain':30} {'country':16} {'is_us':6} "
+           f"{'suitability_status':22} {'enriched_at':20}")
+    print(hdr)
+    print("-" * len(hdr))
+    for r in sorted(rows, key=lambda x: (x.get("apollo_enriched_at") or "")):
+        print(f"{(r.get('name') or '')[:31]:32} "
+              f"{(r.get('domain') or '')[:29]:30} "
+              f"{str(r.get('apollo_country', '-') or '-')[:15]:16} "
+              f"{str(r.get('is_us_confirmed', '-')):6} "
+              f"{str(r.get('suitability_status', '-') or '-')[:21]:22} "
+              f"{str(r.get('apollo_enriched_at', '-') or '-')[:19]:20}")
+
+
+def _expire_apollo_cache() -> None:
+    """--refresh: backdate apollo_enriched_at on non-onboarded enriched rows so
+    needs_reenrichment() returns True and the clarifier re-fetches (re-persisting
+    apollo_org_name etc.). Non-destructive; uses the existing staleness path. Only
+    the domains that appear in this run actually re-enrich."""
+    # Match the store's naive-UTC convention (upsert_apollo_data writes
+    # datetime.utcnow()); needs_reenrichment compares with a naive utcnow().
+    old = (datetime.utcnow() - timedelta(days=400)).isoformat()
+    conn = supplier_registry._get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE suppliers SET apollo_enriched_at = ? "
+            "WHERE apollo_enriched_at IS NOT NULL "
+            "AND onboarding_status != 'onboarded_arkim_supplier'",
+            (old,),
+        )
+        conn.commit()
+        print(f"[review] --refresh: expired {cur.rowcount} cached Apollo row(s) "
+              f"for re-enrichment (only this run's domains re-fetch)")
+    finally:
+        conn.close()
+
+
+def main() -> None:
+    for k in ("ANTHROPIC_API_KEY", "TAVILY_API_KEY", "APOLLO_API_KEY"):
+        print(f"{k}: {'set' if os.environ.get(k) else 'MISSING'}")
+
+    argv = sys.argv[1:]
+    refresh = "--refresh" in argv
+    escalate = "--escalate" in argv
+    idx = [int(a) for a in argv if a.isdigit()]
+    if refresh:
+        _expire_apollo_cache()
+    selected = [PARTS[i] for i in idx] if idx else PARTS
+    flags = "".join(f" [{f}]" for f, on in (("--refresh", refresh), ("--escalate", escalate)) if on)
+    print(f"Running {len(selected)} part(s): {[p['label'] for p in selected]}{flags}")
+    if escalate:
+        print("[review] --escalate: LIVE Apollo people-search + 1 enrich credit per "
+              "default-selected Tier 3 supplier (named-contact escalation).")
+
+    agent = SourcingAgent(
+        tavily_api_key=os.environ.get("TAVILY_API_KEY"),
+        anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        apollo_api_key=os.environ.get("APOLLO_API_KEY"),
+    )
+    for p in selected:
+        try:
+            _run_one(agent, p["label"], p["specs"], escalate=escalate)
+        except Exception as exc:
+            print(f"[review] run FAILED for {p['label']}: {type(exc).__name__}: {exc}")
+
+    _dump_registry()
+
+
+if __name__ == "__main__":
+    main()

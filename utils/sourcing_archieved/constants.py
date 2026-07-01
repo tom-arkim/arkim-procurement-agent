@@ -27,6 +27,9 @@ _VENDOR_DOMAINS = [
     "pumpproducts.com", "pumpcatalog.com",
     # Tier 1.5: broad industrial
     "zoro.com", "globalindustrial.com", "fastenal.com",
+    # Compressor parts specialists — added 2026-05 for FS Curtis demo.
+    # Legitimate Tier 2 vendors not in the general MRO marketplace set.
+    "compressedairadvisors.com", "oemaircompressor.com", "filterelementstore.com",
 ]
 
 # Vendors whose prices appear on sites without login walls -> "Enterprise"
@@ -41,6 +44,13 @@ _TIER1_VENDORS = {"Grainger", "McMaster-Carr", "MSC Industrial"}
 _BLACKLISTED_DOMAINS = (
     "amazon", "ebay", "aliexpress", "alibaba", "walmart", "etsy",
     "craigslist", "offerup", "mercari",
+)
+
+# Hostnames excluded from Tier 3 outreach results.
+# aircompressorservices.com positions as a competing procurement platform per its
+# public site copy; excluded from Tier 3 outreach results.
+_TIER3_EXCLUDED_HOSTS = (
+    "aircompressorservices.com",
 )
 
 _AUTHORITY_VIABLE_THRESHOLD = 30.0  # minimum authority score to count as viable
@@ -103,6 +113,17 @@ HIGH_RISK_ELECTRICAL_CATEGORIES = {
 # Future refinement (Option B): apply a tighter floor (50) only to priced TCA candidates
 # and a looser floor (35) to price_tbd inquiry candidates, with no floor for Tier 3.
 TIER_SURFACE_MIN_CONFIDENCE: float = 40.0
+
+# Minimum suitability_score (0-100) for a result to surface in the TCA comparison table.
+# Results below this are annotated with rejection_reason="suitability_below_floor" and
+# excluded from the UI. Suitability 0% indicates a search-redirect URL (already capped to
+# 5% by _COLLECTION_URL_PATTERNS) or a spec-unrelated result; 30% allows plausible
+# candidates while filtering both failure modes.
+#
+# Note: this is the first quality gate applied in the active SourcingAgent.run() pipeline.
+# The archived orchestrator filtering machinery (filtering.py, orchestrator.py) was not
+# connected to the active path — Items 4-6 build the first filter layer for production.
+TIER_SURFACE_MIN_SUITABILITY: float = 30.0
 
 # ---------------------------------------------------------------------------
 # Aftermarket sourcing

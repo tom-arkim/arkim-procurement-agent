@@ -10,8 +10,8 @@ Usage pattern:
   2. Each LLM call  : record_call(in, out) → credited to active run
   3. Pipeline end   : finish_run(run_id)  → returns final RunStats, clears tracker
 
-The "active run" is stored in a threading.local so that Streamlit's per-session
-threading model isolates concurrent user sessions correctly.
+The "active run" is stored in a threading.local so per-request/session threads
+isolate concurrent runs correctly.
 """
 
 import threading

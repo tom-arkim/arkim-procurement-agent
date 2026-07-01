@@ -66,7 +66,7 @@ def _fetch_market_confidence(specs) -> Optional[float]:
             score = d.get("market_confidence_score")
             if score is not None:
                 s = float(score)
-                print(f"[Sourcing] Market confidence {brand} {model}: {s:.1f}/10 — {d.get('summary','')}")
+                print(f"[Sourcing] Market confidence {brand} {model}: {s:.1f}/10 -- {d.get('summary','')}")
                 return s
     except Exception as exc:
         print(f"[Sourcing] Market confidence error: {exc}")

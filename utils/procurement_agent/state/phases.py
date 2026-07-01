@@ -1,5 +1,5 @@
 """
-Phase enum and transition validator for ProcurementRun state machine.
+Phase enum and transition validator for SourcingRun state machine.
 
 Brief reference: Section 5 (state transitions) and Section 2 (workflow phases).
 """
@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 class Phase(str, Enum):
-    """All legal states of a ProcurementRun, matching the brief Section 5 schema."""
+    """All legal states of a SourcingRun, matching the brief Section 5 schema."""
+    PENDING_INTAKE = "pending_intake"
     INTAKE = "intake"
     INVENTORY = "inventory"
     SOURCING = "sourcing"
@@ -31,10 +32,15 @@ class Phase(str, Enum):
 # (added programmatically below) so this dict only lists the happy-path edges
 # plus the error-recovery edge (ERROR → INTAKE).
 _FORWARD: dict[Phase, Set[Phase]] = {
+    Phase.PENDING_INTAKE:            {Phase.INTAKE},
     Phase.INTAKE:                   {Phase.INVENTORY},
     Phase.INVENTORY:                {Phase.SOURCING},
     Phase.SOURCING:                 {Phase.COMPARISON},
     Phase.COMPARISON:               {Phase.PENDING_FIRST_APPROVAL},
+    # Single-approver path:  pending_first_approval → approved
+    # Dual-approver path:    pending_first_approval → pending_second_approval → approved
+    # The Approval Rules Engine (Phase 3) chooses the path based on the dollar
+    # threshold in the facility's approval config. Both paths are legal here.
     Phase.PENDING_FIRST_APPROVAL:   {Phase.PENDING_SECOND_APPROVAL, Phase.APPROVED},
     Phase.PENDING_SECOND_APPROVAL:  {Phase.APPROVED},
     Phase.APPROVED:                 {Phase.EXECUTING},

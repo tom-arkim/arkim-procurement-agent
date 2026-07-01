@@ -1,0 +1,70 @@
+[
+  {
+    "submission_id": "maint-sub-demo-001",
+    "facility_id": "fac-cerritos",
+    "submitted_by": "Jake Martinez",
+    "asset_specs": {
+      "manufacturer": "Endress+Hauser",
+      "model": "Promag 10W",
+      "part_number": "10W40-AA2B1AA0AAAA",
+      "description": "Electromagnetic flow meter"
+    },
+    "context": {
+      "chat_thread_summary": "Jake reported intermittent flow reading failures on the Promag 10W electromagnetic flow meter (tag PUMP-BL-042) in the bottling line. Unit shows E:731 error code and readings drop to zero for 5-10 s every 2-3 hours. Likely coil or transmitter fault. Urgency: emergency -- line cannot run at full capacity until resolved.",
+      "urgency": "emergency",
+      "work_order_id": "WO-2024-0892",
+      "asset_tag": "PUMP-BL-042"
+    }
+  },
+  {
+    "submission_id": "maint-sub-demo-002",
+    "facility_id": "fac-modesto",
+    "submitted_by": "Sarah Chen",
+    "asset_specs": {
+      "manufacturer": "Endress+Hauser",
+      "model": "Cerabar M PMC11",
+      "part_number": "PMC11-AA1V1HFVXJA",
+      "description": "Ceramic capacitance pressure transmitter, 4-20mA HART, 0-10 bar range"
+    },
+    "context": {
+      "chat_thread_summary": "Sarah reported a PMC11 ceramic pressure transmitter (tag PT-PAST-007) on the pasteurization circuit inlet is showing an upward drift of approximately 0.2 bar over each 4-hour production cycle, then snapping back near zero after each CIP cycle. Reference gauge on the same tap reads correctly throughout. Suspected ceramic measuring cell contamination or partial membrane separation from NaOH CIP exposure. Unit is still functional but trending toward failure. Recommend proactive replacement before next scheduled shutdown.",
+      "urgency": "predictive",
+      "work_order_id": "WO-2024-1041",
+      "asset_tag": "PT-PAST-007"
+    }
+  },
+  {
+    "submission_id": "maint-sub-demo-003",
+    "facility_id": "fac-cerritos",
+    "submitted_by": "Jake Martinez",
+    "asset_specs": {
+      "manufacturer": "FS-Curtis",
+      "model": "NX4-15",
+      "part_number": "2605539890",
+      "description": "Standard spin-on oil filter for NX4 series rotary screw compressor. Replacement interval: every 2000 hours or quarterly. Required for thermal management restoration."
+    },
+    "context": {
+      "chat_thread_summary": "FS-Curtis NX4-15 rotary screw compressor in utility room operating above normal thermal range. Discharge temperature elevated to 215°F vs 195°F baseline (normal range 158-212°F, warning at 221°F, automatic shutdown at 230°F). Oil appears darkened at sight glass with faint burnt smell near unit — indicators of thermal breakdown in lubricant. Production currently running but at risk of unplanned shutdown. Root cause assessment: most likely fouled oil cooler (60%) or degraded oil (30%). Maintenance assistant recommends immediate replacement of oil filter and compressor oil before next shift.",
+      "urgency": "emergency",
+      "work_order_id": "WO-2024-1203",
+      "asset_tag": "COMP-UTIL-001"
+    }
+  },
+  {
+    "submission_id": "maint-sub-demo-004",
+    "facility_id": "fac-cerritos",
+    "submitted_by": "Jake Martinez",
+    "asset_specs": {
+      "manufacturer": "FS-Curtis",
+      "model": "NX4-15",
+      "part_number": "FSC-8000-5",
+      "description": "Synthetic compressor oil, 5-gallon pail. NX4 oil capacity 1.05 USG. Current charge thermally degraded per sight glass inspection."
+    },
+    "context": {
+      "chat_thread_summary": "FS-Curtis NX4-15 rotary screw compressor in utility room operating above normal thermal range. Discharge temperature elevated to 215°F vs 195°F baseline (normal range 158-212°F, warning at 221°F, automatic shutdown at 230°F). Oil appears darkened at sight glass with faint burnt smell near unit — indicators of thermal breakdown in lubricant. Production currently running but at risk of unplanned shutdown. Root cause assessment: most likely fouled oil cooler (60%) or degraded oil (30%). Maintenance assistant recommends immediate replacement of oil filter and compressor oil before next shift.",
+      "urgency": "emergency",
+      "work_order_id": "WO-2024-1204",
+      "asset_tag": "COMP-UTIL-001"
+    }
+  }
+]

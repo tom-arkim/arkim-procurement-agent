@@ -1,5 +1,5 @@
 """
-Tests for ProcurementRun CRUD operations.
+Tests for SourcingRun CRUD operations.
 """
 
 import pytest
@@ -41,6 +41,19 @@ def test_get_run_returns_correct_row(db_url):
 def test_get_run_missing_returns_none(db_url):
     result = get_run("00000000-0000-0000-0000-000000000000", db_url=db_url)
     assert result is None
+
+
+# D2 prereq #1 — nullable tenant key (company PIN), separate from facility_id.
+def test_create_run_persists_company_id(db_url):
+    run = create_run(company_id="PIN-9", facility_id="fac-001", db_url=db_url)
+    assert run["company_id"] == "PIN-9"
+    assert run["facility_id"] == "fac-001"          # site label stays separate
+    assert get_run(run["id"], db_url=db_url)["company_id"] == "PIN-9"   # round-trips
+
+
+def test_create_run_company_id_defaults_null(db_url):
+    run = create_run(db_url=db_url)
+    assert run["company_id"] is None                # NULL until identity forwards it
 
 
 def test_update_run_changes_phase(db_url):

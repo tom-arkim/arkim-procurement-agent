@@ -17,6 +17,7 @@ import os
 import re
 import sqlite3
 import uuid
+from contextlib import closing
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -240,41 +241,51 @@ def get_brand_relationships(manufacturer: str,
     if not mfg or mfg in ("unknown", "n/a", "null", "none"):
         return _empty
 
+    # Seeded data takes priority over LLM discovery for known manufacturers.
+    seeded = _get_seeded_data(mfg)
+    if seeded:
+        return {
+            **_empty,
+            "authorized_service_brands": seeded.get("authorized_service_brands") or [],
+            "common_competitors":        seeded.get("common_competitors") or [],
+            "from_cache":                True,
+        }
+
     try:
-        conn = _get_conn()
-        row  = conn.execute(
-            "SELECT * FROM brand_intelligence WHERE manufacturer = ? AND equipment_type = ?",
-            (mfg, etype),
-        ).fetchone()
+        with closing(_get_conn()) as conn:
+            row  = conn.execute(
+                "SELECT * FROM brand_intelligence WHERE manufacturer = ? AND equipment_type = ?",
+                (mfg, etype),
+            ).fetchone()
 
-        if row and not _is_stale(row["last_accessed_at"], row["ttl_days"]):
-            _touch(conn, mfg, etype)
-            return {
-                "manufacturer": mfg, "equipment_type": etype,
-                "parent_company": row["parent_company"],
-                "subsidiaries": json.loads(row["subsidiaries"] or "[]"),
-                "authorized_service_brands": json.loads(row["authorized_service_brands"] or "[]"),
-                "common_competitors": json.loads(row["common_competitors"] or "[]"),
-                "subcategory_niche_terms": json.loads(row["subcategory_niche_terms"] or "[]"),
-                "wrong_category_terms": json.loads(row["wrong_category_terms"] or "[]"),
-                "from_cache": True,
-            }
+            if row and not _is_stale(row["last_accessed_at"], row["ttl_days"]):
+                _touch(conn, mfg, etype)
+                return {
+                    "manufacturer": mfg, "equipment_type": etype,
+                    "parent_company": row["parent_company"],
+                    "subsidiaries": json.loads(row["subsidiaries"] or "[]"),
+                    "authorized_service_brands": json.loads(row["authorized_service_brands"] or "[]"),
+                    "common_competitors": json.loads(row["common_competitors"] or "[]"),
+                    "subcategory_niche_terms": json.loads(row["subcategory_niche_terms"] or "[]"),
+                    "wrong_category_terms": json.loads(row["wrong_category_terms"] or "[]"),
+                    "from_cache": True,
+                }
 
-        # Cache miss or stale — discover via LLM
-        print(f"[BrandIntel] Discovering relationships: {manufacturer!r} / {equipment_type!r}")
-        payload = _discover_via_llm(manufacturer, equipment_type)
-        if payload:
-            _upsert(conn, mfg, etype, payload, _INTEL_MODEL)
-            return {
-                "manufacturer": mfg, "equipment_type": etype,
-                "parent_company": payload.get("parent_company"),
-                "subsidiaries": payload.get("subsidiaries") or [],
-                "authorized_service_brands": payload.get("authorized_service_brands") or [],
-                "common_competitors": payload.get("competitors") or payload.get("common_competitors") or [],
-                "subcategory_niche_terms": payload.get("subcategory_niche_terms") or [],
-                "wrong_category_terms": payload.get("wrong_category_terms") or [],
-                "from_cache": False,
-            }
+            # Cache miss or stale — discover via LLM
+            print(f"[BrandIntel] Discovering relationships: {manufacturer!r} / {equipment_type!r}")
+            payload = _discover_via_llm(manufacturer, equipment_type)
+            if payload:
+                _upsert(conn, mfg, etype, payload, _INTEL_MODEL)
+                return {
+                    "manufacturer": mfg, "equipment_type": etype,
+                    "parent_company": payload.get("parent_company"),
+                    "subsidiaries": payload.get("subsidiaries") or [],
+                    "authorized_service_brands": payload.get("authorized_service_brands") or [],
+                    "common_competitors": payload.get("common_competitors") or [],
+                    "subcategory_niche_terms": payload.get("subcategory_niche_terms") or [],
+                    "wrong_category_terms": payload.get("wrong_category_terms") or [],
+                    "from_cache": False,
+                }
     except Exception as exc:
         print(f"[BrandIntel] Error: {exc}")
 
@@ -304,6 +315,184 @@ def get_parent_brand(manufacturer: str, equipment_type: str = "general") -> Opti
 
 
 # ---------------------------------------------------------------------------
+# Seeded authorized distributor data
+#
+# Manually maintained for prototype validation. Covers the four canonical
+# test manufacturers. Future implementations may discover this dynamically
+# by parsing manufacturer websites or using observed sourcing data.
+# ---------------------------------------------------------------------------
+
+# Endress+Hauser US Representative network — sourced from us.endress.com
+EH_US_REPRESENTATIVES: list[str] = [
+    "Vector Controls and Automation Group",
+    "George E. Booth Co.",
+    "Engineered Equipment Company",
+    "Field Instruments & Controls",
+    "Instrumentation and Controls",
+    "Miller Mechanical Specialties",
+    "TriNova",
+    "Carotek",
+    "Forberg Smith",
+    "Eastern Controls",
+    "Rust Automation & Controls",
+]
+
+# Gusher Pumps authorized distributors (surfaced in sourcing test cases)
+GUSHER_AUTHORIZED_DISTRIBUTORS: list[str] = [
+    "Phoenix Pumps",
+    "Anderson Process",
+    "OTC Industrial",
+    "Great Lakes Pump & Supply",
+    "Wagner Process Equipment",
+]
+
+# John Crane authorized distributors (surfaced in sourcing test cases)
+JOHN_CRANE_AUTHORIZED_DISTRIBUTORS: list[str] = [
+    "Crane Engineering",
+    "Pump Tech Inc.",
+    "Geiger Inc.",
+    "Tencarva Machinery",
+    "Hayes Pump",
+]
+
+# Hyundai Heavy Industries / Crown Triton authorized distributors
+HYUNDAI_AUTHORIZED_DISTRIBUTORS: list[str] = [
+    "Gainesville Industrial Electric",
+    "AMED",
+    "Houston Motor & Control",
+    "BSI Mechanical",
+    "Dietz Electric",
+]
+
+# Seeded data lookup table: list of (name_fragment_tuple, data_dict) pairs.
+# Matching: all fragments in the tuple must appear in the lowercased manufacturer name.
+_SEEDED_BRAND_DATA: list[tuple] = [
+    (
+        ("endress", "hauser"),
+        {
+            "authorized_service_brands": EH_US_REPRESENTATIVES,
+            "common_competitors": ["WIKA", "Honeywell", "Yokogawa", "ABB", "Siemens"],
+        },
+    ),
+    (
+        ("gusher",),
+        {
+            "authorized_service_brands": GUSHER_AUTHORIZED_DISTRIBUTORS,
+            "common_competitors": ["Goulds", "Grundfos", "Flowserve", "Crane Pumps"],
+        },
+    ),
+    (
+        ("john crane",),
+        {
+            "authorized_service_brands": JOHN_CRANE_AUTHORIZED_DISTRIBUTORS,
+            "common_competitors": ["Flowserve", "AESSEAL", "Burgmann", "Pac-Seal"],
+        },
+    ),
+    (
+        ("hyundai",),
+        {
+            "authorized_service_brands": HYUNDAI_AUTHORIZED_DISTRIBUTORS,
+            "common_competitors": ["WEG", "Baldor", "Leeson", "US Motors", "Nidec"],
+        },
+    ),
+]
+
+
+def _get_seeded_data(manufacturer: str) -> Optional[dict]:
+    """Return seeded brand data for known manufacturers, or None if not seeded.
+
+    Uses fragment matching so 'Endress+Hauser', 'Endress Hauser', and 'E+H'
+    all resolve to the same seeded record.
+    """
+    mfg_norm = manufacturer.lower().replace("+", " ").replace("-", " ").strip()
+    # Special-case E+H short form before fragment matching
+    if mfg_norm in ("e h", "e+h", "endress hauser", "endress+hauser"):
+        return _SEEDED_BRAND_DATA[0][1]
+    for fragments, data in _SEEDED_BRAND_DATA:
+        if all(f in mfg_norm for f in fragments):
+            return data
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Manufacturer alias resolution
+# ---------------------------------------------------------------------------
+
+# Static alias table for manufacturers that appeared in sourcing stress tests.
+# Keys are lowercase normalized. Values include the canonical name plus all
+# known brand lines, shortened forms, and parent company names that vendor
+# pages may use instead of the full corporate entity name.
+# Extend as new manufacturers surface in real queries.
+MANUFACTURER_ALIASES: dict[str, list[str]] = {
+    "hyundai heavy industries": [
+        "Hyundai Heavy Industries",
+        "Hyundai",
+        "Crown Triton",
+        "HD Hyundai Electric",
+        "Hyundai Electric",
+    ],
+    "endress+hauser": [
+        "Endress+Hauser",
+        "Endress Hauser",
+        "Endress-Hauser",
+        "E+H",
+    ],
+    "endress hauser": [
+        "Endress+Hauser",
+        "Endress Hauser",
+        "Endress-Hauser",
+        "E+H",
+    ],
+    "allen-bradley": [
+        "Allen-Bradley",
+        "Allen Bradley",
+        "Rockwell Automation",
+        "Rockwell",
+    ],
+    "allen bradley": [
+        "Allen-Bradley",
+        "Allen Bradley",
+        "Rockwell Automation",
+        "Rockwell",
+    ],
+    "gusher pumps": [
+        "Gusher Pumps",
+        "Gusher",
+        "Ruthman Companies",
+    ],
+    "gusher": [
+        "Gusher Pumps",
+        "Gusher",
+        "Ruthman Companies",
+    ],
+    "john crane": [
+        "John Crane",
+        "Smiths Group",
+    ],
+}
+
+
+def get_manufacturer_aliases(manufacturer: str) -> list[str]:
+    """Return all known aliases for a manufacturer.
+
+    Includes the manufacturer's own name, parent company, subsidiaries, brand
+    lines, and common shortened forms used on vendor pages.
+
+    Returns the static MANUFACTURER_ALIASES list when a match is found, or a
+    single-element list containing the original name as a fallback so callers
+    always get at least one term to check against.
+    """
+    key = (manufacturer or "").lower().strip()
+    if key in MANUFACTURER_ALIASES:
+        return MANUFACTURER_ALIASES[key]
+    # Partial-key fallback: check if any alias key is contained in the manufacturer name
+    for alias_key, aliases in MANUFACTURER_ALIASES.items():
+        if alias_key in key:
+            return aliases
+    return [manufacturer] if manufacturer else []
+
+
+# ---------------------------------------------------------------------------
 # Bulk cache warm-up (for CLI refresh script)
 # ---------------------------------------------------------------------------
 
@@ -322,42 +511,127 @@ def warm_cache(pairs: list[tuple[str, str]]) -> list[dict]:
 def all_cached_entries() -> list[dict]:
     """Return all records in the brand_intelligence cache (for CLI display)."""
     try:
-        conn = _get_conn()
-        rows = conn.execute(
-            "SELECT * FROM brand_intelligence ORDER BY last_accessed_at DESC"
-        ).fetchall()
-        out = []
-        for r in rows:
-            out.append({
-                "manufacturer":             r["manufacturer"],
-                "equipment_type":           r["equipment_type"],
-                "parent_company":           r["parent_company"],
-                "subsidiaries":             json.loads(r["subsidiaries"] or "[]"),
-                "authorized_service_brands": json.loads(r["authorized_service_brands"] or "[]"),
-                "common_competitors":        json.loads(r["common_competitors"] or "[]"),
-                "subcategory_niche_terms":   json.loads(r["subcategory_niche_terms"] or "[]"),
-                "wrong_category_terms":      json.loads(r["wrong_category_terms"] or "[]"),
-                "discovered_at":             r["discovered_at"],
-                "last_accessed_at":          r["last_accessed_at"],
-                "ttl_days":                  r["ttl_days"],
-                "llm_model_used":            r["llm_model_used"],
-            })
-        return out
+        with closing(_get_conn()) as conn:
+            rows = conn.execute(
+                "SELECT * FROM brand_intelligence ORDER BY last_accessed_at DESC"
+            ).fetchall()
+            out = []
+            for r in rows:
+                out.append({
+                    "manufacturer":             r["manufacturer"],
+                    "equipment_type":           r["equipment_type"],
+                    "parent_company":           r["parent_company"],
+                    "subsidiaries":             json.loads(r["subsidiaries"] or "[]"),
+                    "authorized_service_brands": json.loads(r["authorized_service_brands"] or "[]"),
+                    "common_competitors":        json.loads(r["common_competitors"] or "[]"),
+                    "subcategory_niche_terms":   json.loads(r["subcategory_niche_terms"] or "[]"),
+                    "wrong_category_terms":      json.loads(r["wrong_category_terms"] or "[]"),
+                    "discovered_at":             r["discovered_at"],
+                    "last_accessed_at":          r["last_accessed_at"],
+                    "ttl_days":                  r["ttl_days"],
+                    "llm_model_used":            r["llm_model_used"],
+                })
+            return out
     except Exception as exc:
         print(f"[BrandIntel] all_cached_entries error: {exc}")
         return []
 
 
+# ---------------------------------------------------------------------------
+# Fix 4 — Manufacturer-aware PN stemming rules
+# ---------------------------------------------------------------------------
+
+# Maps a manufacturer name fragment (lowercase) to a regex + capture group.
+# Gusher Pumps and John Crane are deliberately omitted — exact PN is required.
+STEMMING_RULES: dict[str, dict] = {
+    # Endress+Hauser: PMC11-AA1U1HBWBJJ (normalized: PMC11AA1U1HBWBJJ) → PMC11
+    # The base model is alpha prefix + 2-4 digit suffix; ordering codes follow.
+    "endress":        {"pattern": r"^([A-Z]{2,5}\d{2,4})", "group": 1},
+    "e+h":            {"pattern": r"^([A-Z]{2,5}\d{2,4})", "group": 1},
+    # Allen-Bradley: 22B-D6P0N104 → 22B (drive series prefix)
+    "allen-bradley":  {"pattern": r"^(\d{2}[A-Z])", "group": 1},
+    "allen bradley":  {"pattern": r"^(\d{2}[A-Z])", "group": 1},
+}
+
+
+def get_pn_stemming_rule(manufacturer: str) -> Optional[dict]:
+    """Return the stemming rule for this manufacturer, or None if exact PN match is required."""
+    mfg = (manufacturer or "").lower().strip()
+    for key, rule in STEMMING_RULES.items():
+        if key in mfg:
+            return rule
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Part-number prefix → manufacturer reverse lookup
+#
+# Populated for the four canonical test manufacturers. Prefixes are derived
+# from STEMMING_RULES patterns and known product family codes. Extend as new
+# manufacturers surface in production.
+#
+# Lookup is prefix-based: "PMC11-AA1V1HFVXJA" matches prefix "PMC" → E+H.
+# All prefixes must be uppercase and alphanumeric only (no delimiters).
+# ---------------------------------------------------------------------------
+
+PN_PREFIX_TO_MANUFACTURER: dict[str, str] = {
+    # Endress+Hauser field instruments — alpha prefix + 2-4 digit family code
+    "PMC":  "Endress+Hauser",   # pressure transmitters (gauge)
+    "PMP":  "Endress+Hauser",   # pressure measurement probes (absolute)
+    "PMD":  "Endress+Hauser",   # differential pressure
+    "FMR":  "Endress+Hauser",   # level radar (FMCW)
+    "FTL":  "Endress+Hauser",   # level switches (vibration)
+    "FML":  "Endress+Hauser",   # flow (magnetic)
+    "FMT":  "Endress+Hauser",   # flow (thermal)
+    "FMU":  "Endress+Hauser",   # level ultrasonic
+    "FMG":  "Endress+Hauser",   # flow (Coriolis)
+    "TAD":  "Endress+Hauser",   # temperature sensors
+    "TMA":  "Endress+Hauser",   # temperature assemblies
+    "TTR":  "Endress+Hauser",   # temperature transmitters (rail)
+    "TMT":  "Endress+Hauser",   # temperature transmitters (head-mounted)
+    "LTM":  "Endress+Hauser",   # level (guided wave radar)
+    # Allen-Bradley (Rockwell) — drive series prefix: 2 digits + letter
+    "22B":  "Allen-Bradley",    # PowerFlex 40
+    "22C":  "Allen-Bradley",    # PowerFlex 400
+    "22D":  "Allen-Bradley",    # PowerFlex 40P
+    "20F":  "Allen-Bradley",    # PowerFlex 700
+    "20G":  "Allen-Bradley",    # PowerFlex 750
+    "25B":  "Allen-Bradley",    # PowerFlex 525
+    "25C":  "Allen-Bradley",    # PowerFlex 527
+}
+
+# Minimum PN token length to attempt prefix lookup (avoids matching "HP" or "V")
+_PN_LOOKUP_MIN_LEN = 3
+
+
+def lookup_manufacturer_from_pn(part_number: str) -> Optional[str]:
+    """Return the canonical manufacturer name for a known PN prefix, or None.
+
+    Normalizes the PN (uppercase, strip delimiters) then checks each prefix in
+    PN_PREFIX_TO_MANUFACTURER from longest to shortest to avoid short-prefix
+    false positives (e.g. "PM" matching "PMC").
+    """
+    if not part_number:
+        return None
+    normalized = re.sub(r"[^A-Z0-9]", "", part_number.upper())
+    if len(normalized) < _PN_LOOKUP_MIN_LEN:
+        return None
+    for prefix in sorted(PN_PREFIX_TO_MANUFACTURER, key=len, reverse=True):
+        if normalized.startswith(prefix):
+            return PN_PREFIX_TO_MANUFACTURER[prefix]
+    return None
+
+
 def invalidate(manufacturer: str, equipment_type: str) -> bool:
     """Force re-discovery by setting last_accessed_at far in the past."""
     try:
-        conn = _get_conn()
-        conn.execute(
-            "UPDATE brand_intelligence SET last_accessed_at = '2000-01-01T00:00:00' "
-            "WHERE manufacturer = ? AND equipment_type = ?",
-            (manufacturer.lower().strip(), equipment_type.lower().strip()),
-        )
-        conn.commit()
-        return conn.total_changes > 0
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                "UPDATE brand_intelligence SET last_accessed_at = '2000-01-01T00:00:00' "
+                "WHERE manufacturer = ? AND equipment_type = ?",
+                (manufacturer.lower().strip(), equipment_type.lower().strip()),
+            )
+            conn.commit()
+            return conn.total_changes > 0
     except Exception:
         return False

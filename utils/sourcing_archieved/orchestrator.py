@@ -52,15 +52,15 @@ def find_vendors(specs: AssetSpecs,
     enterprise: list[SourcingOption] = []
 
     if workflow != "capex":
-        print(f"\n[Sourcing] Tier 1/1.5 — Querying national vendors (mode: {search_mode})...")
+        print(f"\n[Sourcing] Tier 1/1.5 -- Querying national vendors (mode: {search_mode})...")
         enterprise = _call_enterprise_api(specs, force_refresh=force_refresh, search_mode=search_mode)
         for o in enterprise:
             tag = " [INQUIRY REQUIRED]" if o.price_tbd else f" @ ${o.base_price:.2f}"
             print(f"  {o.vendor_name} ({o.merchant_type}){tag} | {o.lead_time_days}d")
     else:
-        print(f"\n[Sourcing] CapEx workflow — skipping Tier 1/2, going direct to specialist outreach...")
+        print(f"\n[Sourcing] CapEx workflow -- skipping Tier 1/2, going direct to specialist outreach...")
 
-    print(f"\n[Sourcing] Tier 2 — National specialist discovery...")
+    print(f"\n[Sourcing] Tier 2 -- National specialist discovery...")
     tier2 = _discover_national_specialists(specs, enterprise)
 
     all_options = enterprise + tier2
@@ -74,7 +74,7 @@ def find_vendors(specs: AssetSpecs,
     # Aftermarket pass — spec-based third-party discovery (runs after warranty filter so
     # in-warranty assets are correctly gated; aftermarket options join filtered list)
     if workflow != "capex":
-        print(f"\n[Sourcing] Aftermarket pass — spec-based third-party discovery...")
+        print(f"\n[Sourcing] Aftermarket pass -- spec-based third-party discovery...")
         aftermarket = _discover_aftermarket_specialists(specs, filtered)
         filtered = filtered + aftermarket
 

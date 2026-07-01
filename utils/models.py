@@ -1,11 +1,52 @@
 """
 Arkim Procure Agent — Data Models (stdlib dataclasses, no third-party deps)
 """
+# SourcingRun is the user-facing workflow object (renamed from ProcurementRun).
+# The utils/procurement_agent/ module path is unchanged — it reflects the
+# system architecture, not the user-visible terminology.
 
 from dataclasses import dataclass, field
 from typing import Optional, List
 from datetime import datetime
 import uuid
+
+
+# ---------------------------------------------------------------------------
+# Phase B0 — run-state foundation for document-sourcing interleaving (state only).
+# These name the run-state semantics that B3 (mid-run enrichment) and B4 (aftermarket
+# engine) build on. No behavior here — just the vocabulary + defaults that preserve
+# today's semantics.
+# ---------------------------------------------------------------------------
+
+# match_basis (per-candidate): how a result was matched to the requested part.
+MATCH_BASIS_DIRECT = "direct"            # part-number / description match, no datasheet
+MATCH_BASIS_SPEC_MATCHED = "spec_matched"  # matched against an ingested datasheet/spec
+MATCH_BASES = {MATCH_BASIS_DIRECT, MATCH_BASIS_SPEC_MATCHED}
+
+# document_status (per-run): the run's knowledge of the part's document.
+DOCUMENT_STATUS_NONE = "none"            # no document known (today's default)
+DOCUMENT_STATUS_PENDING = "pending"      # a document is being sourced/ingested
+DOCUMENT_STATUS_INGESTED = "ingested"    # a document is available and ingested
+DOCUMENT_STATUSES = {DOCUMENT_STATUS_NONE, DOCUMENT_STATUS_PENDING, DOCUMENT_STATUS_INGESTED}
+
+# Match waves (per-candidate): wave 1 is the initial direct sourcing; a later
+# spec-matched wave (2+) is APPENDED mid-run without discarding wave 1. The append
+# BEHAVIOR is B3; B0 only makes results carry the wave/basis labels.
+MATCH_WAVE_DIRECT = 1                     # the initial direct wave
+
+
+def tag_match_wave(candidates: list, *, match_basis: str = MATCH_BASIS_DIRECT,
+                   wave: int = MATCH_WAVE_DIRECT) -> list:
+    """Structure helper (NOT the append behavior): stamp match_basis/match_wave onto a
+    list of candidate result dicts, returning the same list. Pure — no sourcing, no
+    matching, no run mutation. B3 uses this to label a wave before appending it to a
+    run's results; B0 only guarantees the results structure can carry the labels.
+    """
+    for c in candidates or []:
+        if isinstance(c, dict):
+            c.setdefault("match_basis", match_basis)
+            c.setdefault("match_wave", wave)
+    return candidates
 
 
 @dataclass
@@ -68,6 +109,38 @@ class AssetSpecs:
     #         "corrected_detected_type": str, "corrected_category": str}
     # Captured by dataclasses.asdict() and written to audit log automatically.
     classification_correction: Optional[dict] = None
+    # True when sufficiency was reached on category-specific physical specs
+    # without an explicit model or part number (spec-based sourcing path).
+    # Set by api_server.py send_message; read by the frontend confirm-card.
+    spec_based_sourcing: bool = False
+
+
+def lead_time_source_for(item: dict, *, key: str = "lead_days") -> str:
+    """Provenance of a lead-time value from a CURATED/catalog source (e.g. Tier-1 seed data):
+    'extracted' when the source row actually carries the value, 'defaulted' when it was absent
+    and the caller falls to a synthetic default.
+
+    LLM/heuristic sources (Tier-2 marketplace/national/aftermarket) are NEVER trusted as
+    extracted: their prompt is instructed to emit a default for unknown, so a default-valued
+    lead is indistinguishable from a real one — those callers rely on the conservative
+    SourcingOption default ('defaulted'). Pre-quote rows with no contact use 'placeholder'
+    (no real lead time exists yet). A confirmed quote later marks 'quoted'."""
+    return "extracted" if item.get(key) is not None else "defaulted"
+
+
+# Speed-ranking confidence by lead-time provenance — a fabricated/estimated lead time must
+# not out-rank a genuinely-known one on speed (mirrors the price_tbd -> 0.5 neutral precedent).
+# A real value (extracted/quoted) scores at full weight; a heuristic default is discounted; a
+# placeholder (no real lead time) earns NO speed credit. Unknown/None -> conservative 0.5.
+_LEAD_TIME_SPEED_CONFIDENCE = {"extracted": 1.0, "quoted": 1.0, "defaulted": 0.5, "placeholder": 0.0}
+
+
+def lead_time_speed_confidence(source: Optional[str]) -> float:
+    """How much a candidate's lead time may count toward its SPEED score, by provenance.
+    1.0 (real: extracted/quoted) | 0.5 (estimated: defaulted) | 0.0 (placeholder: no real
+    lead) | 0.5 (unknown/None: conservative). Ranking only — does not change the displayed
+    lead time."""
+    return _LEAD_TIME_SPEED_CONFIDENCE.get(source or "", 0.5)
 
 
 @dataclass
@@ -83,6 +156,10 @@ class SourcingOption:
     admin_fee: float = 0.0
     source_url: Optional[str] = None
     price_tbd: bool = False             # True when no price was found
+    # Provenance of lead_time_days, mirroring price_tbd's honesty role (see lead_time_source_for):
+    # "extracted" (real, from a catalog/listing) | "defaulted" (synthetic heuristic — LLM/None) |
+    # "placeholder" (no real lead time pre-quote) | "quoted" (a confirmed quote; set in the transform).
+    lead_time_source: str = "defaulted"
     extracted_shipping_fee: Optional[float] = None  # from vendor page; 0 = Free Shipping
     is_freight: bool = False            # True if LTL/truck freight required
     match_type: str = "Exact OEM"        # "Exact OEM" | "Aftermarket Compatible" | "Functional Alternative"
@@ -110,6 +187,10 @@ class SourcingOption:
     # PN match status from Tier 2 LLM extraction (mirrors Tier 1's found_part_number logic)
     # Values: "exact_match" | "partial_match" | "no_match" | "not_visible" | None (Tier 1)
     pn_match_status: Optional[str] = None
+    # Phase B0 — document-sourcing foundation (state only; defaults preserve today's
+    # behavior — every result today is a direct, wave-1 match).
+    match_basis: str = MATCH_BASIS_DIRECT       # "direct" | "spec_matched"
+    match_wave: int = MATCH_WAVE_DIRECT         # 1 = initial direct wave; 2+ appended later
 
 
 @dataclass
@@ -160,8 +241,8 @@ class ProcurementReport:
 
 
 @dataclass
-class ProcurementRun:
-    """In-memory representation of a durable procurement workflow.
+class SourcingRun:
+    """In-memory representation of a durable sourcing workflow.
 
     The SQLAlchemy persistence model lives in
     utils/procurement_agent/state/persistence.py and mirrors this schema.
@@ -170,12 +251,17 @@ class ProcurementRun:
     # Identity
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     facility_id: str = "00000000-0000-0000-0000-000000000000"  # placeholder for prototype
+    company_id: Optional[str] = None  # tenant PIN (D2 prereq #1); None until identity lands
     initiated_by_user_id: Optional[str] = None
 
     # Workflow state
     current_phase: str = "intake"
     urgency_factor: float = 0.3
     warranty_status: str = "unknown"
+
+    # Phase B0 — the run's knowledge of the part's document (state only; default
+    # "none" = today's behavior, document-less direct sourcing).
+    document_status: str = DOCUMENT_STATUS_NONE
 
     # Phase outputs (populated as the run progresses)
     asset_specs_json: Optional[dict] = None

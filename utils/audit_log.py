@@ -37,7 +37,7 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 # In-process write-failure ring buffer
 #
-# Module state survives Streamlit reruns (same server process), so failures
+# Module state survives across requests (same server process), so failures
 # accumulate until the server restarts. The admin view reads this to surface
 # a warning banner when writes have been failing silently.
 # ---------------------------------------------------------------------------

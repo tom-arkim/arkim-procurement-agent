@@ -1,0 +1,408 @@
+"""
+Tests for utils/supplier_registry.py — Apollo cache schema extension.
+
+Covers the idempotent migration, the domain-keyed upsert_apollo_data (including
+JSON round-trip for the contact-resolution fields), and the needs_reenrichment
+staleness logic. The DB path is isolated to a tmp file via monkeypatch (mirrors
+test_price_db.py), so the real data/supplier_registry.sqlite is never touched.
+"""
+
+import json
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from utils import supplier_registry
+
+
+@pytest.fixture
+def isolated_db(tmp_path, monkeypatch):
+    """Point the registry at a throwaway sqlite file under tmp_path."""
+    monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(supplier_registry, "_DB_PATH", str(tmp_path / "supplier_registry.sqlite"))
+    return supplier_registry
+
+
+def _table_columns(sr) -> set:
+    conn = sr._get_conn()
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(suppliers)").fetchall()}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Migration
+# ---------------------------------------------------------------------------
+
+class TestMigration:
+    def test_apollo_columns_added(self, isolated_db):
+        cols = _table_columns(isolated_db)
+        for col in isolated_db._APOLLO_COLUMNS:
+            assert col in cols, f"missing migrated column: {col}"
+        # original columns still present
+        for col in ("id", "domain", "name", "onboarding_status", "created_at"):
+            assert col in cols
+
+    def test_idempotent_no_error_no_dataloss(self, isolated_db):
+        sr = isolated_db
+        sr.create_stub("Phoenix Pumps", domain="phoenixpumps.com")
+
+        # Re-run the migration repeatedly — must not raise and must not drop data.
+        for _ in range(3):
+            conn = sr._get_conn()
+            try:
+                sr._migrate(conn)  # explicit re-run on top of the _get_conn() run
+            finally:
+                conn.close()
+
+        rec = sr.lookup_by_domain("phoenixpumps.com")
+        assert rec is not None
+        assert rec["name"] == "Phoenix Pumps"
+        # seeded vendors also survive
+        assert sr.lookup_by_domain("grainger.com") is not None
+
+
+# ---------------------------------------------------------------------------
+# upsert_apollo_data
+# ---------------------------------------------------------------------------
+
+class TestUpsertApolloData:
+    def test_write_and_readback_including_json(self, isolated_db):
+        sr = isolated_db
+        ok = sr.upsert_apollo_data("phoenixpumps.com", {
+            "apollo_org_name": "Phoenix Pumps Inc",
+            "apollo_description": "Industrial pump distributor",
+            "apollo_industry": "industrial automation",
+            "apollo_keywords": ["pumps", "seals"],
+            "apollo_country": "United States",
+            "apollo_state": "Arizona",
+            "apollo_raw_address": "123 Main St, Phoenix, AZ",
+            "is_us_confirmed": True,
+            "suitability_status": "confirmed",
+            "apollo_departmental_head_count": {"sales": 5, "engineering": 12},
+            "apollo_technology_names": ["Shopify", "Salesforce"],
+        })
+        assert ok is True
+
+        rec = sr.lookup_by_domain("phoenixpumps.com")
+        assert rec["apollo_org_name"] == "Phoenix Pumps Inc"
+        assert rec["apollo_description"] == "Industrial pump distributor"
+        assert rec["apollo_industry"] == "industrial automation"
+        assert rec["apollo_country"] == "United States"
+        assert rec["apollo_state"] == "Arizona"
+        assert rec["apollo_raw_address"] == "123 Main St, Phoenix, AZ"
+        assert rec["is_us_confirmed"] == 1  # bool -> int
+        assert rec["suitability_status"] == "confirmed"
+        assert rec["apollo_enriched_at"]  # auto-stamped
+
+        # Contact-resolution JSON fields round-trip.
+        assert json.loads(rec["apollo_keywords"]) == ["pumps", "seals"]
+        assert json.loads(rec["apollo_departmental_head_count"]) == {"sales": 5, "engineering": 12}
+        assert json.loads(rec["apollo_technology_names"]) == ["Shopify", "Salesforce"]
+
+    def test_upsert_creates_row_when_domain_absent(self, isolated_db):
+        sr = isolated_db
+        assert sr.lookup_by_domain("brand-new-co.com") is None
+        ok = sr.upsert_apollo_data("brand-new-co.com", {"suitability_status": "unconfirmed_flag_human"})
+        assert ok is True
+        rec = sr.lookup_by_domain("brand-new-co.com")
+        assert rec is not None
+        assert rec["suitability_status"] == "unconfirmed_flag_human"
+        assert rec["onboarding_status"] == "discovery_only"  # minimal stub default
+
+    def test_confirmed_suitability_coexists_with_discovery_only(self, isolated_db):
+        """suitability_status is independent of onboarding_status (module docstring)."""
+        sr = isolated_db
+        sr.create_stub("Phoenix Pumps", domain="phoenixpumps.com")
+        sr.upsert_apollo_data("phoenixpumps.com", {"suitability_status": "confirmed"})
+        rec = sr.lookup_by_domain("phoenixpumps.com")
+        assert rec["suitability_status"] == "confirmed"
+        assert rec["onboarding_status"] == "discovery_only"  # untouched by Apollo upsert
+
+    def test_ignores_non_apollo_fields(self, isolated_db):
+        """Apollo upsert must not write onboarding-lifecycle columns (whitelist boundary)."""
+        sr = isolated_db
+        sr.create_stub("X", domain="x.com")
+        sr.upsert_apollo_data("x.com", {
+            "onboarding_status": "onboarded_arkim_supplier",  # not an Apollo column -> ignored
+            "apollo_industry": "valves",
+        })
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["apollo_industry"] == "valves"
+        assert rec["onboarding_status"] == "discovery_only"  # unchanged
+
+    def test_caller_supplied_enriched_at_is_preserved(self, isolated_db):
+        sr = isolated_db
+        pinned = (datetime.utcnow() - timedelta(days=10)).isoformat()
+        sr.upsert_apollo_data("x.com", {"suitability_status": "confirmed", "apollo_enriched_at": pinned})
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["apollo_enriched_at"] == pinned
+
+    def test_empty_domain_returns_false(self, isolated_db):
+        assert isolated_db.upsert_apollo_data("", {"apollo_industry": "x"}) is False
+
+    def test_no_apollo_fields_returns_false(self, isolated_db):
+        isolated_db.create_stub("X", domain="x.com")
+        assert isolated_db.upsert_apollo_data("x.com", {"foo": "bar"}) is False
+
+    def test_url_normalizes_to_domain(self, isolated_db):
+        sr = isolated_db
+        sr.upsert_apollo_data("https://www.phoenixpumps.com/contact", {"apollo_industry": "pumps"})
+        rec = sr.lookup_by_domain("phoenixpumps.com")
+        assert rec is not None
+        assert rec["apollo_industry"] == "pumps"
+
+
+# ---------------------------------------------------------------------------
+# needs_reenrichment (pure logic)
+# ---------------------------------------------------------------------------
+
+class TestStaleness:
+    def test_fresh_confirmed_not_stale(self):
+        s = {"onboarding_status": "discovery_only",
+             "apollo_enriched_at": datetime.utcnow().isoformat()}
+        assert supplier_registry.needs_reenrichment(s) is False
+
+    def test_stale_confirmed_needs_reenrich(self):
+        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        s = {"onboarding_status": "discovery_only", "apollo_enriched_at": old}
+        assert supplier_registry.needs_reenrichment(s) is True
+
+    def test_onboarded_exempt_even_if_ancient(self):
+        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        s = {"onboarding_status": "onboarded_arkim_supplier", "apollo_enriched_at": old}
+        assert supplier_registry.needs_reenrichment(s) is False
+
+    def test_invited_not_exempt(self):
+        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        s = {"onboarding_status": "invited", "apollo_enriched_at": old}
+        assert supplier_registry.needs_reenrichment(s) is True
+
+    def test_never_enriched_non_onboarded_is_stale(self):
+        s = {"onboarding_status": "discovery_only", "apollo_enriched_at": None}
+        assert supplier_registry.needs_reenrichment(s) is True
+
+    def test_unparseable_date_treated_stale(self):
+        s = {"onboarding_status": "discovery_only", "apollo_enriched_at": "not-a-date"}
+        assert supplier_registry.needs_reenrichment(s) is True
+
+    def test_tz_aware_fresh_not_stale(self):
+        # tz-AWARE timestamp (+00:00) must not crash the naive subtraction.
+        s = {"onboarding_status": "discovery_only",
+             "apollo_enriched_at": datetime.now(timezone.utc).isoformat()}
+        assert supplier_registry.needs_reenrichment(s) is False
+
+    def test_tz_aware_stale_needs_reenrich(self):
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
+        s = {"onboarding_status": "discovery_only", "apollo_enriched_at": old}
+        assert supplier_registry.needs_reenrichment(s) is True
+
+    def test_falsy_supplier_false(self):
+        assert supplier_registry.needs_reenrichment(None) is False
+        assert supplier_registry.needs_reenrichment({}) is False
+
+    def test_ttl_param_respected(self):
+        d = (datetime.utcnow() - timedelta(days=10)).isoformat()
+        s = {"onboarding_status": "discovery_only", "apollo_enriched_at": d}
+        assert supplier_registry.needs_reenrichment(s, ttl_days=5) is True
+        assert supplier_registry.needs_reenrichment(s, ttl_days=30) is False
+
+    def test_staleness_via_store_roundtrip(self, isolated_db):
+        sr = isolated_db
+        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        sr.upsert_apollo_data("stale-co.com", {"suitability_status": "confirmed", "apollo_enriched_at": old})
+        rec = sr.lookup_by_domain("stale-co.com")
+        assert sr.needs_reenrichment(rec) is True
+
+        fresh = datetime.utcnow().isoformat()
+        sr.upsert_apollo_data("fresh-co.com", {"suitability_status": "confirmed", "apollo_enriched_at": fresh})
+        assert sr.needs_reenrichment(sr.lookup_by_domain("fresh-co.com")) is False
+
+
+# ---------------------------------------------------------------------------
+# Contact-resolution columns + upsert/bounce
+# ---------------------------------------------------------------------------
+
+class TestContactResolution:
+    def test_contact_columns_added(self, isolated_db):
+        cols = _table_columns(isolated_db)
+        for col in isolated_db._CONTACT_COLUMNS:
+            assert col in cols
+        assert "contact_email" in cols  # base column reused for the resolved email
+
+    def test_upsert_contact_roundtrip_and_autostamp(self, isolated_db):
+        sr = isolated_db
+        ok = sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                         "contact_method": "generic_inbox",
+                                         "contact_status": "resolved"})
+        assert ok is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["contact_email"] == "sales@x.com"
+        assert rec["contact_method"] == "generic_inbox"
+        assert rec["contact_status"] == "resolved"
+        assert rec["contact_resolved_at"]  # auto-stamped
+
+    def test_upsert_contact_empty_domain_returns_false(self, isolated_db):
+        assert isolated_db.upsert_contact("", {"contact_email": "x@y.com"}) is False
+
+    def test_mark_contact_bounced_clears_and_flags(self, isolated_db):
+        sr = isolated_db
+        sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                    "contact_method": "generic_inbox", "contact_status": "resolved"})
+        assert sr.mark_contact_bounced("x.com") is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["contact_email"] is None     # email cleared
+        assert rec["contact_status"] == "bounced"
+
+
+# ---------------------------------------------------------------------------
+# Dual primary/fallback contact model
+# ---------------------------------------------------------------------------
+
+class TestPrimaryContact:
+    def test_primary_columns_added(self, isolated_db):
+        cols = _table_columns(isolated_db)
+        for col in isolated_db._PRIMARY_COLUMNS:
+            assert col in cols
+
+    def test_upsert_primary_contact_roundtrip(self, isolated_db):
+        sr = isolated_db
+        ok = sr.upsert_primary_contact("x.com", {
+            "primary_contact_email": "jane@x.com", "primary_contact_name": "Jane Sales",
+            "primary_contact_title": "Sales Manager", "primary_contact_source": "apollo_enriched",
+            "primary_contact_status": "resolved",
+        })
+        assert ok is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["primary_contact_email"] == "jane@x.com"
+        assert rec["primary_contact_name"] == "Jane Sales"
+        assert rec["primary_contact_status"] == "resolved"
+        assert rec["primary_contact_at"]  # auto-stamped
+
+    def test_primary_upsert_leaves_generic_fallback_intact(self, isolated_db):
+        sr = isolated_db
+        sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                    "contact_method": "generic_inbox", "contact_status": "resolved"})
+        sr.upsert_primary_contact("x.com", {"primary_contact_email": "jane@x.com",
+                                            "primary_contact_status": "resolved"})
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["contact_email"] == "sales@x.com"     # fallback preserved
+        assert rec["primary_contact_email"] == "jane@x.com"
+
+    def test_mark_primary_bounced(self, isolated_db):
+        sr = isolated_db
+        sr.upsert_primary_contact("x.com", {"primary_contact_email": "jane@x.com",
+                                            "primary_contact_status": "resolved"})
+        sr.upsert_contact("x.com", {"contact_email": "sales@x.com",
+                                    "contact_method": "generic_inbox", "contact_status": "resolved"})
+        assert sr.mark_contact_bounced("x.com", which="primary") is True
+        rec = sr.lookup_by_domain("x.com")
+        assert rec["primary_contact_email"] is None
+        assert rec["primary_contact_status"] == "bounced"
+        assert rec["contact_email"] == "sales@x.com"     # generic fallback untouched
+
+
+class TestEffectiveContact:
+    def test_resolved_primary_wins(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "resolved",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.effective_contact(rec) == {"email": "jane@x.com", "source": "primary"}
+
+    def test_primary_no_response_falls_back_to_generic(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "no_response",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.effective_contact(rec) == {"email": "sales@x.com", "source": "fallback"}
+
+    def test_primary_bounced_falls_back_to_generic(self):
+        rec = {"primary_contact_email": None, "primary_contact_status": "bounced",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.effective_contact(rec) == {"email": "sales@x.com", "source": "fallback"}
+
+    def test_both_bounced_is_none(self):
+        rec = {"primary_contact_status": "bounced", "contact_email": None, "contact_status": "bounced"}
+        assert supplier_registry.effective_contact(rec) == {"email": None, "source": "none"}
+
+    def test_empty_record(self):
+        assert supplier_registry.effective_contact(None) == {"email": None, "source": "none"}
+
+
+# ---------------------------------------------------------------------------
+# recipient_set — To/CC assembly for one outbound message
+# ---------------------------------------------------------------------------
+
+class TestRecipientSet:
+    def test_named_present_to_named_cc_generic(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "resolved",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["jane@x.com"], "cc": ["sales@x.com"]}
+
+    def test_named_absent_generic_only_to(self):
+        rec = {"primary_contact_status": "none",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["sales@x.com"], "cc": []}
+
+    def test_primary_resolved_but_generic_bounced_excludes_generic(self):
+        rec = {"primary_contact_email": "jane@x.com", "primary_contact_status": "resolved",
+               "contact_email": None, "contact_status": "bounced"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["jane@x.com"], "cc": []}
+
+    def test_primary_bounced_falls_back_to_generic_to(self):
+        rec = {"primary_contact_email": None, "primary_contact_status": "bounced",
+               "contact_email": "sales@x.com", "contact_status": "resolved"}
+        assert supplier_registry.recipient_set(rec) == {"to": ["sales@x.com"], "cc": []}
+
+    def test_both_bounced_empty(self):
+        rec = {"primary_contact_status": "bounced", "contact_email": None, "contact_status": "bounced"}
+        assert supplier_registry.recipient_set(rec) == {"to": [], "cc": []}
+
+    def test_none_record_empty(self):
+        assert supplier_registry.recipient_set(None) == {"to": [], "cc": []}
+
+
+# ---------------------------------------------------------------------------
+# sent_messages — outbound send log (inbound-matching key)
+# ---------------------------------------------------------------------------
+
+class TestSentMessages:
+    def test_table_created(self, isolated_db):
+        conn = isolated_db._get_conn()
+        try:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        finally:
+            conn.close()
+        assert "sent_messages" in names
+
+    def test_record_and_fetch_roundtrip(self, isolated_db):
+        sr = isolated_db
+        mid = sr.record_sent_message(
+            run_id="run1", supplier_domain="www.BayPower.com", vendor_name="Bay Power",
+            to=["jane@baypower.com"], cc=["sales@baypower.com"],
+            subject="Quote request", body="hello", status="stubbed",
+            thread_id=None, approved_by="Maintenance Director",
+        )
+        assert mid
+        rows = sr.get_sent_messages(run_id="run1")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["supplier_domain"] == "baypower.com"      # normalized
+        assert row["vendor_name"] == "Bay Power"
+        assert row["recipients_to"] == ["jane@baypower.com"]  # JSON decoded
+        assert row["recipients_cc"] == ["sales@baypower.com"]
+        assert row["status"] == "stubbed"
+        assert row["approved_by"] == "Maintenance Director"
+        assert row["sent_at"]                                 # auto-stamped
+        assert row["message_id"] is None and row["thread_id"] is None  # placeholders
+
+    def test_filter_by_domain(self, isolated_db):
+        sr = isolated_db
+        sr.record_sent_message("run1", "baypower.com", "Bay Power", to=["a@baypower.com"])
+        sr.record_sent_message("run1", "standardelectricsupply.com", "Standard Electric",
+                               to=["b@standardelectricsupply.com"])
+        assert len(sr.get_sent_messages(run_id="run1")) == 2
+        only = sr.get_sent_messages(domain="baypower.com")
+        assert len(only) == 1 and only[0]["vendor_name"] == "Bay Power"
+
+    def test_empty_when_none(self, isolated_db):
+        assert isolated_db.get_sent_messages(run_id="no-such-run") == []

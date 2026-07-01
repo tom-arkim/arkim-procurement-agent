@@ -1,6 +1,7 @@
 """
 utils/sourcing/enterprise_search.py
-Tier 1/1.5 (_call_enterprise_api) and Tier 2 (_discover_national_specialists).
+Tier 2 marketplace search (_call_enterprise_api) and Tier 3 national specialist
+discovery (_discover_national_specialists) per brief Section 8.3.
 
 Both tiers share helpers (_base_reliability, _is_heavy_item, _vendor_merchant_type)
 and differ mainly in merchant_type assignment and how prices are sourced.
@@ -25,7 +26,7 @@ from utils.sourcing_archieved.scoring import (
     _is_collection_url,
 )
 from utils.sourcing_archieved.filtering import _counterfeit_risk_flag
-from utils.sourcing_archieved.tavily_client import _search_vendor_prices, _build_tier2_query
+from utils.sourcing_archieved.tavily_client import _search_vendor_prices, _build_tier3_query
 from utils.sourcing_archieved.llm_parsing import _anthropic_complete, _llm_parse_results
 from utils.sourcing_archieved.price_sanity import _apply_price_sanity
 from utils.sourcing_archieved.market_confidence import _fetch_market_confidence
@@ -63,13 +64,13 @@ def _is_heavy_item(specs: AssetSpecs, weight_lbs: Optional[float] = None) -> boo
 
 
 # ---------------------------------------------------------------------------
-# Tier 1 / 1.5
+# Tier 2 — Marketplace Price Search (brief Section 8.3)
 # ---------------------------------------------------------------------------
 
 def _call_enterprise_api(specs: AssetSpecs,
                           force_refresh: bool = False,
                           search_mode: str = "exact") -> list[SourcingOption]:
-    """Tier 1 / 1.5: check JSON price DB first, then real-time Tavily search.
+    """Tier 2 marketplace search per brief Section 8.3: check JSON price DB first, then real-time Tavily search.
 
     Produces two kinds of SourcingOptions:
       - price_tbd=False : real price found — goes into TCA comparison table
@@ -82,12 +83,17 @@ def _call_enterprise_api(specs: AssetSpecs,
     cached_vendors: set[str] = set()
 
     if not force_refresh:
-        cached = get_cached_prices(specs.part_number)
+        cached = get_cached_prices(specs.manufacturer, specs.part_number)
         for vendor_name, data in cached.items():
             fetched    = data["date_fetched"][:10]
             source     = data.get("source", "live")
             label      = "Pre-Negotiated" if source == "rfq" else "Cached"
             cached_url = data.get("url")
+            # Option B: no snippet is stored in the cache, so _compute_suitability_score
+            # cannot run. A confirmed price is strong evidence of a real product listing;
+            # use a floor-clearing default so cache hits survive the 30% suitability gate.
+            # rfq = manually entered quote (highest confidence); live = Tavily-fetched price.
+            cached_suit = 70.0 if source == "rfq" else 50.0
             print(f"[Sourcing] Price DB HIT ({label}): {vendor_name} @ ${data['price']:.2f} (fetched {fetched})")
             options.append(SourcingOption(
                 vendor_name=vendor_name,
@@ -99,10 +105,11 @@ def _call_enterprise_api(specs: AssetSpecs,
                 notes=f"{label} Price — fetched {fetched}",
                 source_url=cached_url,
                 price_tbd=False,
+                suitability_score=cached_suit,
             ))
             cached_vendors.add(vendor_name)
     else:
-        print("[Sourcing] Force refresh — bypassing price DB.")
+        print("[Sourcing] Force refresh -- bypassing price DB.")
 
     missing = [v for v in TARGET_VENDORS if v not in cached_vendors]
     if missing:
@@ -154,7 +161,7 @@ def _call_enterprise_api(specs: AssetSpecs,
 
             if not url or vendor in seen:
                 if not url:
-                    print(f"[Sourcing] Skipping {vendor} — no URL")
+                    print(f"[Sourcing] Skipping {vendor} -- no URL")
                 continue
             seen.add(vendor)
 
@@ -162,7 +169,7 @@ def _call_enterprise_api(specs: AssetSpecs,
             if is_coll:
                 exact_match = False
                 match_type  = "Functional Alternative"
-                print(f"[Sourcing] Collection page detected — flagging as Functional Alternative: {url}")
+                print(f"[Sourcing] Collection page detected -- flagging as Functional Alternative: {url}")
 
             if heavy and resolved_terms is None and ship_fee is None:
                 resolved_terms = "LTL Freight Required"
@@ -175,7 +182,7 @@ def _call_enterprise_api(specs: AssetSpecs,
 
             if found_pn is None and price is not None:
                 print(f"[Sourcing] PN Enforcement: {vendor} has no found_part_number "
-                      f"— stripping price, demoting to Inquiry Required")
+                      f"-- stripping price, demoting to Inquiry Required")
                 price = None
 
             snippet = snippet_map.get(url, "")
@@ -213,7 +220,7 @@ def _call_enterprise_api(specs: AssetSpecs,
                 is_oem_direct=is_oem_dir,
             )
             if price is not None:
-                save_price(specs.part_number, vendor, float(price), int(lead), source="live", url=url)
+                save_price(specs.manufacturer, specs.part_number, vendor, float(price), int(lead), source="live", url=url)
                 print(f"[Sourcing] Priced{tag} suit={suit:.0f}%: {vendor} @ ${price:.2f} | {url}")
                 options.append(SourcingOption(
                     vendor_name=vendor,
@@ -311,7 +318,7 @@ def _is_oem_authorized_distributor(
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — National Specialist Discovery
+# Tier 3 — National Specialist Discovery (brief Section 8.3)
 # ---------------------------------------------------------------------------
 
 _NATIONAL_SPECIALIST_SYSTEM = """You are a procurement data extractor for industrial equipment.
@@ -349,13 +356,55 @@ Part number matching (required for every result):
 """
 
 
+def _is_us_url(url: str) -> bool:
+    """True unless the URL is on a known non-US TLD or domain hint.
+
+    Shared Tier 3 geo gate so the national and aftermarket discovery branches
+    can't drift (was previously inline in national discovery only).
+    """
+    from utils.sourcing_archieved.tavily_client import NON_US_TLDS, NON_US_DOMAIN_HINTS
+    from urllib.parse import urlparse
+    try:
+        hostname = (urlparse((url or "").lower()).hostname or "")
+        if any(hostname.endswith(tld) for tld in NON_US_TLDS):
+            return False
+        if any(hint in hostname for hint in NON_US_DOMAIN_HINTS):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _filter_us_tier3_results(results: list[dict], label: str = "Tier 3") -> list[dict]:
+    """Drop non-US and excluded-host results before they reach the LLM.
+
+    The single geo filter used by BOTH Tier 3 discovery paths (national +
+    aftermarket). Mirrors the original inline national-path logic exactly.
+    """
+    from utils.sourcing_archieved.constants import _TIER3_EXCLUDED_HOSTS
+
+    pre_filter = len(results)
+    results = [r for r in results if _is_us_url(r.get("url", ""))]
+    if len(results) < pre_filter:
+        print(f"[Sourcing] {label} geographic filter: removed {pre_filter - len(results)} non-US result(s)")
+
+    pre_excl = len(results)
+    results = [
+        r for r in results
+        if not any(h in (r.get("url") or "").lower() for h in _TIER3_EXCLUDED_HOSTS)
+    ]
+    if len(results) < pre_excl:
+        print(f"[Sourcing] {label} host exclusion: removed {pre_excl - len(results)} excluded host(s)")
+    return results
+
+
 def _discover_national_specialists(specs: AssetSpecs,
                                     enterprise_options: list[SourcingOption]) -> list[SourcingOption]:
-    """Tier 2: open-web national specialist discovery.
+    """Tier 3: open-web national specialist discovery per brief Section 8.3.
 
     Searches the full US internet using detected_type so brand-agnostic specialists
     (e.g. pump distributors, conveyor suppliers) that list Add-to-Cart pricing appear.
-    No price estimation — if price not found in snippet, the option is price_tbd=True (-> Tier 3).
+    No price estimation — if price not found in snippet, the option is price_tbd=True.
     """
     import utils.sourcing_archieved as _pkg
     from utils.brand_intelligence import get_brand_relationships
@@ -364,21 +413,27 @@ def _discover_national_specialists(specs: AssetSpecs,
     _equip_kw_t2 = _detect_equip_type(specs)
     _brand_rels  = get_brand_relationships(specs.manufacturer, _equip_kw_t2 or "general")
 
-    query = _build_tier2_query(specs)
-    print(f"[Sourcing] Tier 2 national query: {query!r}")
+    query = _build_tier3_query(specs)
+    print(f"[Sourcing] Tier 3 national query: {query!r}")
 
     if not _pkg._tavily:
-        print("[Sourcing] Tier 2 skipped — Tavily not initialised.")
+        print("[Sourcing] Tier 3 skipped -- Tavily not initialised.")
         return []
 
     try:
         response = _pkg._tavily.search(query=query, search_depth="advanced", max_results=10)
         results  = response.get("results", [])
     except Exception as exc:
-        print(f"[Sourcing] Tier 2 Tavily error: {exc}")
+        print(f"[Sourcing] Tier 3 Tavily error: {exc}")
         return []
 
     if not results or not _pkg.ANTHROPIC_API_KEY:
+        return []
+
+    # Filter non-US / excluded-host results before passing to LLM (shared gate).
+    results = _filter_us_tier3_results(results, label="Tier 3")
+
+    if not results:
         return []
 
     snippet_map = {
@@ -400,9 +455,9 @@ def _discover_national_specialists(specs: AssetSpecs,
             return []
         vendors = [v for v in json.loads(match.group(0))
                    if isinstance(v, dict) and v.get("name")]
-        print(f"[Sourcing] Tier 2 found {len(vendors)} national specialist(s)")
+        print(f"[Sourcing] Tier 3 found {len(vendors)} national specialist(s)")
     except Exception as exc:
-        print(f"[Sourcing] Tier 2 LLM error: {exc}")
+        print(f"[Sourcing] Tier 3 LLM error: {exc}")
         return []
 
     tier1_lower = {"grainger", "mcmaster", "mcmaster-carr", "msc industrial",
@@ -435,7 +490,7 @@ def _discover_national_specialists(specs: AssetSpecs,
 
         # PN enforcement: no_match → annotate and skip scoring
         if pn_status == "no_match":
-            print(f"[Sourcing] Tier 2 PN no_match (pn_mismatch): {name} — "
+            print(f"[Sourcing] Tier 3 PN no_match (pn_mismatch): {name} -- "
                   f"found '{found_pn}' vs searched '{specs.part_number}'")
             options.append(SourcingOption(
                 vendor_name=name,
@@ -525,11 +580,11 @@ def _discover_national_specialists(specs: AssetSpecs,
             match_type=match_type,
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Tier 2: {name} — {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | "
+        print(f"  Tier 3: {name} -- {tag} | {lead}d | suit={suit:.0f}% | {t2_merchant} | "
               f"{stier or 'no tier'} | pn={pn_status}")
 
     if not options:
-        print("[Sourcing] Tier 2: no qualifying national specialists found")
+        print("[Sourcing] Tier 3: no qualifying national specialists found")
     return options
 
 
@@ -621,7 +676,7 @@ def _discover_aftermarket_specialists(
 
     warranty = (getattr(specs, "warranty_status", None) or "").lower()
     if warranty == "in_warranty":
-        print("[Sourcing] Aftermarket pass skipped — asset is in warranty")
+        print("[Sourcing] Aftermarket pass skipped -- asset is in warranty")
         return []
 
     # Gate by AFTERMARKET_VIABLE_CATEGORIES rather than category field.
@@ -632,7 +687,7 @@ def _discover_aftermarket_specialists(
     # guard below catches it anyway.
     dtype_lower = (getattr(specs, "detected_type", None) or "").lower()
     if not any(cat in dtype_lower for cat in AFTERMARKET_VIABLE_CATEGORIES):
-        print(f"[Sourcing] Aftermarket pass skipped — '{dtype_lower}' not in viable categories")
+        print(f"[Sourcing] Aftermarket pass skipped -- '{dtype_lower}' not in viable categories")
         return []
 
     if not _pkg._tavily:
@@ -650,6 +705,13 @@ def _discover_aftermarket_specialists(
         return []
 
     if not results or not _pkg.ANTHROPIC_API_KEY:
+        return []
+
+    # Same US geo gate as national discovery — drop non-US / excluded hosts before
+    # the LLM. Previously missing here, so non-US suppliers (e.g. made-in-china.com)
+    # leaked into Tier 3 via the aftermarket path.
+    results = _filter_us_tier3_results(results, label="Aftermarket")
+    if not results:
         return []
 
     snippet_map = {
@@ -725,8 +787,61 @@ def _discover_aftermarket_specialists(
             notes=f"Aftermarket equivalent — {url}" if url else "Aftermarket equivalent",
         ))
         tag = "TBD" if tbd else f"${base_price:.2f}"
-        print(f"  Aftermarket: {name} — {tag} | {lead}d | suit={suit:.0f}% | conf={conf:.0f}%")
+        print(f"  Aftermarket: {name} -- {tag} | {lead}d | suit={suit:.0f}% | conf={conf:.0f}%")
 
     if not options:
         print("[Sourcing] Aftermarket: no qualifying vendors found")
     return options
+
+
+# ---------------------------------------------------------------------------
+# URL-authoritative vendor identity (Item 7)
+# ---------------------------------------------------------------------------
+
+_KNOWN_VENDOR_HOSTS: dict[str, str] = {
+    # National distributors
+    "mouser.com":             "Mouser Electronics",
+    "digikey.com":            "DigiKey",
+    "grainger.com":           "Grainger",
+    "mcmaster.com":           "McMaster-Carr",
+    "mscdirect.com":          "MSC Industrial",
+    "motionindustries.com":   "Motion Industries",
+    "applied.com":            "Applied Industrial Technologies",
+    "fastenal.com":           "Fastenal",
+    "automationdirect.com":   "AutomationDirect",
+    # Industrial specialists (observed from sourcing runs)
+    "instrumart.com":         "Instrumart",
+    "instrumentation2go.com": "Instrumentation2Go",
+    "controlswarehouse.com":  "Controls Warehouse",
+    "galco.com":              "Galco Industrial",
+    # OEM direct
+    "endress.com":            "Endress+Hauser",
+    "rockwellautomation.com": "Rockwell Automation",
+    "abb.com":                "ABB",
+    "atlas-copco.com":        "Atlas Copco",
+    # Regional / observed from test runs
+    "vectorcontrols.com":     "Vector Controls",
+    "gebooth.com":            "GE Booth",
+    "carotek.com":            "Carotek",
+}
+
+
+def _vendor_name_from_url(url: str) -> Optional[str]:
+    """Return the canonical vendor name for a known host, or None.
+
+    Matches exact hostname (after stripping www.) and subdomain suffixes
+    so subdomains like e-direct.endress.com resolve to Endress+Hauser.
+    """
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        hostname = (urlparse(url.lower()).hostname or "").replace("www.", "")
+        if hostname in _KNOWN_VENDOR_HOSTS:
+            return _KNOWN_VENDOR_HOSTS[hostname]
+        for host, name in _KNOWN_VENDOR_HOSTS.items():
+            if hostname.endswith("." + host):
+                return name
+    except Exception:
+        pass
+    return None

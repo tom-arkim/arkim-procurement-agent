@@ -1,0 +1,61 @@
+[project]
+name = "arkim-procurement-agent"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "pandas>=2.0.0",
+    "anthropic>=0.40,<0.60",
+    "tavily-python>=0.7.24",
+    "Pillow>=10.0.0",
+    "sqlalchemy>=2.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+    "google-api-python-client>=2.197.0",
+    "google-auth>=2.53.0",
+    "pypdf>=6.13.1",
+    # Auth: Cognito JWT (RS256) validation + JWKS fetch. Ported from core's
+    # app/middleware/auth_middleware.py (no shared auth library exists).
+    "python-jose[cryptography]>=3.3.0",
+    "httpx>=0.27.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-cov",
+]
+
+# Application, not a distributable package: modules under utils/ are imported via
+# sys.path (see tests/conftest.py), so uv should manage the env without building
+# or installing this project itself.
+[tool.uv]
+package = false
+
+[tool.coverage.run]
+branch = true
+source = ["utils", "api_server"]
+omit = ["utils/procurement_agent/tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+# Coverage is measured, not gated (Phase 0.1) — intentionally no fail_under,
+# and --cov is NOT in addopts so normal/pre-commit runs stay fast and ungated.
+# Measure with: uv run pytest --cov
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["utils/procurement_agent/tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-config",
+    "--strict-markers",
+]

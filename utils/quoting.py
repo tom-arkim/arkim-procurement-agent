@@ -8,7 +8,7 @@ Generates the final Arkim-branded quote with full line-item breakdown.
 from datetime import datetime
 from typing import Optional
 from uuid import uuid4
-from utils.models import AssetSpecs, SourcingOption, ArkimQuote
+from utils.models import AssetSpecs, SourcingOption, ArkimQuote, lead_time_speed_confidence
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +131,9 @@ def _compute_tca_score(option: SourcingOption,
         cost_w  = COST_WEIGHT
 
     speed_score       = max(0.0, (MAX_LEAD_TIME - option.lead_time_days) / MAX_LEAD_TIME) * 100
+    # Provenance gate: a fabricated/estimated lead time can't win on speed. A defaulted lead is
+    # discounted; a placeholder (no real lead) earns 0 speed credit. Real values score in full.
+    speed_score      *= lead_time_speed_confidence(getattr(option, "lead_time_source", None))
     reliability_score = option.reliability_score
     friction_score    = 50.0 if option.requires_rfq else 100.0
 

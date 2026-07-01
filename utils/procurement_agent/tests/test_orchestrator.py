@@ -20,10 +20,10 @@ def test_start_new_run_returns_orchestrator(db_url):
 
 
 def test_load_returns_procurement_run_model(db_url):
-    from utils.models import ProcurementRun
+    from utils.models import SourcingRun
     orch = start_new_run(db_url=db_url)
     run = orch.load()
-    assert isinstance(run, ProcurementRun)
+    assert isinstance(run, SourcingRun)
     assert run.current_phase == Phase.INTAKE.value
 
 
@@ -71,25 +71,30 @@ def test_transition_to_cancelled_from_any_phase(db_url):
 
 def test_execute_current_phase_advances_through_all_phases(db_url):
     orch = start_new_run(db_url=db_url)
-    expected_sequence = [
-        Phase.INTAKE.value,
-        Phase.INVENTORY.value,
-        Phase.SOURCING.value,
-        Phase.COMPARISON.value,
-        Phase.PENDING_FIRST_APPROVAL.value,
-        Phase.APPROVED.value,
-        Phase.EXECUTING.value,
-        Phase.FULFILLING.value,
-        Phase.COMPLETED.value,
-    ]
 
-    for expected_phase in expected_sequence:
-        state = orch.get_state()
-        assert state["current_phase"] == expected_phase, (
-            f"Expected {expected_phase}, got {state['current_phase']}"
-        )
-        if expected_phase != Phase.COMPLETED.value:
-            orch.execute_current_phase()
+    # Intake → Inventory → Sourcing → Comparison (comparison runs agents, stays in COMPARISON)
+    orch.execute_current_phase()  # INTAKE → INVENTORY
+    orch.execute_current_phase()  # INVENTORY → SOURCING
+    orch.execute_current_phase()  # SOURCING → COMPARISON
+    orch.execute_current_phase()  # COMPARISON: runs agents, stays in COMPARISON
+
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.COMPARISON.value
+
+    # Phase 3: user selects a candidate → PENDING_FIRST_APPROVAL
+    orch.select_candidate({"vendor_name": "Test Vendor", "grand_total_usd": 500.0})
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.PENDING_FIRST_APPROVAL.value
+
+    # Single-approver path ($500 < $5000 with default rules)
+    orch.submit_approval("approved", approver_role="maintenance_director")
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.APPROVED.value
+
+    # Remaining phases use execute_current_phase (stubs)
+    orch.execute_current_phase()  # APPROVED → EXECUTING
+    orch.execute_current_phase()  # EXECUTING → FULFILLING
+    orch.execute_current_phase()  # FULFILLING → COMPLETED
 
     final = orch.get_state()
     assert final["current_phase"] == Phase.COMPLETED.value
@@ -111,8 +116,58 @@ def test_execute_phase_populates_sourcing_results(db_url):
     orch.execute_current_phase()  # SOURCING → COMPARISON
     state = orch.get_state()
     assert state["sourcing_results_json"] is not None
-    assert "tier1" in state["sourcing_results_json"]
-    assert state["sourcing_results_json"]["stub"] is True
+    sr = state["sourcing_results_json"]
+    # Phase 2: SourcingAgent output uses tier_1/tier_2/tier_3 keys
+    assert "tier_1" in sr
+    assert "tier_2" in sr
+    assert "tier_3" in sr
+    assert "urgency_applied" in sr
+
+
+# ---------------------------------------------------------------------------
+# Sourcing failure propagation (§4.5): a hard FAILURE surfaces as Phase.ERROR
+# (matching the FastAPI path), never masked as an empty COMPARISON result. A
+# genuine empty-but-successful search is NOT an error and still → COMPARISON.
+# ---------------------------------------------------------------------------
+
+def test_sourcing_failure_advances_to_error(db_url, monkeypatch):
+    import utils.procurement_agent.agents.sourcing_agent as sa
+
+    def _boom(self, run):
+        raise RuntimeError("tavily exploded")
+    monkeypatch.setattr(sa.SourcingAgent, "run", _boom)
+
+    orch = start_new_run(db_url=db_url)
+    orch.execute_current_phase()  # INTAKE → INVENTORY
+    orch.execute_current_phase()  # INVENTORY → SOURCING
+    orch.execute_current_phase()  # SOURCING → ERROR (was masked as COMPARISON)
+
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.ERROR.value
+    sr = state["sourcing_results_json"]
+    assert sr and sr.get("error")            # the failure detail is retained, not hidden
+
+
+def test_sourcing_empty_but_successful_stays_comparison(db_url, monkeypatch):
+    import utils.procurement_agent.agents.sourcing_agent as sa
+
+    empty_ok = {
+        "tier_1": {"results": [], "count": 0, "status": "ok"},
+        "tier_2": {"results": [], "count": 0, "status": "ok"},
+        "tier_3": {"results": [], "count": 0, "status": "ok"},
+        "warranty_banner": None, "urgency_applied": "predictive", "filters_applied": [],
+    }
+    monkeypatch.setattr(sa.SourcingAgent, "run", lambda self, run: empty_ok)
+
+    orch = start_new_run(db_url=db_url)
+    orch.execute_current_phase()  # INTAKE → INVENTORY
+    orch.execute_current_phase()  # INVENTORY → SOURCING
+    orch.execute_current_phase()  # SOURCING → COMPARISON (empty is not an error)
+
+    state = orch.get_state()
+    assert state["current_phase"] == Phase.COMPARISON.value
+    assert state["sourcing_results_json"]["tier_1"]["count"] == 0
+    assert "error" not in state["sourcing_results_json"]
 
 
 # ---------------------------------------------------------------------------

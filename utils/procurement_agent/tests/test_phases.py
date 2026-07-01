@@ -71,3 +71,27 @@ def test_validate_transition_returns_false_for_nonsense():
     # Invalid phase object would cause KeyError, but with correct phases it just returns False.
     assert not validate_transition(Phase.COMPLETED, Phase.INTAKE)
     assert not validate_transition(Phase.INTAKE, Phase.COMPLETED)  # skip too far
+
+
+# ---------------------------------------------------------------------------
+# Approval phase paths — both single-approver and dual-approver must be legal
+# ---------------------------------------------------------------------------
+
+def test_single_approver_path_is_valid():
+    # Dollar amount below dual-approval threshold: first approver goes straight to approved.
+    assert validate_transition(Phase.PENDING_FIRST_APPROVAL, Phase.APPROVED)
+
+
+def test_dual_approver_entry_is_valid():
+    # Dollar amount above dual-approval threshold: first approver routes to second approver.
+    assert validate_transition(Phase.PENDING_FIRST_APPROVAL, Phase.PENDING_SECOND_APPROVAL)
+
+
+def test_dual_approver_completion_is_valid():
+    # Second approver completes the approval.
+    assert validate_transition(Phase.PENDING_SECOND_APPROVAL, Phase.APPROVED)
+
+
+def test_second_approval_cannot_regress_to_first():
+    # Cannot send back to first approver once the second-approver stage is reached.
+    assert not validate_transition(Phase.PENDING_SECOND_APPROVAL, Phase.PENDING_FIRST_APPROVAL)

@@ -1,0 +1,18 @@
+# Pre-commit hooks for the Arkim Procurement Agent.
+#
+# Only the pytest hook is configured today. The house standard also specifies
+# ruff-check, ruff-format, and basedpyright hooks (see
+# docs/arkim_procurement_code_standard.md §1) — add those once [tool.ruff] and
+# [tool.basedpyright] are configured in pyproject.toml.
+#
+# Activate with: pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: pytest
+        name: pytest (unit)
+        entry: uv run pytest
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
