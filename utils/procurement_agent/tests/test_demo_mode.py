@@ -25,6 +25,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 
 
+# Valid DEMO_MODE X-Session-Id tokens (16–64 chars of [A-Za-z0-9-]) — two distinct
+# ones so a test can prove cross-session isolation (A cannot read B's runs).
+_SID = "0123456789abcdef-test-session"
+_SID_OTHER = "other-session-0123456789abcdef"
+
+
 def _import_api_server_fresh(monkeypatch, tmp_path):
     """Import api_server under a controlled env + isolated DB, regardless of
     whether it was already imported earlier in the session.
@@ -69,12 +75,18 @@ def demo_off(monkeypatch, tmp_path):
 
 @pytest.fixture
 def demo_on(monkeypatch, tmp_path):
-    """api_server with DEMO_MODE=true and email OFF — the allowlist is ACTIVE."""
+    """api_server with DEMO_MODE=true and email OFF — the allowlist is ACTIVE.
+
+    The TestClient carries a default X-Session-Id (a valid demo token) so the existing
+    allowlist/handler-reachability tests that POST /api/runs keep working now that a
+    DEMO_MODE write requires the header. Session-isolation tests that need a DIFFERENT
+    session override the header per-request (httpx merges with request headers winning);
+    tests that need NO header construct a fresh TestClient(api.app) without the default."""
     monkeypatch.setenv("DEMO_MODE", "true")
     monkeypatch.setenv("EMAIL_SEND_ENABLED", "")   # boot-refusal would fire otherwise
     api = _import_api_server_fresh(monkeypatch, tmp_path)
     assert api.DEMO_MODE is True
-    return TestClient(api.app), api
+    return TestClient(api.app, headers={"X-Session-Id": _SID}), api
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +453,7 @@ class TestApolloConstructionForcedOff:
         from utils import known_parts
         monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
 
-        client = TestClient(api.app)
+        client = TestClient(api.app, headers={"X-Session-Id": _SID})
         rid = client.post("/api/runs", json={}).json()["id"]
         specs = {"manufacturer": "Goulds", "part_number": "3196"}
         SF, ORM = api._SessionFactory, api.SourcingRunORM
@@ -675,3 +687,216 @@ class TestDemoFailClosedAfterCorsExempt:
     def test_unlisted_path_is_403(self, demo_on):
         client, _ = demo_on
         assert client.get("/api/some-route-that-does-not-exist").status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# SESSION ISOLATION + IDOR (FIX A): under DEMO_MODE an ephemeral per-visitor
+# X-Session-Id is stamped on a run at birth and scoped on every read/write, so a
+# leaked run/group id can't let another visitor read or act on someone else's run.
+# Existence-oracle discipline: a mismatched/missing/NULL-session access returns 404,
+# NOT 403 (a 404 is indistinguishable from "no such id"). All guards inert when off.
+# ---------------------------------------------------------------------------
+
+class TestDemoSessionWriteRequiresHeader:
+    def test_create_without_session_header_is_422(self, demo_on):
+        # A DEMO_MODE write (run birth) MUST carry a valid X-Session-Id so the run can
+        # be scoped to its creator. A fresh client with no default header -> 422.
+        _, api = demo_on
+        client = TestClient(api.app)   # no default session header
+        r = client.post("/api/runs", json={})
+        assert r.status_code == 422
+        assert "session" in r.json()["detail"].lower()
+
+    def test_create_with_malformed_session_is_422(self, demo_on):
+        # Charset/length bounded — junk is rejected, not silently accepted.
+        _, api = demo_on
+        client = TestClient(api.app)
+        r = client.post("/api/runs", json={}, headers={"X-Session-Id": "bad id!!"})
+        assert r.status_code == 422
+        assert "session" in r.json()["detail"].lower()
+
+    def test_create_with_valid_session_is_201(self, demo_on):
+        # A valid header births the run normally (the allowlist test still holds).
+        client, _ = demo_on   # default header is _SID
+        r = client.post("/api/runs", json={})
+        assert r.status_code == 201
+        assert r.json()["phase"] == "intake"
+
+
+class TestDemoSessionReadIsolation:
+    def test_get_run_same_session_200(self, demo_on):
+        # Owner reads their own run -> 200.
+        client, _ = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        assert client.get(f"/api/runs/{rid}").status_code == 200
+
+    def test_get_run_cross_session_404_not_403(self, demo_on):
+        # The core IDOR fix: a different session gets 404 (NOT 403 — no existence oracle).
+        client, _ = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.get(f"/api/runs/{rid}", headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+    def test_get_run_no_session_header_404(self, demo_on):
+        # No header at all -> can't own anything -> 404 (not 422 on a read; the
+        # 422 requirement is write-only). A misconfigured frontend sees 404s, not errors.
+        _, api = demo_on
+        client_with_sid, _ = demo_on
+        rid = client_with_sid.post("/api/runs", json={}).json()["id"]
+        client = TestClient(api.app)   # no default header
+        assert client.get(f"/api/runs/{rid}").status_code == 404
+
+    def test_get_run_unknown_id_404(self, demo_on):
+        # A genuinely-nonexistent id is also 404 — indistinguishable from not-owned.
+        client, _ = demo_on
+        assert client.get("/api/runs/no-such-run-id").status_code == 404
+
+    def test_null_session_row_404_to_demo_visitor(self, demo_on):
+        # A row with NULL session_id (a seeded maintenance run, or any pre-column run)
+        # is not owned by any demo visitor -> 404. Seeds a NULL-session run directly on
+        # the ORM (the way _seed_demo_maintenance_run does, bypassing the session stamp).
+        client, api = demo_on
+        import uuid as _uuid
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            s.add(ORM(
+                id=str(_uuid.uuid4()),
+                facility_id="fac-stockton",
+                current_phase="intake",
+                urgency_factor=0.3,
+                warranty_status="unknown",
+                session_id=None,   # the seeded-run shape
+                initiated_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc),
+                updated_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc),
+            ))
+            s.commit()
+            null_rid = s.query(ORM).filter(ORM.session_id.is_(None)).first().id
+        # Any demo visitor (any session) -> 404, never the run's detail.
+        assert client.get(f"/api/runs/{null_rid}").status_code == 404
+        assert client.get(
+            f"/api/runs/{null_rid}", headers={"X-Session-Id": _SID_OTHER}
+        ).status_code == 404
+
+
+class TestDemoSessionRunActionIsolation:
+    """messages / upload / confirm-intake are scoped to the run's owner: a cross-session
+    caller gets 404, not 403 (no oracle). The session check runs BEFORE any other guard."""
+
+    def test_messages_cross_session_404(self, demo_on, monkeypatch):
+        client, api = demo_on
+        agent = Mock()
+        agent.run.return_value = {
+            "sufficient": False, "asset_specs": {}, "manufacturer_confidence": 0,
+            "part_id_confidence": 0, "follow_up_question": "Which manufacturer?",
+            "confidence_summary": {},
+        }
+        monkeypatch.setattr(api, "IntakeAgent", Mock(return_value=agent))
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.post(f"/api/runs/{rid}/messages", json={"content": "a pump"},
+                        headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+        agent.run.assert_not_called()   # the handler never reached IntakeAgent
+
+    def test_confirm_intake_cross_session_404(self, demo_on, monkeypatch):
+        client, api = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        # Seed specs so the only thing that could 422 is the session check — proves the
+        # session 404 fires first (a 422 here would mean the session guard ran second).
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            run = s.get(ORM, rid)
+            run.asset_specs_json = json.dumps({"manufacturer": "Goulds", "part_number": "PN-1"})
+            s.commit()
+        monkeypatch.setattr(api, "_run_sourcing_background", lambda *a, **k: None)
+        r = client.post(f"/api/runs/{rid}/confirm-intake",
+                        headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+    def test_upload_cross_session_404(self, demo_on, monkeypatch):
+        client, api = demo_on
+        rid = client.post("/api/runs", json={}).json()["id"]
+        # A tiny in-memory image; the session 404 fires before any vision extraction.
+        r = client.post(
+            f"/api/runs/{rid}/upload",
+            files={"file": ("np.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+            data={"text": "a pump"},
+            headers={"X-Session-Id": _SID_OTHER},
+        )
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+
+class TestDemoSessionGroupIsolation:
+    """GET /api/groups/{group_id} is scoped to the requesting session by FILTERING the
+    basket's runs to those the session owns. A visitor only ever sees their OWN runs in
+    any basket — even an attacker who learns a victim's group_id AND injects their own
+    run into it sees only their own run, never the victim's (no leak, no DoS)."""
+
+    def test_group_same_session_200(self, demo_on):
+        client, _ = demo_on
+        gid = "11111111-2222-3333-4444-555555555555"
+        client.post("/api/runs", json={"group_id": gid})
+        r = client.get(f"/api/groups/{gid}")
+        assert r.status_code == 200
+        assert r.json()["run_count"] == 1
+
+    def test_group_cross_session_404(self, demo_on):
+        client, _ = demo_on
+        gid = "22222222-3333-4444-5555-666666666666"
+        client.post("/api/runs", json={"group_id": gid})   # owned by _SID
+        r = client.get(f"/api/groups/{gid}", headers={"X-Session-Id": _SID_OTHER})
+        assert r.status_code == 404
+        assert r.status_code != 403
+
+    def test_group_filters_to_session_owned_runs_only(self, demo_on):
+        # Attacker (_SID_OTHER) injects a run into the victim's (_SID) basket. Each
+        # session's GET shows ONLY its own runs — the attacker never sees the victim's
+        # run, and the victim's basket view excludes the attacker's injected run.
+        client, _ = demo_on
+        gid = "33333333-4444-5555-6666-777777777777"
+        victim_rid = client.post("/api/runs", json={"group_id": gid}).json()["id"]
+        attacker_rid = client.post(
+            "/api/runs", json={"group_id": gid}, headers={"X-Session-Id": _SID_OTHER}
+        ).json()["id"]
+        # Victim sees only their own run (attacker's injected run filtered out).
+        v = client.get(f"/api/groups/{gid}").json()
+        assert v["run_count"] == 1
+        assert v["runs"][0]["run_id"] == victim_rid
+        # Attacker sees only their own run (victim's run never leaks).
+        a = client.get(f"/api/groups/{gid}", headers={"X-Session-Id": _SID_OTHER}).json()
+        assert a["run_count"] == 1
+        assert a["runs"][0]["run_id"] == attacker_rid
+
+
+class TestDemoSessionOffNoRegression:
+    """With DEMO_MODE off: no session_id is stamped, no scoping runs — every route
+    behaves exactly as today. No header is required or honored."""
+
+    def test_create_no_header_201_when_off(self, demo_off):
+        client, _ = demo_off
+        assert client.post("/api/runs", json={}).status_code == 201
+
+    def test_get_run_no_header_200_when_off(self, demo_off):
+        client, _ = demo_off
+        rid = client.post("/api/runs", json={}).json()["id"]
+        assert client.get(f"/api/runs/{rid}").status_code == 200
+
+    def test_get_run_with_header_200_when_off(self, demo_off):
+        # A header is IGNORED when DEMO_MODE is off (no scoping) — sending one is harmless.
+        client, _ = demo_off
+        rid = client.post("/api/runs", json={}).json()["id"]
+        r = client.get(f"/api/runs/{rid}", headers={"X-Session-Id": _SID})
+        assert r.status_code == 200
+
+    def test_session_id_not_stamped_when_off(self, demo_off):
+        # The column stays NULL when DEMO_MODE is off (no demo plumbing active).
+        client, api = demo_off
+        rid = client.post("/api/runs", json={}).json()["id"]
+        SF, ORM = api._SessionFactory, api.SourcingRunORM
+        with SF() as s:
+            assert s.get(ORM, rid).session_id is None

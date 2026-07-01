@@ -77,6 +77,15 @@ class SourcingRunORM(Base):
     # request into N independent runs. Groups many runs; never unique. The one-run-one-part
     # invariant is unchanged — the basket groups runs, it does not make a run hold N parts.
     group_id = Column(String(36), nullable=True, index=True)
+    # DEMO_MODE session isolation — an ephemeral per-visitor id (the X-Session-Id header)
+    # stamped on a run at birth so the public no-login demo can scope reads/writes to the
+    # visitor who created the run (IDOR fix). NULL for every non-demo run and for seeded
+    # maintenance runs (which are therefore unreadable by demo visitors). Deliberately a
+    # SEPARATE column from company_id: company_id is the validated Cognito tenant PIN
+    # (auth-derived, Arc 1); session_id is an untrusted client-generated demo token. Mixing
+    # them would let a demo session id masquerade as a real tenant PIN later (false-tenant
+    # hazard). Inert when DEMO_MODE is off — the column is simply never populated then.
+    session_id = Column(String(64), nullable=True, index=True)
     initiated_by_user_id = Column(String(36), nullable=True)
     initiated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -247,6 +256,7 @@ def _orm_to_dict(row: SourcingRunORM) -> dict:
         "facility_id": row.facility_id,
         "company_id": getattr(row, "company_id", None),
         "group_id": getattr(row, "group_id", None),
+        "session_id": getattr(row, "session_id", None),
         "initiated_by_user_id": row.initiated_by_user_id,
         "initiated_at": row.initiated_at.isoformat() if row.initiated_at else None,
         "current_phase": row.current_phase,

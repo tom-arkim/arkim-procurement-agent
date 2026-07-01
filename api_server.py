@@ -10,6 +10,7 @@ Start with:
 
 import json
 import os
+import re
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -245,6 +246,13 @@ def _migrate_schema() -> None:
             # because the bare ALTER does not index the column on already-migrated DBs.
             "ALTER TABLE sourcing_runs ADD COLUMN group_id VARCHAR(36)",
             "CREATE INDEX IF NOT EXISTS ix_sourcing_runs_group_id ON sourcing_runs (group_id)",
+            # DEMO_MODE session isolation — nullable per-visitor id (X-Session-Id) stamped on
+            # a run at birth so the public no-login demo can scope reads/writes to the creating
+            # visitor (IDOR fix). NULL for every non-demo / seeded run. Separate from company_id
+            # (the validated Cognito tenant PIN) — see SourcingRunORM.session_id doc. Idempotent
+            # additive ALTER, same pattern as company_id/group_id above.
+            "ALTER TABLE sourcing_runs ADD COLUMN session_id VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_sourcing_runs_session_id ON sourcing_runs (session_id)",
         ]:
             try:
                 conn.execute(text(stmt))
@@ -311,6 +319,77 @@ _seed_demo_maintenance_run()
 # ---------------------------------------------------------------------------
 
 _messages: Dict[str, List[Dict[str, Any]]] = {}
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE session isolation — per-visitor IDOR scoping (X-Session-Id)
+# ---------------------------------------------------------------------------
+# The public no-login demo has no auth, so runs/groups have no owner. Run + group
+# ids are UUIDv4 (not guessable), but if an id ever leaks (shared URL, logs, Referer)
+# any visitor could read that run's full detail (specs, sourcing results, chat) or
+# act on it. The X-Session-Id header (an unguessable, client-generated per-browser-
+# session token) is stamped on a run at birth and scoped on every read/write under
+# DEMO_MODE. All guards here are INERT when DEMO_MODE is off — normal dev/prod ops
+# are byte-for-byte unchanged (no session_id is ever read or written).
+#
+# Existence-oracle discipline: a mismatched-owner access returns 404, NEVER 403. A
+# 403 tells an attacker "this id exists but isn't yours"; a 404 is indistinguishable
+# from "no such id" and leaks nothing. So not-found and not-owned are the SAME 404.
+
+# An X-Session-Id must be 16–64 chars of [A-Za-z0-9-] (admits a UUIDv4 with hyphens
+# or a base62 token). Length + charset bounded so the value can't be used for
+# injection or unbounded storage. Validated identically on the read and write paths.
+_DEMO_SESSION_ID_RE: re.Pattern = re.compile(r"^[A-Za-z0-9-]{16,64}\Z")
+
+
+def _demo_session_id_from_request(request: Request) -> Optional[str]:
+    """Read + validate the X-Session-Id header under DEMO_MODE. Returns the validated
+    session id, or None when absent/malformed (a read with a bad/missing header is
+    treated as "no session" -> 404 on any owned row, never an existence oracle).
+    Inert when DEMO_MODE is off (returns None — no scoping)."""
+    if not DEMO_MODE:
+        return None
+    raw = (request.headers.get("x-session-id") or "").strip()
+    if not raw:
+        return None
+    return raw if _DEMO_SESSION_ID_RE.fullmatch(raw) else None
+
+
+def _require_demo_session_id(request: Request) -> str:
+    """DEMO_MODE write-path validation: return a valid X-Session-Id or 422. A write
+    (run birth) must carry a valid session so the run can be scoped to its creator.
+    Inert when DEMO_MODE is off (returns "" -> no session_id stamped; caller maps
+    "" to None on the ORM)."""
+    if not DEMO_MODE:
+        return ""
+    raw = (request.headers.get("x-session-id") or "").strip()
+    if not raw:
+        raise HTTPException(
+            status_code=422,
+            detail="X-Session-Id header is required in DEMO_MODE",
+        )
+    if not _DEMO_SESSION_ID_RE.fullmatch(raw):
+        raise HTTPException(
+            status_code=422,
+            detail="X-Session-Id header is malformed (expected 16–64 chars of [A-Za-z0-9-])",
+        )
+    return raw
+
+
+def _demo_run_owned_by_session(run: SourcingRunORM, session_id: Optional[str]) -> bool:
+    """Under DEMO_MODE, True iff `session_id` owns `run`. False for a NULL/missing
+    row session (seeded/legacy runs are not owned by any demo visitor) and for a
+    missing/mismatched request session. The caller returns 404 on False — NOT 403 —
+    so not-owned is indistinguishable from not-found (no existence oracle). Inert
+    when DEMO_MODE is off (always True — no scoping)."""
+    if not DEMO_MODE:
+        return True
+    row_sid = getattr(run, "session_id", None)
+    if not row_sid:        # NULL/legacy/seeded -> not owned by any demo visitor
+        return False
+    if not session_id:     # no/invalid request session -> can't own anything
+        return False
+    return row_sid == session_id
 
 
 
@@ -1131,12 +1210,14 @@ def _new_run_orm(
     company_id: Optional[str] = None,
     group_id: Optional[str] = None,
     asset_specs: Optional[Dict[str, Any]] = None,
+    session_id: Optional[str] = None,
 ) -> SourcingRunORM:
     """Build (do not persist) a fresh run at phase=intake — the SINGLE construction the
     create path uses. Shared by create_run (commits one) and _fan_out_intake (commits N in
     one transaction), so fan-out reuses the create path instead of reimplementing it.
     group_id is NULL for a single run, the shared basket label for a fanned one.
-    asset_specs seeds the run's specs at birth (multi-part fan-out); None -> bare intake run."""
+    asset_specs seeds the run's specs at birth (multi-part fan-out); None -> bare intake run.
+    session_id is the DEMO_MODE per-visitor token (None when DEMO_MODE off or absent)."""
     now = datetime.now(timezone.utc)
     return SourcingRunORM(
         id=str(uuid.uuid4()),
@@ -1147,17 +1228,26 @@ def _new_run_orm(
         urgency_factor=urgency_factor,
         warranty_status=warranty_status,
         asset_specs_json=json.dumps(asset_specs) if asset_specs else None,
+        session_id=session_id,
         initiated_at=now,
         updated_at=now,
     )
 
 
 @app.post("/api/runs", response_model=CreateRunResponse, status_code=201)
-def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_caller)):
+def create_run(
+    body: CreateRunRequest,
+    request: Request,
+    caller: Optional[Caller] = Depends(get_caller),
+):
     """Create a new sourcing run and return it in intake phase.
 
     D2 prereq #1 (keys only): stamp the run's tenant key (company PIN) from the verified
     Caller when one is present — NEVER from the body. No token (today's demo) -> NULL.
+
+    DEMO_MODE session isolation: stamp the per-visitor X-Session-Id on the run at birth
+    (required -> 422 if missing/malformed) so subsequent reads/writes can be scoped to
+    this visitor (IDOR fix). Inert when DEMO_MODE is off: no session_id stamped.
 
     DEMO_MODE spend-abuse guard (FIX 3): a public no-login demo must not let a client
     birth a run already carrying asset_specs — that would let a script POST specs then
@@ -1168,6 +1258,7 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
     (forced bare intake); group_id is still honored (it only labels runs for the basket
     rollup — no spend risk, and the demo's basket view needs it). Inert when DEMO_MODE is
     off: asset_specs is honored exactly as today (the real multi-part fan-out unbroken)."""
+    demo_sid = _require_demo_session_id(request)   # "" when DEMO_MODE off (-> None below)
     seeded_specs = body.asset_specs
     if DEMO_MODE:
         seeded_specs = None   # forced bare intake — the bypass can't skip the intake gate
@@ -1178,6 +1269,7 @@ def create_run(body: CreateRunRequest, caller: Optional[Caller] = Depends(get_ca
         company_id=caller.company_id if caller else None,
         group_id=body.group_id,   # opt-in basket label; None -> group-less (legacy, unchanged)
         asset_specs=seeded_specs,   # opt-in seed; None -> bare intake run (legacy, unchanged)
+        session_id=demo_sid or None,   # DEMO_MODE visitor token; None when off/absent
     )
     with _SessionFactory() as session:
         session.add(run)
@@ -1258,7 +1350,11 @@ def _fan_out_intake(body: IntakeRequest, caller: Optional[Caller]) -> Dict[str, 
 
 
 @app.post("/api/requests", status_code=201)
-def create_request(body: IntakeRequest, caller: Optional[Caller] = Depends(get_caller)):
+def create_request(
+    body: IntakeRequest,
+    request: Request,
+    caller: Optional[Caller] = Depends(get_caller),
+):
     """Intake front door: route a request to the single-run path (<=1 part) or the fan-out
     path (>=2 parts). The single branch DELEGATES to the unchanged create_run — byte-for-byte
     the existing path; part contents (if any) are filled via intake chat exactly as today.
@@ -1271,6 +1367,7 @@ def create_request(body: IntakeRequest, caller: Optional[Caller] = Depends(get_c
             urgency_factor=body.urgency_factor,
             warranty_status=body.warranty_status,
         ),
+        request,
         caller,
     )
 
@@ -1332,11 +1429,18 @@ def create_run_from_maintenance(body: MaintenanceSubmission, caller: Optional[Ca
 
 
 @app.get("/api/runs/{run_id}", response_model=RunDetail)
-def get_run(run_id: str):
-    """Fetch full run state by ID."""
+def get_run(run_id: str, request: Request):
+    """Fetch full run state by ID.
+
+    DEMO_MODE session isolation: under DEMO_MODE the run is returned ONLY to the
+    visitor whose X-Session-Id matches the run's stamped session_id. A mismatched/
+    missing session (or a NULL-session row like a seeded maintenance run) returns
+    404 — NOT 403 — so not-owned is indistinguishable from not-found (no existence
+    oracle). Inert when DEMO_MODE is off (today's behaviour, no scoping)."""
+    demo_sid = _demo_session_id_from_request(request)
     with _SessionFactory() as session:
         run = session.get(SourcingRunORM, run_id)
-        if not run:
+        if not run or not _demo_run_owned_by_session(run, demo_sid):
             raise HTTPException(status_code=404, detail="Run not found")
         detail = _orm_to_detail(run)
         detail.messages = _messages.get(run_id, [])
@@ -1390,15 +1494,19 @@ def reject_submission(run_id: str):
 
 
 @app.post("/api/runs/{run_id}/messages", response_model=SendMessageResponse)
-def send_message(run_id: str, body: SendMessageRequest):
+def send_message(run_id: str, body: SendMessageRequest, request: Request):
     """
     Send a chat message to the live IntakeAgent.
     Extracts specs, updates asset_specs_json on the run, and returns the
     agent's clarification question (or a transition message when sufficient).
+
+    DEMO_MODE session isolation: scoped to the run's owner (404 on mismatch/missing/
+    NULL-session — not 403). Inert when DEMO_MODE is off.
     """
+    demo_sid = _demo_session_id_from_request(request)
     with _SessionFactory() as session:
         orm = session.get(SourcingRunORM, run_id)
-        if not orm:
+        if not orm or not _demo_run_owned_by_session(orm, demo_sid):
             raise HTTPException(status_code=404, detail="Run not found")
         current_phase = orm.current_phase
         prior_specs: Dict[str, Any] = (
@@ -1516,7 +1624,12 @@ def send_message(run_id: str, body: SendMessageRequest):
 
 
 @app.post("/api/runs/{run_id}/upload")
-async def upload_nameplate(run_id: str, file: UploadFile = File(...), text: str = Form("")):
+async def upload_nameplate(
+    run_id: str,
+    request: Request,
+    file: UploadFile = File(...),
+    text: str = Form(""),
+):
     """
     Upload a nameplate image for vision extraction.
 
@@ -1525,10 +1638,14 @@ async def upload_nameplate(run_id: str, file: UploadFile = File(...), text: str 
     (a) high confidence  — specs complete, confirm to proceed
     (b) low confidence   — partial extraction, ask user to verify
     (c) failed           — nothing readable, offer three recovery paths
+
+    DEMO_MODE session isolation: scoped to the run's owner (404 on mismatch/missing/
+    NULL-session — not 403). Inert when DEMO_MODE is off.
     """
+    demo_sid = _demo_session_id_from_request(request)
     with _SessionFactory() as session:
         orm = session.get(SourcingRunORM, run_id)
-        if not orm:
+        if not orm or not _demo_run_owned_by_session(orm, demo_sid):
             raise HTTPException(status_code=404, detail="Run not found")
         current_phase = orm.current_phase
         prior_specs: Dict[str, Any] = (
@@ -2104,7 +2221,12 @@ def reject_run(run_id: str, body: RejectRequest):
 
 
 @app.post("/api/runs/{run_id}/confirm-intake")
-def confirm_intake(run_id: str, background_tasks: BackgroundTasks, exact_only: bool = False):
+def confirm_intake(
+    run_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    exact_only: bool = False,
+):
     """
     Confirm intake specs and atomically advance to sourcing.
 
@@ -2115,10 +2237,14 @@ def confirm_intake(run_id: str, background_tasks: BackgroundTasks, exact_only: b
     exact_only=true ("find exact replacements only" — the no-spec-sheet honesty
     branch): records the flag so the background sourcing drops aftermarket/equivalent
     Tier 2/3 candidates, surfacing only exact OEM matches (Tier 1 network unaffected).
+
+    DEMO_MODE session isolation: scoped to the run's owner (404 on mismatch/missing/
+    NULL-session — not 403). Inert when DEMO_MODE is off.
     """
+    demo_sid = _demo_session_id_from_request(request)
     with _SessionFactory() as session:
         run = session.get(SourcingRunORM, run_id)
-        if not run:
+        if not run or not _demo_run_owned_by_session(run, demo_sid):
             raise HTTPException(status_code=404, detail="Run not found")
         if run.current_phase != Phase.INTAKE.value:
             raise HTTPException(
@@ -2934,19 +3060,32 @@ class BasketRollup(BaseModel):
 
 
 @app.get("/api/groups/{group_id}", response_model=BasketRollup)
-def get_group(group_id: str):
+def get_group(group_id: str, request: Request):
     """Read-only basket rollup over the runs sharing `group_id`: per-run part/phase/selected
     amount, a derived basket status, and the basket_total (the exact figure Stage 5 routes
     on). No writes. Fail-soft: a malformed child degrades to an error row, never 500-ing the
-    basket. Unknown group -> 404."""
+    basket. Unknown group -> 404.
+
+    DEMO_MODE session isolation: under DEMO_MODE the basket is scoped to the requesting
+    visitor's session by FILTERING the group's runs down to those whose session_id matches
+    the X-Session-Id. A visitor therefore only ever sees their OWN runs in any basket — an
+    attacker who learns a victim's group_id and even injects their own run into it still
+    sees only their own run, never the victim's (no leak, no DoS: the victim's own basket
+    view excludes the attacker's injected run). Empty after filtering -> 404, NOT 403 (no
+    existence oracle). Inert when DEMO_MODE is off (no filtering — today's behaviour)."""
     import logging
     from utils.procurement_agent.state import persistence
     log = logging.getLogger(__name__)
+    demo_sid = _demo_session_id_from_request(request)
     try:
         runs = persistence.list_runs(group_id=group_id, limit=500)
     except Exception as exc:
         log.warning("[groups] list_runs failed for %s: %s", group_id, exc)
         runs = []
+    if DEMO_MODE:
+        # Scope to this visitor's runs only. A NULL-session run (seeded/legacy) is never
+        # owned by a demo visitor, so it is filtered out too.
+        runs = [r for r in runs if r.get("session_id") and r.get("session_id") == demo_sid]
     if not runs:
         raise HTTPException(status_code=404, detail="Basket not found")
 

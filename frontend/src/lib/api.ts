@@ -43,6 +43,37 @@ import type {
 } from "@/types";
 
 // ---------------------------------------------------------------------------
+// Per-browser-session id (DEMO_MODE IDOR isolation)
+// ---------------------------------------------------------------------------
+// The public no-login demo has no auth, so the backend scopes a visitor's runs to
+// them via an X-Session-Id header: an unguessable token generated once per browser
+// session and persisted in localStorage. The backend stamps it on a run at birth
+// and 404s any read/write from a non-matching session (so a leaked run/group id
+// can't let another visitor read your data). No auth meaning — purely a demo
+// isolation key. SSR (no window) sends no header; the demo front end fetches the
+// cross-origin backend directly from the browser, so window is present in practice.
+const SESSION_KEY = "arkim-demo-session-id";
+
+function getSessionId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    let id = window.localStorage.getItem(SESSION_KEY);
+    if (!id) {
+      // crypto.randomUUID() is universally available in modern browsers; falls back
+      // to a timestamp+random token if absent (still unguessable enough for isolation).
+      id =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+      window.localStorage.setItem(SESSION_KEY, id);
+    }
+    return id;
+  } catch {
+    return ""; // localStorage disabled (private mode) -> no header; backend 404s demo reads
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Base fetch wrapper
 // ---------------------------------------------------------------------------
 
@@ -58,6 +89,9 @@ async function request<T>(
     cache: "no-store",
     headers: {
       "Content-Type": "application/json",
+      // Attach the per-browser session id so DEMO_MODE can scope this visitor's runs.
+      // An empty value (SSR / localStorage disabled) simply omits the header.
+      ...(getSessionId() ? { "X-Session-Id": getSessionId() } : {}),
       ...options.headers,
     },
     ...options,
@@ -151,10 +185,14 @@ export async function uploadNameplate(
   // The typed description rides along with the image (multipart "text" field) so an attached
   // image never silently discards what the user wrote.
   form.append("text", text);
-  // Don't set Content-Type header — browser sets it with boundary for multipart.
+  // Multipart: don't set Content-Type (the browser sets it with boundary). But the
+  // request() wrapper lets an explicit options.headers REPLACE its default header block
+  // (how Content-Type is omitted here), so X-Session-Id must be attached explicitly —
+  // else DEMO_MODE would scope the upload to no session and 404 the owner's own run.
+  const sid = getSessionId();
   return request(`/runs/${runId}/upload`, {
     method: "POST",
-    headers: {},
+    headers: sid ? { "X-Session-Id": sid } : {},
     body: form,
   });
 }
