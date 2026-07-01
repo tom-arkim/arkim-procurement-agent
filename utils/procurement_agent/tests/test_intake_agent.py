@@ -1013,6 +1013,72 @@ class TestMultiPartArrayExtraction:
         assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
 
 
+class TestPnHintMultiPartScoping:
+    """The pn-prefix hint (fires when a token matches a known PN prefix, e.g. PMC21 -> E+H) was a
+    SINGULAR note ("This part is manufactured by X") that overrode the array rule and collapsed
+    a multi-part input to one part. The reword scopes the hint to the matching part and preserves
+    the array rule. These assert the injected note (the real fix) + run()'s behaviour on the shapes
+    the reworded hint elicits. (PMC21 -> Endress+Hauser resolves offline via the static prefix map.)"""
+
+    def test_pn_hint_note_is_scoped_text_path(self):
+        # The hint still fires for "Cerabar PMC21" (E+H) but the note is now scoped to the matching
+        # part and preserves the array rule — the old singular "This part is manufactured by" is gone.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(
+                _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21",
+                            "detected_type": "pressure transmitter"}))
+            agent.run(_make_run(), {"text": "Cerabar PMC21", "images": [], "force_proceed": False})
+        prompt = mock_post.call_args_list[0].kwargs["json"]["messages"][0]["content"]
+        assert isinstance(prompt, str)
+        assert "Endress+Hauser" in prompt                        # hint fired (benefit kept)
+        assert "applies ONLY to the matching part" in prompt     # scoped, not whole-input
+        assert "still return a JSON array" in prompt             # array rule preserved
+        assert "This part is manufactured by" not in prompt      # old singular framing removed
+
+    def test_pn_hint_note_is_scoped_image_path(self):
+        # Same reword on the multimodal path (both injection sites fixed).
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(
+                _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21"}))
+            agent.run(_make_run(), {"text": "Cerabar PMC21", "images": [b"\xff\xd8img"], "force_proceed": False})
+        content = mock_post.call_args_list[0].kwargs["json"]["messages"][0]["content"]
+        textblock = next(c["text"] for c in content if c.get("type") == "text")
+        assert "applies ONLY to the matching part" in textblock
+        assert "still return a JSON array" in textblock
+        assert "This part is manufactured by" not in textblock
+
+    def test_pn_hinted_input_multipart_no_longer_collapses(self):
+        # THE COLLAPSE FIX: with the scoped hint, "Cerabar PMC21, FLOWSIC610" yields a 2-array ->
+        # run() -> multi_part_detected (no longer one E+H part). PMC21's hint scopes to the Cerabar.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        cerabar = _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21",
+                              "detected_type": "pressure transmitter", "category": "Part"})
+        flowsic = _extracted({"manufacturer": "SICK", "model": "FLOWSIC610", "part_number": "FLOWSIC610",
+                              "detected_type": "gas flow analyzer", "category": "Equipment"})
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response([cerabar, flowsic])
+            result = agent.run(_make_run({"manufacturer_confidence": 0, "part_id_confidence": 0}),
+                               {"text": "Cerabar PMC21, FLOWSIC610", "images": [], "force_proceed": False})
+        assert result["sufficient"] is False
+        assert result["confidence_summary"]["proceed_state"] == "multi_part_detected"
+        assert len(result["multi_part_specs"]) == 2
+        assert "manufacturer" not in result["asset_specs"]   # nothing merged into THIS run
+
+    def test_pn_hinted_single_part_stays_one_object_hint_preserved(self):
+        # NO SPURIOUS SPLIT + benefit kept: a lone "Cerabar PMC21" -> ONE object with
+        # manufacturer=Endress+Hauser inferred, NOT a multi-part detection.
+        agent = IntakeAgent(anthropic_api_key="test-key")
+        with patch("requests.post") as mock_post:
+            mock_post.return_value = _mock_anthropic_response(
+                _extracted({"manufacturer": "Endress+Hauser", "model": "PMC21", "part_number": "PMC21",
+                            "detected_type": "pressure transmitter"}))
+            result = agent.run(_make_run(), {"text": "Cerabar PMC21", "images": [], "force_proceed": False})
+        assert result["confidence_summary"]["proceed_state"] != "multi_part_detected"
+        assert result["asset_specs"]["manufacturer"] == "Endress+Hauser"
+
+
 # ---------------------------------------------------------------------------
 # Over-ask fix: a confident PART NUMBER uniquely identifies the part, so the category
 # DIMENSION fields (bore_diameter, shaft_size, material_spec) are redundant and must not be

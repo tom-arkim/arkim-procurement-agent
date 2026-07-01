@@ -488,9 +488,11 @@ class IntakeAgent:
             mfg_name, mfg_conf = pn_hint
             print(f"[IntakeAgent] PN prefix match -> manufacturer={mfg_name!r} conf={mfg_conf}")
             hint_prefix = (
-                f"SYSTEM NOTE: The part number prefix matches our records. "
-                f"This part is manufactured by {mfg_name}. "
-                f"Set manufacturer={mfg_name!r} and manufacturer_confidence={mfg_conf}.\n\n"
+                f"SYSTEM NOTE: A part number in the input matches a known manufacturer prefix — the part "
+                f"bearing that part number is made by {mfg_name}. Set THAT part's manufacturer={mfg_name!r} "
+                f"and manufacturer_confidence={mfg_conf}. This applies ONLY to the matching part. If the input "
+                f"names two or more distinct parts, still return a JSON array with one object per part — do NOT "
+                f"fold the other parts into the matching one.\n\n"
             )
             context = hint_prefix + context
 
@@ -514,8 +516,11 @@ class IntakeAgent:
             extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
             # If we have a high-confidence prefix match and the LLM returned a different
             # or absent manufacturer, override — prefix lookup is more reliable than
-            # LLM inference for known product families.
-            if pn_hint:
+            # LLM inference for known product families. Guarded to a single dict: a LIST is a
+            # multi-part result (one object per part) — the single-part manufacturer override
+            # does not apply, and touching it would crash the array back to a fallback (the
+            # bug that let the pn-hint suppress multi-part detection).
+            if pn_hint and isinstance(extracted, dict):
                 mfg_name, mfg_conf = pn_hint
                 llm_mfg = extracted.get("manufacturer") or ""
                 llm_conf = float(extracted.get("manufacturer_confidence") or 0)
@@ -556,9 +561,11 @@ class IntakeAgent:
             mfg_name, mfg_conf = pn_hint
             print(f"[IntakeAgent] PN prefix match (multimodal) -> manufacturer={mfg_name!r} conf={mfg_conf}")
             hint_prefix = (
-                f"SYSTEM NOTE: The part number prefix matches our records. "
-                f"This part is manufactured by {mfg_name}. "
-                f"Set manufacturer={mfg_name!r} and manufacturer_confidence={mfg_conf}.\n\n"
+                f"SYSTEM NOTE: A part number in the input matches a known manufacturer prefix — the part "
+                f"bearing that part number is made by {mfg_name}. Set THAT part's manufacturer={mfg_name!r} "
+                f"and manufacturer_confidence={mfg_conf}. This applies ONLY to the matching part. If the input "
+                f"names two or more distinct parts, still return a JSON array with one object per part — do NOT "
+                f"fold the other parts into the matching one.\n\n"
             )
 
         content.append({
@@ -587,7 +594,9 @@ class IntakeAgent:
             )
             resp.raise_for_status()
             extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
-            if pn_hint:
+            # Guarded to a single dict — a LIST is a multi-part result; the single-part override
+            # doesn't apply and touching it would crash the array to a fallback (see _extract_text).
+            if pn_hint and isinstance(extracted, dict):
                 mfg_name, mfg_conf = pn_hint
                 llm_mfg = extracted.get("manufacturer") or ""
                 llm_conf = float(extracted.get("manufacturer_confidence") or 0)
