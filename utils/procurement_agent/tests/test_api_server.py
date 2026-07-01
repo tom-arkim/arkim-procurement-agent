@@ -102,6 +102,18 @@ def _set_run(client, run_id, **fields):
         session.commit()
 
 
+def _read_sourcing_results_raw(client, run_id) -> dict:
+    """Read the raw sourcing_results_json column straight from the temp DB (the
+    un-redacted server-side payload — what the admin surface / debugging sees, vs
+    the redacted client response from _orm_to_detail)."""
+    SF = client._api_server._SessionFactory
+    ORM = client._api_server.SourcingRunORM
+    import json as _json
+    with SF() as session:
+        run = session.get(ORM, run_id)
+        return _json.loads(run.sourcing_results_json) if run.sourcing_results_json else {}
+
+
 def _read_selected(client, run_id) -> dict:
     """Read the raw selected_candidate_json (incl. _approval_path) straight from the
     temp DB — RunDetail re-serializes it, so read the column to assert what was stored."""
@@ -1010,6 +1022,32 @@ class TestConfirmIntake:
         detail = api.get(f"/api/runs/{rid}").json()
         assert detail["phase"] == "error"        # advanced to error, not stuck
         assert "error" in detail["sourcing_results"]
+
+
+    def test_sourcing_failure_redacts_error_detail_from_client(self, api, monkeypatch):
+        # The raw str(exc) ("tavily boom" + any upstream URL/internal detail) must NOT
+        # reach the GET /api/runs/{id} response — a client (esp. a public no-login demo
+        # visitor) gets a generic message only. The real error is retained server-side in
+        # the stored sourcing_results_json column (read raw via the admin surface / direct
+        # DB read), so debugging is unaffected.
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({"manufacturer": "Goulds"}))
+        _mock_sourcing_pipeline(monkeypatch, sourcing_exc=RuntimeError("tavily boom https://api.tavily.com/search?key=SECRET"))
+
+        api.post(f"/api/runs/{rid}/confirm-intake")
+
+        body = api.get(f"/api/runs/{rid}").json()
+        sr = body["sourcing_results"]
+        assert sr["error"] == "Sourcing failed — please try again."   # generic, redacted
+        assert "tavily boom" not in json.dumps(sr)                     # raw exc string gone
+        assert "SECRET" not in json.dumps(sr)
+        # The empty-tier structure the frontend reads is preserved.
+        assert sr["tier_1"]["results"] == [] and sr["tier_2"]["results"] == []
+
+        # Server-side retention: the stored column still carries the real str(exc) for
+        # debugging / the admin surface (which reads the raw row, not _orm_to_detail).
+        raw = _read_sourcing_results_raw(api, rid)
+        assert "tavily boom" in raw["error"]
 
 
 # ---------------------------------------------------------------------------

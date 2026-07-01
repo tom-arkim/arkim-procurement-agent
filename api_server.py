@@ -989,6 +989,25 @@ def _rfq_draft_status_for_run(run_id: str) -> dict:
     return out
 
 
+def _redact_sourcing_error(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace a failed-sourcing error stub with a client-safe shape.
+
+    A failed sourcing run stores `{"error": str(exc), "tier_1": {...status:error}, ...}`
+    (see _run_sourcing_background). The `str(exc)` can carry upstream API errors, request
+    URLs, or internal detail that must not reach a client response — especially an
+    unauthenticated demo visitor polling GET /api/runs/{id}. Return a generic message
+    while preserving the empty-tier structure the frontend reads (it keys off
+    `phase == error`, not this string, and reads tier1/tier2/tier3 arrays). The real
+    `str(exc)` is retained in the stored column and the admin surface reads the raw row
+    via persistence.get_run — so this redacts ONLY the customer response boundary."""
+    return {
+        "error": "Sourcing failed — please try again.",
+        "tier_1": {"results": [], "count": 0, "status": "error"},
+        "tier_2": {"results": [], "count": 0, "status": "error"},
+        "tier_3": {"results": [], "count": 0, "status": "error"},
+    }
+
+
 def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
     def _parse(col): return json.loads(col) if col else None
 
@@ -1000,7 +1019,15 @@ def _orm_to_detail(run: SourcingRunORM) -> RunDetail:
     if raw_sourcing and "error" not in raw_sourcing:
         sourcing = _transform_sourcing_results(raw_sourcing, _build_quote_index(run.id))
     elif raw_sourcing:
-        sourcing = raw_sourcing  # pass through error dict so frontend can surface it
+        # A failed sourcing run stored a raw `str(exc)` in the error stub. That string can
+        # carry upstream API errors / request URLs / internal detail, which must NOT reach a
+        # client response (esp. an unauthenticated demo visitor). Redact at this response
+        # boundary: return a generic message + the empty-tier shape the frontend expects,
+        # while the real `str(exc)` is retained in the stored column (server-side / admin
+        # surface reads the raw row via persistence.get_run, not this transform). Done
+        # unconditionally — the frontend only keys off `phase == error`, never this string,
+        # so redaction is harmless to the internal UI and better for prod too.
+        sourcing = _redact_sourcing_error(raw_sourcing)
 
     # Derive no_exact_match: fires when T2+T3 combined have at least one candidate
     # but none have pnMatchLevel=="exact" (mapped from pn_match_status=="exact_match").
