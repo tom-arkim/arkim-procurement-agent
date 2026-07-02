@@ -139,6 +139,15 @@ def _build_tier3_query(specs) -> str:
     if not niche_term:
         niche_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
 
+    # Phase 2 — component-aware anchor (T5b, gated INTAKE_TYPE_AWARE at the call
+    # site / promotion). When component_of is set, anchor the query on the
+    # COMPONENT-for-parent phrase so discovery targets the seal/bearing/etc. for
+    # the named machine, never the bare parent. Inert when component_of is None
+    # (flag off / no parent -> byte-identical to today's query).
+    _component_of = getattr(specs, "component_of", None)
+    if _component_of:
+        niche_term = f"{niche_term} for {_component_of}"
+
     # Fetch authorized_service_brands for both Equipment and Part queries.
     _auth_brands: list[str] = []
     known_mfg = specs.manufacturer not in ("Unknown", "N/A", "null", None)

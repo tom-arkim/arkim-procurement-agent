@@ -838,6 +838,28 @@ class IntakeAgent:
             merged["_intake_turns"] = this_turn
             return None, self._COMMIT_MESSAGE
 
+        # Phase 2 — type-aware Q2 (gated behind INTAKE_TYPE_AWARE). When identity
+        # is absent AND a known part type was classified, ask the registry's
+        # q2_template VERBATIM (no LLM phrasing call) instead of the generic
+        # missing-field walk. Respects the `_asked_fields` de-dup (asked once) and
+        # the INTAKE_TURN_CAP (cap checked above). UNKNOWN type -> current generic
+        # behavior (falls through to the identity-first opener / picker below).
+        # The q2_template is recorded under a synthetic field key `_q2_<type>` so
+        # the never-re-ask ledger prevents repeats without colliding with real
+        # spec fields (it is `_-prefixed -> filtered from context/display).
+        if _intake_type_aware():
+            from utils.procurement_agent.part_type_registry import get_profile, is_known_type
+            classified_type = merged.get("_classified_type")
+            if (is_known_type(classified_type)
+                    and not _has_identity(merged)
+                    and "_q2_asked" not in asked):
+                profile = get_profile(classified_type)
+                if profile.q2_template:
+                    asked.append("_q2_asked")
+                    merged["_asked_fields"] = asked
+                    merged["_intake_turns"] = this_turn
+                    return profile.q2_template, None
+
         # Fix #1 — identity-first opener: first clarification turn + no part identity.
         if prior_turns == 0 and not _has_identity(merged):
             field = "part_identity"
