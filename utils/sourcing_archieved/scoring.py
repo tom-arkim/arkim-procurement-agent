@@ -6,6 +6,7 @@ All functions are stateless (no API calls, no DB access).
 The brand_intelligence module provides dynamic manufacturer context.
 """
 
+import os
 import re
 from typing import Optional
 
@@ -21,6 +22,45 @@ from utils.brand_intelligence import (
     get_parent_brand,
     get_manufacturer_aliases,
 )
+
+
+# ---------------------------------------------------------------------------
+# SCORING_V2 feature flag + Stage 0 toggle
+# ---------------------------------------------------------------------------
+# SCORING_V2 gates the Stage 1/2 redesign (multiplicative TypeGate, graded Fit).
+# Strict truthy parse mirroring _env_truthy (utils/email_sender.py:48,
+# api_server.py:24): only "1/true/yes/on" enables; everything else (None, "",
+# "0", "false", junk) -> OFF, so the gate fails safe. Default OFF -> byte-
+# identical pre-redesign scoring.
+def _env_truthy(value: Optional[str]) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+SCORING_V2: bool = _env_truthy(os.environ.get("SCORING_V2"))
+
+# --- Stage 0 (placeholder-penalty fix) toggle --------------------------------
+# Stage 0 is arguably a pure correctness bug: UNKNOWN-PN was never a real PN,
+# so a real found_pn should not be penalized for "mismatching" it. As a bug fix
+# it could ship UNCONDITIONAL (apply flag-off too) — which fixes the launch
+# demo's component scoring (Goulds seal 25->55, clears the 30 floor).
+#
+# Toggle (one line): flip to True to ship Stage 0 unconditional at launch.
+#   False (default, GATED)  -> Stage 0 fix applies only under SCORING_V2.
+#                              Launch demo scoring is byte-identical to today.
+#   True   (UNCONDITIONAL)  -> Stage 0 fix applies always (flag-on OR off).
+#                              Launch demo component scoring improves.
+# Currently GATED pending Tom's stress-test decision. See SCORING_MORNING_REPORT.md.
+STAGE0_PLACEHOLDER_FIX_UNCONDITIONAL: bool = False
+
+
+def _is_placeholder_pn(pn: Optional[str]) -> bool:
+    """True when `pn` is a null/placeholder part-number token, not a real PN.
+
+    Covers the placeholder set used across the pipeline (UNKNOWN-PN, N/A,
+    Unknown, null, and empty/whitespace). Used by Stage 0 so a real found_pn
+    is not penalized for "mismatching" a placeholder that was never a real PN.
+    """
+    return (pn or "").strip().lower() in {"", "none", "null", "n/a", "unknown", "unknown-pn"}
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +353,25 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     is_coll = _is_collection_url(url)
     url_pts = 0 if is_coll else 10
 
-    pn_mismatch_penalty = 30 if (pn_match_level == "none" and found_pn) else 0
+    # PN mismatch penalty: -30 when the vendor has a real found_pn that doesn't
+    # match the searched PN — EXCEPT when the searched PN is a placeholder token
+    # (UNKNOWN-PN / N/A / Unknown / empty). A placeholder was never a real PN, so
+    # a real found_pn can't "mismatch" it; penalizing it inverted the result
+    # (correct seal with a real PN got -30, wrong pump with no PN escaped). This
+    # is the Stage 0 fix.
+    #
+    # Stage 0 toggle: when STAGE0_PLACEHOLDER_FIX_UNCONDITIONAL is False (default,
+    # GATED), the fix applies only under SCORING_V2; flag-off preserves the
+    # legacy -30-on-placeholder behavior so launch-demo scoring is byte-identical.
+    # Flip the toggle to True to ship the fix unconditional (improves launch-demo
+    # component scoring). See SCORING_MORNING_REPORT.md.
+    _stage0_active = SCORING_V2 or STAGE0_PLACEHOLDER_FIX_UNCONDITIONAL
+    _searched_is_placeholder = _is_placeholder_pn(searched_pn)
+    _real_mismatch = (pn_match_level == "none" and found_pn)
+    if _real_mismatch and not (_stage0_active and _searched_is_placeholder):
+        pn_mismatch_penalty = 30
+    else:
+        pn_mismatch_penalty = 0
 
     home_bonus = _home_field_bonus(specs, url, snippet)
 

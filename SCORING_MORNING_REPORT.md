@@ -20,7 +20,7 @@
 |------|--------|--------|-------|
 | T0 — Setup + baseline | DONE | _pending_ | branch + report scaffold |
 | T1 — MRO noun-class dictionary | | | |
-| T2 — Stage 0 placeholder-penalty fix | | | |
+| T2 — Stage 0 placeholder-penalty fix | DONE | _pending_ | toggle `scoring.py:53` (GATED default); tests cover all 4 flag×toggle paths; clean-PN + genuine-mismatch no-regress |
 | T3 — noun-class detection (query+result) | | | |
 | T4 — multiplicative TypeGate | | | |
 | T5 — graded Fit | | | |
@@ -36,6 +36,12 @@
 **Stage 0 (placeholder-penalty fix)** is arguably a pure correctness bug: `UNKNOWN-PN` was never a real PN, so a real `found_pn` should not be penalized for "mismatching" it. As a bug fix it could ship **unconditional (flag-OFF)** — which means it **changes the launch demo's scoring for component cases** (the Goulds seal goes 25→55 and clears the 30 floor; previously-cut component results resurface).
 
 **Decision taken in this build (conservative default, pending Tom's call):** Stage 0 is built **gated behind `SCORING_V2`** — the launch demo stays byte-identical to today. The T2 test is written to assert the fix works under `SCORING_V2=1` AND that the old penalizing behavior is preserved under flag-OFF (so the inertness wall stays clean). Tom can flip Stage 0 to unconditional before merge by moving one line out of the gate; the tests already cover both paths.
+
+> **Stage 0 toggle — exact location:** `utils/sourcing_archieved/scoring.py:53`
+> ```python
+> STAGE0_PLACEHOLDER_FIX_UNCONDITIONAL: bool = False   # GATED (default). Flip to True to ship unconditional.
+> ```
+> Flip to `True` to fix launch-demo component scoring (seal 25→55, clears floor). Currently `False` (GATED) pending Tom's stress-test decision. The consuming branch is at `scoring.py:368`: `_stage0_active = SCORING_V2 or STAGE0_PLACEHOLDER_FIX_UNCONDITIONAL`. Tests in `utils/procurement_agent/tests/test_scoring_stage0.py` cover all four (flag × toggle) combinations + the genuine-mismatch and clean-PN no-regression cases.
 
 **Why this matters for launch:** if Tom wants the shipped demo to show the seal clearing the floor (the headline quality fix), Stage 0 must be unconditional. If he wants the demo frozen at current scoring, it stays gated. The rest (Stage 1 TypeGate, Stage 2 Fit) is always gated and never affects launch.
 
