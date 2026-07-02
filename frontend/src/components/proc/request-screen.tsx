@@ -31,6 +31,20 @@ const QUICK = [
 const NULLS = new Set(["", "n/a", "null", "none", "unknown-pn", "unknown", "tbd"]);
 const val = (v?: string | null) => (v && !NULLS.has(String(v).toLowerCase().trim()) ? String(v) : undefined);
 
+// Part-type acronyms that must stay fully upper-cased in a display title (VFD, PLC…).
+// Sentence-case would render these wrong ("Vfd"), and they ARE real part classes.
+const TYPE_ACRONYMS = new Set(["vfd", "plc", "hmi", "vsd", "ups", "scr", "ac", "dc"]);
+// Title-case a detected_type for the headline: acronyms upper-cased, otherwise
+// sentence case ("mechanical seal" -> "Mechanical seal", "vfd" -> "VFD").
+const formatType = (t: string): string =>
+  t.split(/\s+/)
+    .map((w, i) =>
+      TYPE_ACRONYMS.has(w.toLowerCase())
+        ? w.toUpperCase()
+        : i === 0 ? w.charAt(0).toUpperCase() + w.slice(1) : w,
+    )
+    .join(" ");
+
 function specsReady(specs?: AssetSpecs): boolean {
   if (!specs) return false;
   // Spec-based commit (proceed_spec_based / forced_commit) is a deliberate backend "ready"
@@ -386,8 +400,22 @@ function ItemCard({
   const ready = specsReady(specs);
   const pn = val(specs?.part_number);
   const mfg = val(specs?.manufacturer);
-  const label =
-    [mfg, val(specs?.model) || pn].filter(Boolean).join(" ") || val(specs?.description) || "";
+  // Parent identity (mfg + model/PN) — how the headline has always read.
+  const parentId = [mfg, val(specs?.model) || pn].filter(Boolean).join(" ");
+  // Lead with the component when the identified item is a PART of a parent asset
+  // (category "Part" + a detected_type), so a seal for a Goulds 3196 reads as the
+  // seal — not the pump. Equipment (the unit itself) keeps its plain identity, and
+  // seeded/untyped specs are unchanged: the seeded demo carries no category or
+  // detected_type, so flag-off cards are untouched. (Both come from base
+  // extraction; the gate is the data, not the flag.) The full spec fallback is
+  // preserved for identity-only fragments.
+  const dtype = val(specs?.detected_type);
+  const isComponent =
+    specs?.category === "Part" && Boolean(dtype) && Boolean(parentId) &&
+    !parentId.toLowerCase().includes((dtype ?? "").toLowerCase());
+  const label = isComponent
+    ? `${formatType(dtype!)} — ${parentId}`
+    : parentId || val(specs?.description) || "";
 
   // Phase 1 — minimal editable quantity field (gated by data presence, not a
   // frontend flag). The backend only populates `quantity` under INTAKE_TYPE_AWARE,
@@ -448,8 +476,8 @@ function ItemCard({
             <div className="id-meta">Matching by category — no exact part number needed.</div>
           )}
           {ready && specs?.quantity != null && (
-            <div className="id-meta" style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
-              Qty:
+            <div className="proc-qty" style={{ marginTop: 8 }}>
+              <span className="ql">Qty</span>
               <input
                 type="number"
                 min={1}
@@ -465,7 +493,6 @@ function ItemCard({
                   if (next !== (specs.quantity ?? null)) void commitQty(next);
                   else setQty(specs.quantity ?? null);
                 }}
-                style={{ width: 64, padding: "2px 6px" }}
                 aria-label="Quantity"
               />
             </div>
