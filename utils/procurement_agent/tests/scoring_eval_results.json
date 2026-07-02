@@ -1,0 +1,264 @@
+{
+  "metrics": {
+    "floor": 30.0,
+    "total_cases": 24,
+    "asserted_cases": 22,
+    "known_gap_cases": [
+      "motor_starter_on_vfd_request",
+      "valve_gate_on_ball_request"
+    ],
+    "should_pass_count": 15,
+    "should_fail_count": 7,
+    "should_pass_passing_flag_on": 15,
+    "should_fail_failing_flag_on": 7,
+    "clean_pn_no_regression": 8,
+    "should_pass_pass_rate_flag_on": 1.0,
+    "should_fail_reject_rate_flag_on": 1.0
+  },
+  "rows": [
+    {
+      "id": "goulds_seal_platinum",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 65.0,
+      "score_flag_off": 25.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "THE ANCHOR \u2014 right-part specialist. Real seal PN (ST-1.375-T1) must not be penalized against the UNKNOWN-PN placeholder (Stage 0); SEAL/SEAL gate 1.0; strong Fit (parent 3196 + size 1.375 + Type 1 + interchange). Must clear the 30 floor."
+    },
+    {
+      "id": "goulds_pump_zoro",
+      "split": "dev",
+      "expected_pass": false,
+      "score_flag_on": 4.0,
+      "score_flag_off": 40.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": true,
+      "rationale": "THE ANCHOR \u2014 wrong-part-from-a-big-vendor. A pump page on a seal request: SEAL/PUMP different noun-class -> TypeGate ~0.1 -> crushed below floor. This is the defect the redesign fixes (passes flag-off on authority, fails flag-on)."
+    },
+    {
+      "id": "skf_bearing_clean",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 75.0,
+      "score_flag_off": 95.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "Clean-PN no-regression case. Exact OEM PN, BEARING/BEARING gate 1.0, exact-PN bonus within Fit. Must pass flag-on AND flag-off (legacy 95)."
+    },
+    {
+      "id": "goulds_seal_specialist_thin_url",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 45.5,
+      "score_flag_off": 25.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "Right-part specialist with a thin URL (no category slug) but a clear title + interchange language. Title drives SEAL detection; Fit from parent/size/interchange. Must clear the floor (undetectable-URL should not zero a correct result)."
+    },
+    {
+      "id": "goulds_seal_marketplace_correct",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 65.0,
+      "score_flag_off": 25.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "Anti-inversion guard: a MARKETPLACE/generalist result that PASSES the type gate with strong Fit must still beat a specialist with weak Fit. SEAL/SEAL, real PN, interchange. Must pass \u2014 do not invert the bug into an anti-marketplace bug."
+    },
+    {
+      "id": "goulds_pump_on_seal_marketplace",
+      "split": "dev",
+      "expected_pass": false,
+      "score_flag_on": 4.0,
+      "score_flag_off": 10.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": false,
+      "rationale": "Wrong-part (pump) on a seal request from a high-authority marketplace. SEAL/PUMP different class -> TypeGate ~0.1 -> fails despite authority + real PN. Proves the gate beats authority on a DIFFERENT-class result."
+    },
+    {
+      "id": "valve_ball_correct",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 65.0,
+      "score_flag_off": 25.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "Right-part valve specialist. VALVE/VALVE gate 1.0, Fit from parent model + interchange. Must clear floor."
+    },
+    {
+      "id": "valve_gate_on_ball_request",
+      "split": "dev",
+      "expected_pass": false,
+      "score_flag_on": 48.0,
+      "score_flag_off": 18.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "Wrong valve TYPE (gate on a ball-valve request) \u2014 but both classify to VALVE noun-class, so the TypeGate is SAME-class. This tests whether same-class-wrong-subtype still fails. Expected FAIL because the brief's gate is noun-class-level only (gate valve vs ball valve both = VALVE); this case documents a known gap (sub-type gating is Stage 3, out of scope). SHOULD FAIL the floor via weak Fit/no exact PN \u2014 but flag if it passes (would indicate over-credit). Marked should_pass_floor=false as the desired verdict; see T8 notes."
+    },
+    {
+      "id": "bearing_clean_pn_mcmaster",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 52.5,
+      "score_flag_off": 95.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "Second clean-PN bearing case (different vendor/URL). No-regression: must pass flag-on and flag-off."
+    },
+    {
+      "id": "motor_correct_oem",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 47.6,
+      "score_flag_off": 88.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "Equipment-category correct part. MOTOR/MOTOR gate 1.0, exact PN. Must pass."
+    },
+    {
+      "id": "vfd_correct",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 70.0,
+      "score_flag_off": 80.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "VFD/DRIVE correct part. DRIVE/DRIVE gate 1.0, exact PN. Must pass."
+    },
+    {
+      "id": "motor_starter_on_vfd_request",
+      "split": "dev",
+      "expected_pass": false,
+      "score_flag_on": 0.0,
+      "score_flag_off": 10.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": false,
+      "rationale": "Wrong part type (motor starter on a VFD request). DRIVE detected for request (VFD), result has 'starter' which classifies DRIVE (starter is a DRIVE synonym). Same-class gate \u2014 documents the synonym-overlap boundary. Desired FAIL via no-Fit (no exact/stem PN, no parent-model token 'PowerFlex 525' in snippet, no interchange)."
+    },
+    {
+      "id": "goulds_seal_collection_page",
+      "split": "dev",
+      "expected_pass": false,
+      "score_flag_on": 5.0,
+      "score_flag_off": 5.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": false,
+      "rationale": "Collection/category page (/collections/). The is_coll cap forces <=5 regardless of type. Must fail the floor."
+    },
+    {
+      "id": "goulds_seal_undetectable_result",
+      "split": "dev",
+      "expected_pass": false,
+      "score_flag_on": 22.5,
+      "score_flag_off": 40.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": true,
+      "rationale": "Undetectable result noun-class (no seal/pump noun in URL or title, 'component' is not a class) -> gate 0.45 floor (NOT zero). Fit from parent 3196 + interchange, but 0.45 gate + no exact PN. Documents the 0.45 undetectable floor \u2014 should NOT pass (no PN, gate <1) but must not be zeroed."
+    },
+    {
+      "id": "marketplace_bearing_counterfeit_risk",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 35.0,
+      "score_flag_off": 45.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "Marketplace (ebay) with the right PN and right type. Counterfeit-risk penalty applies (-30 marketplace+risky category) but exact PN + type keep it above floor. BEARING/BEARING gate 1.0. Desired PASS (the PN is right; counterfeit risk is flagged separately, not a hard floor fail)."
+    },
+    {
+      "id": "gusher_seal_clean",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 85.0,
+      "score_flag_off": 95.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "Clean-PN seal with exact PN TYPE21. SEAL/SEAL gate 1.0. Must pass flag-on and flag-off (legacy 70)."
+    },
+    {
+      "id": "endress_sensor_correct",
+      "split": "dev",
+      "expected_pass": true,
+      "score_flag_on": 75.0,
+      "score_flag_off": 95.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "Sensor (undetectable noun-class \u2014 'pressure sensor' has no class in the dictionary). Query undetectable -> neutral gate 1.0; exact PN drives Fit. Must pass (no-regression on a type the dictionary doesn't cover yet)."
+    },
+    {
+      "id": "goulds_impeller_correct",
+      "split": "holdout",
+      "expected_pass": true,
+      "score_flag_on": 65.0,
+      "score_flag_off": 25.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "HOLDOUT. Right-part impeller (IMPELLER class). IMPELLER/IMPELLER gate 1.0, Fit from parent + interchange. Must clear floor."
+    },
+    {
+      "id": "goulds_impeller_on_seal_request",
+      "split": "holdout",
+      "expected_pass": false,
+      "score_flag_on": 4.0,
+      "score_flag_off": 10.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": false,
+      "rationale": "HOLDOUT. Wrong part (impeller on a seal request). SEAL/IMPELLER different class -> TypeGate ~0.1 -> fails despite authority + real PN. Generalization check: the gate must crush any different-class result, not just pump-on-seal."
+    },
+    {
+      "id": "coupling_correct",
+      "split": "holdout",
+      "expected_pass": true,
+      "score_flag_on": 58.0,
+      "score_flag_off": 18.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "HOLDOUT. Right-part coupling (COUPLING class). Fit from parent + interchange. Must clear floor."
+    },
+    {
+      "id": "gasket_correct_aftermarket",
+      "split": "holdout",
+      "expected_pass": true,
+      "score_flag_on": 65.0,
+      "score_flag_off": 25.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": false,
+      "rationale": "HOLDOUT. Right-part gasket aftermarket (no exact OEM PN, keys off parent 3196 + 'replacement for' + interchange). GASKET/GASKET gate 1.0; Fit from parent + interchange. Must clear floor \u2014 the graded-Fit thesis: aftermarket components that key off the parent model pass."
+    },
+    {
+      "id": "goulds_pump_correct_on_pump_request",
+      "split": "holdout",
+      "expected_pass": true,
+      "score_flag_on": 75.0,
+      "score_flag_off": 95.0,
+      "passes_floor_flag_on": true,
+      "passes_floor_flag_off": true,
+      "rationale": "HOLDOUT. The CORRECT pump on a PUMP request (mirrors the anchor's wrong-part case but with the right request type). PUMP/PUMP gate 1.0, exact PN. Must pass \u2014 proves the gate doesn't penalize pumps in general, only pumps-on-seal-requests."
+    },
+    {
+      "id": "goulds_seal_wrong_pn_mismatch",
+      "split": "holdout",
+      "expected_pass": false,
+      "score_flag_on": 25.0,
+      "score_flag_off": 25.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": false,
+      "rationale": "HOLDOUT. Right TYPE (seal) but WRONG size/PN (ST-1.500-T2 vs searched ST-1.375-T1, different size). Real searched PN (not placeholder) -> genuine -30 mismatch penalty fires (Stage 0 does NOT suppress \u2014 searched PN is real). SEAL/SEAL gate 1.0 but -30 penalty + weak Fit (no parent credit since model is the PN). Desired FAIL \u2014 documents that the genuine-mismatch penalty still works under SCORING_V2."
+    },
+    {
+      "id": "goulds_seal_marketplace_wrong_pn",
+      "split": "holdout",
+      "expected_pass": false,
+      "score_flag_on": 5.0,
+      "score_flag_off": 5.0,
+      "passes_floor_flag_on": false,
+      "passes_floor_flag_off": false,
+      "rationale": "HOLDOUT. Collection page (/collections/) for the right type. is_coll cap -> <=5. Must fail floor regardless of type match."
+    }
+  ],
+  "known_gap_ids": [
+    "motor_starter_on_vfd_request",
+    "valve_gate_on_ball_request"
+  ]
+}

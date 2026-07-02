@@ -1,0 +1,235 @@
+"""
+utils/sourcing_archieved/part_type_classes.py
+MRO noun-class dictionary + classifier for the SCORING_V2 TypeGate.
+
+Pure data — no network, no I/O on import. Each class has a canonical name,
+a list of human-language synonyms (matched against free text / titles), and a
+set of slug tokens (matched against URL path segments, where the vendor's own
+category lives, e.g. ``/mechanical-seals/goulds/...`` vs ``/pump/centrifugal/...``).
+
+The dictionary is intentionally compact and MRO-focused: the categories that
+drive the "wrong-part-from-a-big-vendor beats right-part-from-a-specialist"
+failure (seal-vs-pump is the anchor case). Adding a class here is data-only and
+does not change any scorer behavior until the TypeGate (T4) consumes it.
+
+Used by the SCORING_V2 path (T3-T5). Flag-off scoring never imports this module's
+classification into the score, so it stays byte-identical.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class NounClass:
+    """One MRO part/equipment noun-class."""
+
+    canonical: str                       # short canonical label, e.g. "SEAL"
+    synonyms: tuple[str, ...]            # human-language phrases, lowercase
+    slug_tokens: tuple[str, ...] = field(default_factory=tuple)  # URL slug fragments, no slashes
+
+
+# ---------------------------------------------------------------------------
+# The dictionary
+# ---------------------------------------------------------------------------
+# Slug tokens are the site's own category breadcrumb segment — the single
+# highest-leverage noun-class signal (the URL slug encodes the catalog category
+# the vendor itself filed the page under). Synonyms cover titles / snippets /
+# detected_type strings. Keep both lists lowercase; matching is case-insensitive.
+
+_NOUN_CLASSES: tuple[NounClass, ...] = (
+    NounClass(
+        canonical="SEAL",
+        synonyms=(
+            "mechanical seal", "cartridge seal", "shaft seal", "seal kit",
+            "lip seal", "gland seal", "component seal", "split seal",
+            "elastomeric seal", "seal assembly", "seal",
+        ),
+        slug_tokens=("mechanical-seals", "seal-kit", "seals", "shaft-seal", "seal"),
+    ),
+    NounClass(
+        canonical="PUMP",
+        synonyms=(
+            "centrifugal pump", "ansi pump", "centrifugal", "vacuum pump",
+            "diaphragm pump", "gear pump", "metering pump", "submersible pump",
+            "sump pump", "booster pump", "process pump", "pump",
+        ),
+        slug_tokens=("centrifugal-pumps", "pump", "pumps", "centrifugal-pump"),
+    ),
+    NounClass(
+        canonical="BEARING",
+        synonyms=(
+            "ball bearing", "roller bearing", "sleeve bearing", "thrust bearing",
+            "plain bearing", "pillow block bearing", "bearing unit",
+            "bearing assembly", "bearing",
+        ),
+        slug_tokens=("bearings", "bearing", "ball-bearings", "roller-bearings"),
+    ),
+    NounClass(
+        canonical="GASKET",
+        synonyms=(
+            "gasket", "head gasket", "flange gasket", "spiral wound gasket",
+            "o-ring", "oring", "o ring", "gasket set", "gasket kit",
+        ),
+        slug_tokens=("gaskets", "gasket", "o-rings", "oring", "seals-gaskets"),
+    ),
+    NounClass(
+        canonical="VALVE",
+        synonyms=(
+            "ball valve", "butterfly valve", "gate valve", "globe valve",
+            "check valve", "solenoid valve", "control valve", "relief valve",
+            "valve",
+        ),
+        slug_tokens=("valves", "valve", "ball-valves", "butterfly-valves"),
+    ),
+    NounClass(
+        canonical="MOTOR",
+        synonyms=(
+            "electric motor", "ac motor", "dc motor", "induction motor",
+            "servo motor", "stepper motor", "gearmotor", "gear motor",
+            "brake motor", "motor",
+        ),
+        slug_tokens=("motors", "motor", "electric-motors", "ac-motors"),
+    ),
+    NounClass(
+        canonical="DRIVE",
+        synonyms=(
+            "variable frequency drive", "vfd", "variable speed drive",
+            "frequency drive", "drive controller", "inverter", "soft starter",
+            "motor starter", "starter", "drive",
+        ),
+        slug_tokens=("drives", "drive", "vfd", "vfds", "inverters", "soft-starters"),
+    ),
+    NounClass(
+        canonical="SLEEVE",
+        synonyms=(
+            "shaft sleeve", "wear sleeve", "spacer sleeve", "sleeve",
+            "bushing sleeve",
+        ),
+        slug_tokens=("sleeves", "sleeve", "shaft-sleeves"),
+    ),
+    NounClass(
+        canonical="IMPELLER",
+        synonyms=(
+            "impeller", "pump impeller", "open impeller", "closed impeller",
+            "semi-open impeller", "impeller assembly",
+        ),
+        slug_tokens=("impellers", "impeller", "pump-impellers"),
+    ),
+    NounClass(
+        canonical="COUPLING",
+        synonyms=(
+            "coupling", "shaft coupling", "flexible coupling", "rigid coupling",
+            "jaw coupling", "grid coupling", "gear coupling", "coupling assembly",
+        ),
+        slug_tokens=("couplings", "coupling", "shaft-couplings"),
+    ),
+)
+
+# Canonical -> NounClass lookup (built once at import).
+_BY_CANONICAL: dict[str, NounClass] = {nc.canonical: nc for nc in _NOUN_CLASSES}
+
+
+# ---------------------------------------------------------------------------
+# Matching helpers
+# ---------------------------------------------------------------------------
+
+def _slugify(text: str) -> str:
+    """Lowercase + strip to [a-z0-9-]. Empty on no useful content."""
+    return re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+
+
+def _classes() -> tuple[NounClass, ...]:
+    """Return the dictionary tuple (stable ordering for deterministic matching)."""
+    return _NOUN_CLASSES
+
+
+def get_noun_class(canonical: str) -> Optional[NounClass]:
+    """Fetch a NounClass by its canonical label (e.g. 'SEAL'), or None."""
+    return _BY_CANONICAL.get((canonical or "").upper())
+
+
+# ---------------------------------------------------------------------------
+# Classification
+# ---------------------------------------------------------------------------
+
+def classify_noun_class(text: str) -> Optional[str]:
+    """Classify a free-text string (title, snippet, detected_type, query) into a
+    noun-class canonical label, or None if undetectable.
+
+    Multi-word synonyms are matched first (longest first) so 'mechanical seal'
+    resolves to SEAL, not the bare 'seal' inside another phrase. Matching is
+    case-insensitive substring against the lowercased text. Returns the canonical
+    label (e.g. 'SEAL', 'PUMP'); None means "undetectable" — the caller must
+    treat that as the 0.4-0.5 TypeGate floor, NEVER zero (ESCI lesson).
+    """
+    if not text:
+        return None
+    haystack = (text or "").lower()
+    if not haystack.strip():
+        return None
+
+    # Longest-synonym-first so multi-word phrases win over their single-word
+    # substrings (e.g. "mechanical seal" before "seal", "variable frequency
+    # drive" before "drive").
+    candidates: list[tuple[int, str]] = []
+    for nc in _NOUN_CLASSES:
+        for syn in nc.synonyms:
+            if syn in haystack:
+                candidates.append((len(syn), nc.canonical))
+    if candidates:
+        candidates.sort(key=lambda c: (-c[0], c[1]))
+        return candidates[0][1]
+    return None
+
+
+def classify_noun_class_from_url(url: str) -> Optional[str]:
+    """Classify a result URL into a noun-class using its path slug segments.
+
+    The URL slug encodes the site's own category (``/mechanical-seals/goulds/...``
+    vs ``/pump/centrifugal/...``) — the highest-leverage signal. Matches against
+    the slugified path segments (host/query excluded, so a domain like
+    ``pumpcatalog.com`` does not classify the page as a pump). Returns the
+    canonical label or None if undetectable.
+    """
+    if not url:
+        return None
+    from urllib.parse import urlparse
+    try:
+        path = (urlparse(url.lower()).path or "")
+    except Exception:
+        return None
+    if not path:
+        return None
+
+    # Break the path into slug segments and test each against the slug tokens.
+    # First hit wins in dictionary order (deterministic); path order is
+    # irrelevant because the category segment is the most-specific one and we
+    # trust the vendor's own breadcrumb.
+    segments = [seg for seg in (_slugify(seg) for seg in path.split("/")) if seg]
+    for nc in _NOUN_CLASSES:
+        for token in nc.slug_tokens:
+            token_slug = _slugify(token)
+            if not token_slug:
+                continue
+            for seg in segments:
+                if seg == token_slug or seg.startswith(f"{token_slug}-") or seg.endswith(f"-{token_slug}"):
+                    return nc.canonical
+    return None
+
+
+def classify_result_noun_class(title: str, url: str) -> Optional[str]:
+    """Combine title + URL-slug evidence into a single noun-class verdict for a
+    result. Title-only and URL-only both classify; if they disagree, the URL
+    wins (the vendor's own category breadcrumb is more authoritative than
+    marketing title copy). Either-way-undetectable -> None (caller applies the
+    0.4-0.5 floor, never zero).
+    """
+    url_cls = classify_noun_class_from_url(url)
+    title_cls = classify_noun_class(title)
+    if url_cls:
+        return url_cls
+    return title_cls
