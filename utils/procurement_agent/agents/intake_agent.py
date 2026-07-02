@@ -10,11 +10,22 @@ Rectification Sprint additions:
 
 import base64
 import json
+import os
 import re
 import requests
 from typing import Optional, Tuple
 
 from utils.models import SourcingRun
+
+
+def _intake_type_aware() -> bool:
+    """Strict opt-in for the intake-type-aware redesign (guardrail 3). Only an
+    explicit truthy token (1/true/yes/on) enables the new behavior; anything
+    else (None, "", "0", "false", "no", junk) -> False, so the flag fails
+    safe/closed and the intake is byte-identical to current behavior. Mirrors
+    api_server._env_truthy / email_sender._env_truthy / sourcing_agent's demo gate.
+    Read at call time (not import time) so a test/flip mid-process is honored."""
+    return (os.environ.get("INTAKE_TYPE_AWARE") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _detect_media_type(img_bytes: bytes) -> str:
@@ -417,6 +428,15 @@ class IntakeAgent:
         for k, v in extracted.items():
             if not isinstance(v, (list, dict)) and v not in _NULL_VALUES:
                 merged[k] = v
+
+        # Phase 1 — quantity capture (gated behind INTAKE_TYPE_AWARE). Inert when
+        # the flag is off: zero new keys, byte-identical specs. When on, a stated
+        # quantity ("I need 6 …") is captured, else defaulted to 1 with an internal
+        # `_quantity_assumed` marker. The marker is `_`-prefixed so the existing
+        # context-summary + RunDetail filters strip it; `quantity` itself surfaces.
+        if _intake_type_aware():
+            from utils.procurement_agent.quantity_capture import apply_quantity
+            apply_quantity(merged, text)
 
         # Fix 1: units-based classification override (runs after VLM merge)
         new_type, new_cat, override_applied = classify_by_units(merged)

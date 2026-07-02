@@ -389,6 +389,25 @@ function ItemCard({
   const label =
     [mfg, val(specs?.model) || pn].filter(Boolean).join(" ") || val(specs?.description) || "";
 
+  // Phase 1 — minimal editable quantity field (gated by data presence, not a
+  // frontend flag). The backend only populates `quantity` under INTAKE_TYPE_AWARE,
+  // so flag-off runs never carry it and this control never renders (demo-unaffected).
+  // Renders only for an identified/ready item so it doesn't clutter the "need more"
+  // state. On commit, PUT the full specs back with the updated quantity.
+  const [qty, setQty] = useState<number | null>(null);
+  const [qtyBusy, setQtyBusy] = useState(false);
+  useEffect(() => { setQty(specs?.quantity ?? null); }, [specs?.quantity]);
+  const commitQty = async (next: number | null) => {
+    if (!specs || next == null || next < 1 || qtyBusy) return;
+    setQtyBusy(true);
+    try {
+      await seedAssetSpecs(runId, { ...specs, quantity: next });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+    } finally {
+      setQtyBusy(false);
+    }
+  };
+
   // Report this item's ready state up whenever it changes (onReady is stable via useCallback).
   useEffect(() => { onReady?.(runId, ready); }, [runId, ready, onReady]);
 
@@ -427,6 +446,29 @@ function ItemCard({
           {ready && pn && <div className="id-meta">Part no. <b>{pn}</b>{mfg ? <> · {mfg}</> : null}</div>}
           {ready && !pn && specs?.spec_based_sourcing && (
             <div className="id-meta">Matching by category — no exact part number needed.</div>
+          )}
+          {ready && specs?.quantity != null && (
+            <div className="id-meta" style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6 }}>
+              Qty:
+              <input
+                type="number"
+                min={1}
+                value={qty ?? specs.quantity}
+                disabled={qtyBusy}
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  setQty(Number.isFinite(n) ? n : null);
+                }}
+                onBlur={() => {
+                  const n = qty ?? specs.quantity ?? 1;
+                  const next = Math.max(1, Math.floor(n));
+                  if (next !== (specs.quantity ?? null)) void commitQty(next);
+                  else setQty(specs.quantity ?? null);
+                }}
+                style={{ width: 64, padding: "2px 6px" }}
+                aria-label="Quantity"
+              />
+            </div>
           )}
           {!ready && reply && <div className="id-meta" style={{ marginTop: 4 }}>{reply}</div>}
         </div>

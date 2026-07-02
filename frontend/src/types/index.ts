@@ -90,6 +90,11 @@ export interface AssetSpecs {
   // True when sufficiency reached without a model or part number (spec-based sourcing path).
   // Set by the backend; drives "By spec" label in the confirm-card secondary fields.
   spec_based_sourcing?: boolean;
+  // Phase 1 — quantity capture (gated INTAKE_TYPE_AWARE on the backend). Populated
+  // only when the backend's intake captured a quantity; absent otherwise, so the
+  // editable Qty control renders only for runs that actually carry one (flag-off
+  // runs never have it -> the control is invisible -> demo-unaffected).
+  quantity?: number;
 }
 
 
