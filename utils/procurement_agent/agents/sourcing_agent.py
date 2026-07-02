@@ -46,20 +46,26 @@ _UNKNOWN_MANUFACTURERS = {"Unknown", "unknown", "N/A", "n/a", "", None}
 # ---------------------------------------------------------------------------
 # DEMO_MODE — public no-login demo spine (mirrors api_server._env_truthy)
 # ---------------------------------------------------------------------------
-# The seed Tier 1 catalog (data/mock_tier1_suppliers.json) holds FABRICATED
-# distributors — invented vendors, fake prices, and some dead/parked domains
-# (e.g. industrialcontrolsolutions.com, nationalseal.com). For a public demo
-# whose pitch is REAL sourcing, surfacing a top "Arkim Network, in-stock,
-# $875, 2-day" recommendation that lands on a GoDaddy for-sale page is the
-# worst-case demo failure. Under DEMO_MODE, Tier 1 is therefore LIVE-ONLY:
-# the seed catalog is not read and the synthetic brand-intelligence Tier 1
-# fallback (_seeded_tier1_candidates — a fabricated-but-URL-less "Arkim
-# Network, OEM authorized, confirm pricing in 30 min" vendor) is gated off.
-# Tier 2/3 (live Tavily + LLM) carry the demo; genuine brand-intelligence
-# anchors still surface in Tier 3 via _seeded_tier3_candidates (untouched).
-# INERT when DEMO_MODE is off: the catalog loads and the fallback runs
-# byte-for-byte as today (normal dev/prod operation unchanged). Strict opt-in
-# parse matches api_server._env_truthy / email_sender._env_truthy (only
+# Tier 1 is the Arkim ONBOARDED supplier catalog. As of this change the seed
+# (data/mock_tier1_suppliers.json) is {"suppliers": []}: every entry it held
+# was a FABRICATED distributor (invented vendors, fake prices, dead/parked/
+# placeholder domains — e.g. industrialcontrolsolutions.com, nationalseal.com).
+# They are gone at the source, so no fabricated Tier 1 vendor can be sourced or
+# cached in ANY mode (demo or non-demo) — not merely gated under DEMO_MODE.
+# The synthetic brand-intelligence Tier 1 fallback (_seeded_tier1_candidates)
+# is likewise PERMANENTLY disabled (returns [] unconditionally): it minted a
+# fabricated "Arkim Network — OEM authorized, confirm pricing in 30 min" vendor
+# and, worse, wrote it back to known_parts.json, perpetuating a fabricated-
+# vendor cache treadmill in non-demo. With both gone, Tier 1 is honestly EMPTY
+# in all modes until real onboarded suppliers exist; Tier 2/3 (live Tavily +
+# LLM) carry all real sourcing, and genuine brand-intelligence anchors still
+# surface in Tier 3 via _seeded_tier3_candidates (untouched).
+#
+# The DEMO_MODE early-return below is retained as belt-and-suspenders: it
+# short-circuits the (now-empty) seed read + _seeded_tier1_candidates call under
+# demo, which changes nothing behaviorally (both already return []) but keeps
+# the demo-live-only intent explicit and documented. Strict opt-in parse
+# matches api_server._env_truthy / email_sender._env_truthy (only
 # 1/true/yes/on -> True; everything else fails safe to False).
 
 def _demo_mode_active() -> bool:
@@ -451,10 +457,15 @@ class SourcingAgent:
     def _run_tier1(self, specs: AssetSpecs, weights: dict) -> list[dict]:
         """Match against the Arkim onboarded supplier catalog (Fix 2: normalized PN).
 
-        Under DEMO_MODE: LIVE-ONLY Tier 1 — return [] without reading the seed
-        catalog (fabricated vendors / dead domains) or the synthetic fallback
-        (gated separately in _seeded_tier1_candidates). Tier 2/3 carry the demo.
-        Inert when DEMO_MODE is off (catalog + fallback run as today).
+        The seed catalog (data/mock_tier1_suppliers.json) is now {"suppliers": []}
+        — all fabricated vendors purged at the source — and the synthetic
+        _seeded_tier1_candidates fallback is permanently disabled, so Tier 1 is
+        honestly EMPTY in all modes until real onboarded suppliers exist. This
+        still reads the (empty) file and falls through to _seeded_tier1_candidates
+        (which returns []), so the result is [] for any specs. The DEMO_MODE
+        early-return below is retained as belt-and-suspenders: it short-circuits
+        the empty read under demo (no behavioral change) and documents the
+        demo-live-only intent. Tier 2/3 carry all real sourcing.
         """
         if _demo_mode_active():
             print("[SourcingAgent] DEMO_MODE: Tier 1 live-only — seed catalog + synthetic fallback gated off")
@@ -1125,66 +1136,30 @@ class SourcingAgent:
     # ------------------------------------------------------------------
 
     def _seeded_tier1_candidates(self, specs: AssetSpecs) -> list[dict]:
-        """Return one Tier 1 Arkim Network candidate from seeded authorized brands.
+        """PERMANENTLY disabled — return [] in ALL modes.
 
-        Called only when the catalog match returns nothing, so real catalog
-        entries always take precedence over this synthetic fallback.
+        History: this was a synthetic Tier 1 fallback that minted a fabricated
+        "Arkim Network — OEM authorized. Confirmed pricing within 30 min."
+        vendor (is_mock=True, source_url=None, price_tbd=True) from
+        brand-intelligence authorized_service_brands whenever the seed catalog
+        had no match. It was fabricated even without a dead URL, and — worse —
+        its Tier 1 results were written back to known_parts.json (edge keyed by
+        name slug, since source_url is None), so it perpetuated a fabricated-
+        vendor cache treadmill in non-demo: every run re-surfaced and re-cached
+        the fake "Arkim Network" Tier 1 card.
 
-        Under DEMO_MODE: gated off (return []) — this synthetic vendor
-        (is_mock=True, source_url=None, "Arkim Network — OEM authorized,
-        confirmed pricing in 30 min") is fabricated even without a dead URL,
-        so it doesn't belong in a real-sourcing demo. Belt-and-suspenders:
-        _run_tier1 already returns [] under DEMO_MODE before reaching here,
-        but this guard makes the intent explicit and covers any future caller.
-        Inert when DEMO_MODE is off.
+        With the seed catalog purged (data/mock_tier1_suppliers.json is now
+        {"suppliers": []} — all fabricated vendors gone at the source) AND this
+        synthetic fallback gated off unconditionally, Tier 1 is honestly EMPTY
+        in demo AND non-demo until real onboarded suppliers exist. Tier 2/3
+        (live Tavily + LLM) carry all real sourcing; genuine brand-intelligence
+        anchors still surface in Tier 3 via _seeded_tier3_candidates (untouched).
 
-        is_mock: reserved for future filtering (production exclusion,
-        programmatic distinction when real Tier 1 vendors exist). For demos,
-        mock vendors render normally.
+        The previous DEMO_MODE-only gate is retained as belt-and-suspenders in
+        _run_tier1 (it short-circuits the now-empty file read under demo), but
+        this method no longer keys on DEMO_MODE at all — it returns [] always.
         """
-        if _demo_mode_active():
-            return []
-        try:
-            from utils.brand_intelligence import get_brand_relationships
-            from utils.sourcing_archieved.scoring import _detect_equip_type
-
-            if specs.manufacturer in _UNKNOWN_MANUFACTURERS:
-                return []
-
-            equip_kw = (
-                _detect_equip_type(specs)
-                or specs.detected_type
-                or specs.category
-                or "industrial"
-            )
-            br          = get_brand_relationships(specs.manufacturer, equip_kw)
-            auth_brands = br.get("authorized_service_brands") or []
-            if not auth_brands:
-                return []
-        except Exception:
-            return []
-
-        brand = auth_brands[0]
-        print(f"[SourcingAgent] Seeded Tier 1 mock candidate: {brand!r} for {specs.manufacturer!r}")
-        return [{
-            "vendor_name":                brand,
-            "base_price":                 0.0,
-            "lead_time_days":             4,
-            "lead_time_source":           "placeholder",  # catalog-miss fallback: hardcoded, no real lead time
-            "reliability_score":          95.0,
-            "merchant_type":              "Arkim Network",
-            "match_type":                 "Exact OEM",
-            "source_url":                 None,
-            "price_tbd":                  True,
-            "suitability_score":          92.0,
-            "confidence_score":           88.0,
-            "vendor_authorization_status": "Authorized",
-            "onboarding_status":          "Active",
-            "in_stock":                   True,
-            "notes":                      "Arkim Network — OEM authorized. Confirmed pricing within 30 min.",
-            "found_part_number":          None,
-            "is_mock":                    True,
-        }]
+        return []
 
     # ------------------------------------------------------------------
     # Helpers

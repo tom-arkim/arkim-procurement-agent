@@ -3,6 +3,7 @@ Tests for SpecComparisonAgent — all three fidelity tiers plus comparison helpe
 """
 
 import json
+import os
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -153,31 +154,90 @@ class TestCompareFrame:
 # ---------------------------------------------------------------------------
 
 class TestHighFidelity:
+    # The real seed catalog (data/mock_tier1_suppliers.json) is now {"suppliers": []}
+    # (all fabricated vendors purged at the source). These tests exercise the
+    # _high_fidelity COMPARISON MECHANISM, not the real catalog, so they patch
+    # _TIER1_CATALOG_PATH to a temp catalog carrying the spec_data they need.
+    # Vendor names/PNs here are TEST FIXTURES (decoupled from any real supplier).
     TIER1_CANDIDATE_SEAL = {
-        "vendor_name":       "National Seal & Bearing Co.",
+        "vendor_name":       "Test Seal Vendor",
         "found_part_number": "MR-1-1375",
-        "source_url":        "https://nationalseal.com",
+        "source_url":        "https://test-seal-vendor.example",
         "base_price":        340.0,
     }
 
     TIER1_CANDIDATE_MOTOR = {
-        "vendor_name":       "Gulf Coast Electric Motor Service",
+        "vendor_name":       "Test Motor Vendor",
         "found_part_number": "EM7054T",
-        "source_url":        "https://gulfcoastmotor.com",
+        "source_url":        "https://test-motor-vendor.example",
         "base_price":        2100.0,
     }
 
-    def test_high_fidelity_seal_exact_match(self, agent):
+    # Temp catalog carrying the spec_data the seal + motor candidates resolve to.
+    _TEMP_CATALOG = {
+        "suppliers": [
+            {
+                "name": "Test Seal Vendor",
+                "inventory": [
+                    {
+                        "part_number": "MR-1-1375",
+                        "manufacturer": "John Crane",
+                        "spec_data": {
+                            "shaft_size": "1-3/8 inch",
+                            "bore_diameter": "1-3/8 inch",
+                            "material_spec": "Carbon",
+                            "seat_material": "Ceramic",
+                            "elastomer": "Buna-N",
+                            "spring_material": "Stainless Steel",
+                            "seal_type": "single-coil-spring",
+                            "detected_type": "mechanical seal",
+                        },
+                    },
+                ],
+            },
+            {
+                "name": "Test Motor Vendor",
+                "inventory": [
+                    {
+                        "part_number": "EM7054T",
+                        "manufacturer": "US Motors",
+                        "spec_data": {
+                            "hp": "30",
+                            "voltage": "460V",
+                            "phase": "3-phase",
+                            "rpm": "1800",
+                            "frame": "326T",
+                            "enclosure": "TEFC",
+                            "hz": "60",
+                            "service_factor": "1.15",
+                        },
+                    },
+                ],
+            },
+        ]
+    }
+
+    @pytest.fixture
+    def temp_catalog(self, tmp_path, monkeypatch):
+        """Point _TIER1_CATALOG_PATH at a temp catalog so these tests don't
+        depend on the (now-empty) real seed file."""
+        catalog_file = tmp_path / "tier1_catalog.json"
+        catalog_file.write_text(json.dumps(self._TEMP_CATALOG))
+        from utils.procurement_agent.agents import spec_comparison_agent as mod
+        monkeypatch.setattr(mod, "_TIER1_CATALOG_PATH", str(catalog_file))
+        return str(catalog_file)
+
+    def test_high_fidelity_seal_exact_match(self, agent, temp_catalog):
         run = _make_run(_seal_specs())
         artifact = agent.run(run, self.TIER1_CANDIDATE_SEAL, tier=1)
 
         assert artifact["fidelity"] == "high"
-        assert artifact["vendor_name"] == "National Seal & Bearing Co."
+        assert artifact["vendor_name"] == "Test Seal Vendor"
         # shaft_size: "1-3/8 inch" vs "1-3/8 inch" → exact
         shaft_row = next(c for c in artifact["comparison"] if c["field"] == "shaft_size")
         assert shaft_row["match"] == "exact"
 
-    def test_high_fidelity_seal_confirms_carbon_material(self, agent):
+    def test_high_fidelity_seal_confirms_carbon_material(self, agent, temp_catalog):
         run = _make_run(_seal_specs())
         artifact = agent.run(run, self.TIER1_CANDIDATE_SEAL, tier=1)
 
@@ -185,12 +245,12 @@ class TestHighFidelity:
         assert mat_row is not None
         assert mat_row["match"] in ("exact", "compatible")
 
-    def test_high_fidelity_fit_confirmed_when_all_match(self, agent):
+    def test_high_fidelity_fit_confirmed_when_all_match(self, agent, temp_catalog):
         run = _make_run(_seal_specs())
         artifact = agent.run(run, self.TIER1_CANDIDATE_SEAL, tier=1)
         assert artifact["compatibility_summary"] in ("fit_confirmed", "fit_likely")
 
-    def test_high_fidelity_motor_incompatible_hp(self, agent):
+    def test_high_fidelity_motor_incompatible_hp(self, agent, temp_catalog):
         specs = dict(_motor_specs())
         specs["hp"] = "150"  # asset needs 150HP, catalog has 30HP → incompatible
         run = _make_run(specs)
@@ -201,17 +261,17 @@ class TestHighFidelity:
         assert hp_row["match"] == "different"
         assert artifact["compatibility_summary"] == "incompatible"
 
-    def test_high_fidelity_motor_all_match(self, agent):
+    def test_high_fidelity_motor_all_match(self, agent, temp_catalog):
         run = _make_run(_motor_specs())
         artifact = agent.run(run, self.TIER1_CANDIDATE_MOTOR, tier=1)
         assert artifact["compatibility_summary"] in ("fit_confirmed", "fit_likely")
         assert artifact["verification_required_fields"] == []
 
-    def test_high_fidelity_missing_catalog_falls_back(self, agent):
+    def test_high_fidelity_missing_catalog_falls_back(self, agent, temp_catalog):
         candidate = {
-            "vendor_name":       "National Seal & Bearing Co.",
+            "vendor_name":       "Test Seal Vendor",
             "found_part_number": "DOES-NOT-EXIST-999",
-            "source_url":        "https://nationalseal.com",
+            "source_url":        "https://test-seal-vendor.example",
         }
         run = _make_run(_seal_specs())
         artifact = agent.run(run, candidate, tier=1)

@@ -766,12 +766,16 @@ class TestDedupByUrl:
 # DEMO_MODE Tier 1 — live-only: the fabricated seed catalog + synthetic
 # brand-intelligence Tier 1 fallback are gated off so a public real-sourcing
 # demo surfaces only genuinely-discovered (live Tavily Tier 2/3) vendors.
-# Inert when DEMO_MODE is off: catalog + fallback run byte-for-byte as today.
+# The real seed is now {"suppliers": []} and the synthetic fallback is
+# permanently disabled in ALL modes (see TestTier1SeedPurged below), so the
+# DEMO_MODE gate is belt-and-suspenders; these tests still use an INJECTED
+# temp catalog (_FAB_CATALOG) to exercise the gate's on/off logic in isolation.
 # ---------------------------------------------------------------------------
 
-# A catalog built from the REAL fabricated seed entries (data/mock_tier1_suppliers.json)
-# so the DEMO_MODE-on tests prove those exact dead-domain / placeholder vendors
-# (industrialcontrolsolutions.com, nationalseal.com, Acme) do NOT surface.
+# A catalog built from the REAL (now-purged) fabricated seed entries, used as an
+# INJECTED temp catalog so the DEMO_MODE-on tests prove those exact dead-domain /
+# placeholder vendors (industrialcontrolsolutions.com, nationalseal.com, Acme)
+# do NOT surface when the gate is on.
 _FAB_CATALOG = {
     "suppliers": [
         {
@@ -875,15 +879,18 @@ class TestTier1DemoModeLiveOnly:
         assert result["tier_1"]["results"] == []
 
     def test_seeded_tier1_fallback_gated_off_under_demo(self, monkeypatch):
-        """A manufacturer with NO catalog match but a brand-intelligence
-        authorized_service_brands entry: today the synthetic fallback surfaces
-        a mock 'Arkim Network — OEM authorized' Tier 1 vendor. Under DEMO_MODE
-        it must return [] (no fabricated-but-URL-less vendor either)."""
+        """The synthetic _seeded_tier1_candidates fallback is now PERMANENTLY
+        disabled (returns [] in ALL modes), and the DEMO_MODE gate in
+        _run_tier1 short-circuits before it anyway. With DEMO_MODE on and a
+        manufacturer (Endress+Hauser) that has brand-intelligence
+        authorized_service_brands but no catalog match, Tier 1 must still be []
+        — no fabricated-but-URL-less 'Arkim Network' vendor either way."""
         monkeypatch.setenv("DEMO_MODE", "1")
 
         agent = SourcingAgent()
-        # No catalog patch needed -> real catalog file; Endress+Hauser is not in
-        # it, so the only path to a Tier 1 result is _seeded_tier1_candidates.
+        # No catalog patch needed -> real catalog file (now empty); Endress+Hauser
+        # is not in it, so the only path to a Tier 1 result would be
+        # _seeded_tier1_candidates (now unconditionally []).
         run = _make_run(specs={
             "manufacturer": "Endress+Hauser", "model": "Cerabar M PMC11",
             "part_number": "PMC11-AA1V1HFVXJA", "voltage": "N/A",
@@ -900,8 +907,10 @@ class TestTier1DemoModeLiveOnly:
         assert not any(r.get("is_mock") for r in t1["results"])
 
     def test_demo_mode_off_is_inert_catalog_still_works(self, tmp_path, monkeypatch):
-        """DEMO_MODE OFF -> byte-for-byte today: the catalog loads and a real
-        catalog match surfaces (regression guard for the dev/prod path)."""
+        """DEMO_MODE OFF -> the gate does NOT activate, so an INJECTED catalog
+        loads and matches (regression guard for the gate's off-state). The real
+        seed is now empty (see TestTier1SeedPurged); this injects a temp catalog
+        to exercise gate inertness in isolation."""
         catalog_file = tmp_path / "mock_tier1_suppliers.json"
         catalog_file.write_text(json.dumps(_FAB_CATALOG))
         monkeypatch.delenv("DEMO_MODE", raising=False)
@@ -918,7 +927,9 @@ class TestTier1DemoModeLiveOnly:
                 with patch.object(agent, "_run_tier3", return_value=[]):
                     result = agent.run(run)
 
-        # Catalog match (SKF by manufacturer) surfaces exactly as today.
+        # The injected temp catalog's SKF-by-manufacturer match surfaces (proving
+        # the DEMO_MODE gate stayed inert when off). The real seed is empty, but
+        # this test deliberately injects a populated catalog to test the gate.
         assert result["tier_1"]["count"] >= 1
         names = {r["vendor_name"] for r in result["tier_1"]["results"]}
         assert "National Seal & Bearing Co." in names
@@ -944,3 +955,100 @@ class TestTier1DemoModeLiveOnly:
                         result = agent.run(run)
             assert result["tier_1"]["count"] >= 1, \
                 f"DEMO_MODE={off!r} must be inert (catalog still works)"
+
+
+# ---------------------------------------------------------------------------
+# PERMANENT source-clean guard — the fabricated Tier 1 seed vendors are gone
+# at the source and the synthetic fallback is disabled in ALL modes, so no
+# fabricated Tier 1 vendor can be sourced or cached in demo OR non-demo.
+# ---------------------------------------------------------------------------
+class TestTier1SeedPurgedNoFabricatedVendors:
+    """The real seed (data/mock_tier1_suppliers.json) is permanently empty of
+    fabricated vendors, and _seeded_tier1_candidates returns [] unconditionally,
+    so Tier 1 is honestly empty in ALL modes until real onboarded suppliers
+    exist. These guard that state at the source and through the agent in
+    non-demo (the demo path is covered by TestTier1DemoModeLiveOnly)."""
+
+    _REAL_CATALOG_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))),
+        "data", "mock_tier1_suppliers.json",
+    )
+
+    # The fabricated vendors/domains that must NEVER surface again, in any mode.
+    _FAB_VENDORS = {
+        "National Seal & Bearing Co.",
+        "Industrial Control Solutions",
+        "Acme Industrial Supply",
+        "Gulf Coast Electric Motor Service",
+        "Southern Pump & Equipment",
+    }
+    _FAB_DOMAINS = {
+        "nationalseal.com", "industrialcontrolsolutions.com",
+        "acmeindustrial.com", "gulfcoastmotor.com", "southernpump.com",
+        "indcontrolsolutions.com",
+    }
+
+    def test_real_seed_catalog_is_empty(self):
+        """The seed file must be a valid catalog with NO suppliers — the
+        permanent source-level purge of all fabricated vendors."""
+        with open(self._REAL_CATALOG_PATH, "r") as fh:
+            catalog = json.load(fh)
+        assert "suppliers" in catalog, "seed must keep valid {\"suppliers\": []} structure"
+        assert catalog["suppliers"] == [], (
+            f"seed must be empty of fabricated vendors, got: "
+            f"{[s.get('name') for s in catalog['suppliers']]}"
+        )
+
+    def test_no_fabricated_tier1_vendor_in_non_demo(self, monkeypatch):
+        """DEMO_MODE OFF + the real (empty) seed + a manufacturer that WOULD
+        have triggered the synthetic _seeded_tier1_candidates fallback (it has
+        brand-intelligence authorized_service_brands but no catalog match).
+        Tier 1 must be [] — no fabricated 'Arkim Network' is_mock card and no
+        fabricated seed vendor, even with the gate off. This is the non-demo
+        half of 'no fabricated vendor in EITHER mode'."""
+        monkeypatch.delenv("DEMO_MODE", raising=False)
+
+        agent = SourcingAgent()
+        run = _make_run(specs={
+            "manufacturer": "Endress+Hauser", "model": "Cerabar M PMC11",
+            "part_number": "PMC11-AA1V1HFVXJA", "voltage": "N/A",
+            "category": "Part", "detected_type": "pressure transmitter",
+        })
+
+        # No catalog patch -> reads the real (now-empty) seed file.
+        with patch.object(agent, "_run_tier2", return_value=[]):
+            with patch.object(agent, "_run_tier3", return_value=[]):
+                result = agent.run(run)
+
+        t1 = result["tier_1"]
+        assert t1["count"] == 0, (
+            f"non-demo Tier 1 must be empty (no fabricated vendor), got: {t1['results']}"
+        )
+        assert t1["results"] == []
+        # Belt-and-suspenders: no fabricated vendor name, no dead-domain URL,
+        # no synthetic is_mock 'Arkim Network' card anywhere in Tier 1.
+        for r in t1["results"]:
+            assert r.get("vendor_name") not in self._FAB_VENDORS
+            assert not any(d in (r.get("source_url") or "") for d in self._FAB_DOMAINS)
+            assert not (r.get("is_mock") and not r.get("price_tbd", True))
+
+    def test_seeded_tier1_fallback_unconditionally_disabled(self, monkeypatch):
+        """_seeded_tier1_candidates must return [] regardless of DEMO_MODE —
+        called directly with a manufacturer that has authorized_service_brands,
+        in BOTH demo-on and demo-off states."""
+        from utils.models import AssetSpecs
+        agent = SourcingAgent()
+        specs = AssetSpecs(
+            manufacturer="Endress+Hauser", model="Cerabar M PMC11",
+            part_number="PMC11-AA1V1HFVXJA", voltage="N/A", category="Part",
+            detected_type="pressure transmitter",
+        )
+        for mode in ("1", None):  # demo ON, then demo OFF (env unset)
+            if mode is None:
+                monkeypatch.delenv("DEMO_MODE", raising=False)
+            else:
+                monkeypatch.setenv("DEMO_MODE", mode)
+            assert agent._seeded_tier1_candidates(specs) == [], (
+                f"_seeded_tier1_candidates must be unconditionally [] (DEMO_MODE={mode!r})"
+            )
