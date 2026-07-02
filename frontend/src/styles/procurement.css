@@ -444,6 +444,15 @@
 .proc-id .id-reply { padding: 0 18px 14px; font-size: 13px; color: var(--muted); line-height: 1.55; }
 .proc-idinput { width: 100%; font-family: var(--font-sans); font-size: 14px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--r); background: var(--bg); color: var(--text); outline: none; box-shadow: 0 0 0 3px var(--accent-fill); }
 
+/* Editable quantity control on the identified-part card — themed to match the card's
+   inputs (proc-idinput) at a compact size. Native number spinner is retained (accent-
+   tinted) so up/down still work; only the presentation changes. */
+.proc-qty { display: inline-flex; align-items: center; gap: 9px; font-size: 13px; color: var(--muted); }
+.proc-qty .ql { font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; font-size: 11px; }
+.proc-qty input { width: 60px; font-family: var(--font-sans); font-size: 13.5px; font-weight: 600; text-align: center; padding: 6px 8px; border: 1px solid var(--accent); border-radius: var(--r); background: var(--bg); color: var(--text-strong); outline: none; accent-color: var(--accent-text); transition: border-color 0.14s, box-shadow 0.14s; }
+.proc-qty input:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-fill); }
+.proc-qty input:disabled { opacity: 0.55; cursor: default; }
+
 /* ---- settings ---- */
 .proc-sitetabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
 .proc-sitetab { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-sans); font-size: 13px; font-weight: 600; padding: 9px 15px; border-radius: var(--r); border: 1px solid var(--border); background: var(--surface); color: var(--muted); cursor: pointer; transition: border-color 0.14s, color 0.14s, background-color 0.14s; }

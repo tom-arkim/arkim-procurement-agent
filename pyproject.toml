@@ -20,6 +20,11 @@ dependencies = [
     # app/middleware/auth_middleware.py (no shared auth library exists).
     "python-jose[cryptography]>=3.3.0",
     "httpx>=0.27.0",
+    # Observability — LangSmith tracing (T7). Manual ls.trace() context managers
+    # (NO langgraph auto-tracing). The ONLY LangSmith env var is LANGSMITH_API_KEY;
+    # endpoint hardcoded https://api.smith.langchain.com. Pinned >=0.4.32 per the
+    # overnight build brief (messaging's investigated pattern).
+    "langsmith>=0.4.32",
 ]
 
 [dependency-groups]

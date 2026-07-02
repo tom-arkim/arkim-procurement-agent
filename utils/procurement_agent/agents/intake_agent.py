@@ -10,11 +10,22 @@ Rectification Sprint additions:
 
 import base64
 import json
+import os
 import re
 import requests
 from typing import Optional, Tuple
 
 from utils.models import SourcingRun
+
+
+def _intake_type_aware() -> bool:
+    """Strict opt-in for the intake-type-aware redesign (guardrail 3). Only an
+    explicit truthy token (1/true/yes/on) enables the new behavior; anything
+    else (None, "", "0", "false", "no", junk) -> False, so the flag fails
+    safe/closed and the intake is byte-identical to current behavior. Mirrors
+    api_server._env_truthy / email_sender._env_truthy / sourcing_agent's demo gate.
+    Read at call time (not import time) so a test/flip mid-process is honored."""
+    return (os.environ.get("INTAKE_TYPE_AWARE") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _detect_media_type(img_bytes: bytes) -> str:
@@ -364,6 +375,38 @@ class IntakeAgent:
         self._api_key = anthropic_api_key
 
     # ------------------------------------------------------------------
+    # Phase 1 — part-type classification (gated, internal `_-keys, fail-soft)
+    # ------------------------------------------------------------------
+
+    def _maybe_classify(self, merged: dict, text: str) -> None:
+        """Classify the first message under INTAKE_TYPE_AWARE and store the result
+        as internal `_`-prefixed keys on the merged specs. Fail-soft: any error or
+        UNKNOWN result leaves the specs untouched (intake proceeds generically).
+        The classifier uses the raw api.anthropic.com requests.post pattern (via
+        its own default llm_call) — never ANTHROPIC_BASE_URL, never the SDK. A
+        missing key -> the classifier returns UNKNOWN silently (no network)."""
+        try:
+            from utils.procurement_agent.part_type_classifier import classify_part_type
+            from utils.procurement_agent.langsmith_client import traced_llm, record_llm_output
+            # T7 — nested 'llm' span around the classifier call (parent = root trace).
+            with traced_llm("classify_part_type",
+                            model="claude-haiku-4-5-20251001",
+                            parent=getattr(self, "_ls_root", None),
+                            inputs={"text": text}):
+                classification = classify_part_type(text)
+                record_llm_output(getattr(self, "_ls_root", None),
+                                  classification.as_dict())
+        except Exception as exc:
+            # Belt-and-suspenders: the classifier itself never raises, but a
+            # defensive guard ensures an import/transport error can't crash intake.
+            print(f"[IntakeAgent] part-type classification failed: {exc}")
+            return
+        merged["_classified_type"] = classification.part_type
+        merged["_classified_regime"] = classification.regime
+        merged["_component_of"] = classification.component_of
+        merged["_classified_confidence"] = classification.confidence
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -393,6 +436,26 @@ class IntakeAgent:
         prior_specs    = run.asset_specs_json or {}
         prior_question = user_input.get("prior_question")
 
+        # T7 — open a LangSmith root trace around the intake run. Carries run_id
+        # in metadata (the cross-HTTP-boundary filter convention). Offline-inert:
+        # with LANGSMITH_API_KEY unset, trace() is a no-op context manager and
+        # the body runs unchanged. The root span is stashed on `self._ls_root` so
+        # the nested LLM-call sites (extraction / multimodal / clarification /
+        # classify_part_type) can open `traced_llm` children attached to it
+        # without changing their signatures. Cleared in `finally`. The sourcing
+        # pipeline is NOT instrumented tonight (supervised follow-up).
+        from utils.procurement_agent.langsmith_client import trace as _ls_trace
+        self._ls_root = None
+        with _ls_trace("intake run", run_id=getattr(run, "id", None),
+                       inputs={"text": text, "has_images": bool(images)}) as self._ls_root:
+            return self._run_body(run, user_input, text, images,
+                                  force_proceed, prior_specs, prior_question)
+
+    def _run_body(self, run: SourcingRun, user_input: dict, text: str, images: list,
+                  force_proceed: bool, prior_specs: dict, prior_question: str) -> dict:
+        """The intake run body, executed inside the T7 root LangSmith trace
+        (`self._ls_root` is set by the caller and cleared on exit). All nested
+        LLM calls open `traced_llm` children attached to that root."""
         # Extract from this turn's input
         if images:
             extracted = self._extract_multimodal(text, images, prior_specs)
@@ -417,6 +480,26 @@ class IntakeAgent:
         for k, v in extracted.items():
             if not isinstance(v, (list, dict)) and v not in _NULL_VALUES:
                 merged[k] = v
+
+        # Phase 1 — quantity capture (gated behind INTAKE_TYPE_AWARE). Inert when
+        # the flag is off: zero new keys, byte-identical specs. When on, a stated
+        # quantity ("I need 6 …") is captured, else defaulted to 1 with an internal
+        # `_quantity_assumed` marker. The marker is `_`-prefixed so the existing
+        # context-summary + RunDetail filters strip it; `quantity` itself surfaces.
+        if _intake_type_aware():
+            from utils.procurement_agent.quantity_capture import apply_quantity
+            apply_quantity(merged, text)
+
+        # Phase 1 — part-type classification (gated behind INTAKE_TYPE_AWARE). Run
+        # ONCE, against the user's FIRST message (no prior specs yet), so the type
+        # is known before the first clarification and the registry's q2_template
+        # can drive the next question (T5). The result rides as internal `_`-keys
+        # on asset_specs_json (filtered from context summary + RunDetail). A
+        # classification failure (UNKNOWN) is non-fatal: intake proceeds exactly
+        # as the current generic behavior (T4/T5 fall through on UNKNOWN). The
+        # classifier's llm_call is fail-soft — it never raises into the pipeline.
+        if _intake_type_aware() and not prior_specs and not images:
+            self._maybe_classify(merged, text)
 
         # Fix 1: units-based classification override (runs after VLM merge)
         new_type, new_cat, override_applied = classify_by_units(merged)
@@ -617,23 +700,30 @@ class IntakeAgent:
                 context = f"Previously extracted specs:\n{json.dumps(summary)}\n\nUser input: "
 
         try:
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key":           self._api_key,
-                    "anthropic-version":   "2023-06-01",
-                    "content-type":        "application/json",
-                },
-                json={
-                    "model":      "claude-sonnet-4-6",
-                    "max_tokens": 1024,
-                    "system":     _EXTRACTION_SYSTEM,
-                    "messages":   [{"role": "user", "content": f"{context}{text}"}],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
+            from utils.procurement_agent.langsmith_client import traced_llm, record_llm_output
+            # T7 — nested 'llm' span around the text-extraction call (parent = root trace).
+            with traced_llm("extract_text", model="claude-sonnet-4-6",
+                            parent=getattr(self, "_ls_root", None),
+                            inputs={"text": text, "has_prior": bool(prior_specs)}):
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key":           self._api_key,
+                        "anthropic-version":   "2023-06-01",
+                        "content-type":        "application/json",
+                    },
+                    json={
+                        "model":      "claude-sonnet-4-6",
+                        "max_tokens": 1024,
+                        "system":     _EXTRACTION_SYSTEM,
+                        "messages":   [{"role": "user", "content": f"{context}{text}"}],
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                raw_text = resp.json()["content"][0]["text"]
+                record_llm_output(getattr(self, "_ls_root", None), raw_text)
+            extracted = self._parse_llm_json(raw_text)
             # Infer the manufacturer PER-PART from a known PN prefix (prefix lookup beats LLM
             # inference for known families). A single dict -> apply once, considering the prior
             # PN too; a LIST (multi-part) -> apply to EACH element on its OWN PN (no prior re-bias).
@@ -680,23 +770,30 @@ class IntakeAgent:
         })
 
         try:
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key":           self._api_key,
-                    "anthropic-version":   "2023-06-01",
-                    "content-type":        "application/json",
-                },
-                json={
-                    "model":      "claude-sonnet-4-6",
-                    "max_tokens": 1024,
-                    "system":     _EXTRACTION_SYSTEM,
-                    "messages":   [{"role": "user", "content": content}],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            extracted = self._parse_llm_json(resp.json()["content"][0]["text"])
+            from utils.procurement_agent.langsmith_client import traced_llm, record_llm_output
+            # T7 — nested 'llm' span around the multimodal extraction call.
+            with traced_llm("extract_multimodal", model="claude-sonnet-4-6",
+                            parent=getattr(self, "_ls_root", None),
+                            inputs={"text": text, "n_images": len(images)}):
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key":           self._api_key,
+                        "anthropic-version":   "2023-06-01",
+                        "content-type":        "application/json",
+                    },
+                    json={
+                        "model":      "claude-sonnet-4-6",
+                        "max_tokens": 1024,
+                        "system":     _EXTRACTION_SYSTEM,
+                        "messages":   [{"role": "user", "content": content}],
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                raw_text = resp.json()["content"][0]["text"]
+                record_llm_output(getattr(self, "_ls_root", None), raw_text)
+            extracted = self._parse_llm_json(raw_text)
             # Per-part manufacturer inference (see _extract_text): dict -> once (with prior PN);
             # list -> each element on its own PN.
             if isinstance(extracted, dict):
@@ -783,6 +880,28 @@ class IntakeAgent:
             merged["_intake_turns"] = this_turn
             return None, self._COMMIT_MESSAGE
 
+        # Phase 2 — type-aware Q2 (gated behind INTAKE_TYPE_AWARE). When identity
+        # is absent AND a known part type was classified, ask the registry's
+        # q2_template VERBATIM (no LLM phrasing call) instead of the generic
+        # missing-field walk. Respects the `_asked_fields` de-dup (asked once) and
+        # the INTAKE_TURN_CAP (cap checked above). UNKNOWN type -> current generic
+        # behavior (falls through to the identity-first opener / picker below).
+        # The q2_template is recorded under a synthetic field key `_q2_<type>` so
+        # the never-re-ask ledger prevents repeats without colliding with real
+        # spec fields (it is `_-prefixed -> filtered from context/display).
+        if _intake_type_aware():
+            from utils.procurement_agent.part_type_registry import get_profile, is_known_type
+            classified_type = merged.get("_classified_type")
+            if (is_known_type(classified_type)
+                    and not _has_identity(merged)
+                    and "_q2_asked" not in asked):
+                profile = get_profile(classified_type)
+                if profile.q2_template:
+                    asked.append("_q2_asked")
+                    merged["_asked_fields"] = asked
+                    merged["_intake_turns"] = this_turn
+                    return profile.q2_template, None
+
         # Fix #1 — identity-first opener: first clarification turn + no part identity.
         if prior_turns == 0 and not _has_identity(merged):
             field = "part_identity"
@@ -823,23 +942,30 @@ class IntakeAgent:
         )
 
         try:
-            resp = requests.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key":           self._api_key,
-                    "anthropic-version":   "2023-06-01",
-                    "content-type":        "application/json",
-                },
-                json={
-                    "model":      "claude-haiku-4-5-20251001",
-                    "max_tokens": 150,
-                    "system":     _CLARIFICATION_SYSTEM,
-                    "messages":   [{"role": "user", "content": user_msg}],
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()["content"][0]["text"].strip()
+            from utils.procurement_agent.langsmith_client import traced_llm, record_llm_output
+            # T7 — nested 'llm' span around the clarification-generation call.
+            with traced_llm("generate_clarification", model="claude-haiku-4-5-20251001",
+                            parent=getattr(self, "_ls_root", None),
+                            inputs={"missing_field": missing_field}):
+                resp = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key":           self._api_key,
+                        "anthropic-version":   "2023-06-01",
+                        "content-type":        "application/json",
+                    },
+                    json={
+                        "model":      "claude-haiku-4-5-20251001",
+                        "max_tokens": 150,
+                        "system":     _CLARIFICATION_SYSTEM,
+                        "messages":   [{"role": "user", "content": user_msg}],
+                    },
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                clar_text = resp.json()["content"][0]["text"].strip()
+                record_llm_output(getattr(self, "_ls_root", None), clar_text)
+            return clar_text
         except Exception as exc:
             print(f"[IntakeAgent] Clarification generation failed: {exc}")
             return _DEFAULT_QUESTIONS.get(missing_field,

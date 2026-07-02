@@ -74,6 +74,15 @@ def _demo_mode_active() -> bool:
     return (os.environ.get("DEMO_MODE") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _intake_type_aware() -> bool:
+    """True iff env INTAKE_TYPE_AWARE is a truthy token (1/true/yes/on) — the
+    intake-redesign feature flag (guardrail 3). Read at call time. When False,
+    the component-aware sourcing query (T5b) is byte-identical to today: the
+    `_component_of` internal key is not promoted and the query builders skip
+    the component-aware branch. Mirrors api_server._env_truthy / the intake gate."""
+    return (os.environ.get("INTAKE_TYPE_AWARE") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 # ---------------------------------------------------------------------------
 # Fix 2 — Part number normalization
 # ---------------------------------------------------------------------------
@@ -1216,6 +1225,13 @@ class SourcingAgent:
     def _dict_to_specs(d: dict) -> AssetSpecs:
         filtered = {k: v for k, v in d.items() if k in _ASSETSPECS_FIELDS}
         kwargs   = {k: v for k, v in filtered.items() if k not in _REQUIRED_FIELDS}
+        # Phase 1 — promote the gated intake classifier's `_component_of` internal
+        # key to the AssetSpecs.component_of field for sourcing. Inert when the
+        # key is absent (flag off / no parent). The query builders honor
+        # component_of only under INTAKE_TYPE_AWARE, so flag-off sourcing stays
+        # byte-identical even if the key rides in from a prior flag-on intake.
+        if _intake_type_aware() and d.get("_component_of") and "component_of" not in filtered:
+            kwargs["component_of"] = d.get("_component_of")
         return AssetSpecs(
             manufacturer=filtered.get("manufacturer") or "Unknown",
             model=filtered.get("model") or "Unknown",

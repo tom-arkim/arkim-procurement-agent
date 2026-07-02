@@ -113,6 +113,13 @@ class AssetSpecs:
     # without an explicit model or part number (spec-based sourcing path).
     # Set by api_server.py send_message; read by the frontend confirm-card.
     spec_based_sourcing: bool = False
+    # Phase 1 — parent-machine identity for ANCHORED parts (e.g. a mechanical seal
+    # is a component of "Goulds 3196"). Populated by the gated intake classifier
+    # (stored as the `_component_of` internal key on asset_specs_json, promoted to
+    # this non-`_` field when building the AssetSpecs for sourcing). Drives the
+    # component-aware sourcing query (T5b): "mechanical seal for Goulds 3196",
+    # never a bare parent query. None / absent = no parent (DIRECT parts).
+    component_of: Optional[str] = None
 
 
 def lead_time_source_for(item: dict, *, key: str = "lead_days") -> str:

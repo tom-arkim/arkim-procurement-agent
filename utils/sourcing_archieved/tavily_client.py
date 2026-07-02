@@ -104,6 +104,20 @@ def _build_search_query(specs, search_mode: str = "exact") -> str:
         parts.append("price buy USA")
         return " ".join(filter(None, parts))
     else:
+        # A Part: lead with the COMPONENT term (detected_type) so the query
+        # targets the part itself, never a bare parent machine. The F1 bug:
+        # a mechanical-seal request where extraction set manufacturer/model to
+        # the PARENT ("Goulds" "3196") produced "Goulds 3196 US distributor
+        # price buy" — sourcing the pump, not the seal. Leading with
+        # detected_type, and when component_of is set using the
+        # "mechanical seal for Goulds 3196" phrase
+        # (component_query.build_component_aware_query, the T5 helper), makes
+        # the query component-led. detected_type is unconditional (intake
+        # populates it regardless of INTAKE_TYPE_AWARE); component_of is
+        # populated only under the flag. When detected_type is absent the
+        # query falls back to the legacy mfg+mdl+pn anchors (byte-identical to
+        # pre-fix for those rows). Matches the T5 pattern used in
+        # _build_tier3_query / _build_aftermarket_query.
         pn  = specs.part_number
         mfg = specs.manufacturer if specs.manufacturer not in ("N/A", "Unknown") else ""
         mdl = specs.model        if specs.model        not in ("N/A", "Unknown") else ""
@@ -111,7 +125,26 @@ def _build_search_query(specs, search_mode: str = "exact") -> str:
             pn_term = f'"{pn}"'
         else:
             pn_term = ""
-        base = " ".join(p for p in [mfg, mdl, pn_term] if p)
+
+        from utils.procurement_agent.component_query import build_component_aware_query
+        component_phrase = build_component_aware_query(specs)  # "X for Y" or None
+        detected = (getattr(specs, "detected_type", None) or "").strip()
+
+        base_parts: list[str] = []
+        if component_phrase:
+            base_parts.append(component_phrase)
+        elif detected:
+            base_parts.append(detected)
+        # Identity anchors narrow to the specific unit. Skip a term already
+        # carried in the leading phrase (e.g. mfg="Goulds" model="3196" are the
+        # parent, already in "mechanical seal for Goulds 3196") so the parent
+        # isn't doubled.
+        _lower = " ".join(base_parts).lower()
+        for term in (mfg, mdl, pn_term):
+            if term and term.lower() not in _lower:
+                base_parts.append(term)
+                _lower = _lower + " " + term.lower()
+        base = " ".join(base_parts)
         return f"{base} US distributor price buy"
 
 
@@ -138,6 +171,15 @@ def _build_tier3_query(specs) -> str:
     niche_term = get_subcategory_refinement(specs.manufacturer, _equip_kw) if _equip_kw else None
     if not niche_term:
         niche_term = getattr(specs, "detected_type", None) or specs.description or "industrial equipment"
+
+    # Phase 2 — component-aware anchor (T5b, gated INTAKE_TYPE_AWARE at the call
+    # site / promotion). When component_of is set, anchor the query on the
+    # COMPONENT-for-parent phrase so discovery targets the seal/bearing/etc. for
+    # the named machine, never the bare parent. Inert when component_of is None
+    # (flag off / no parent -> byte-identical to today's query).
+    _component_of = getattr(specs, "component_of", None)
+    if _component_of:
+        niche_term = f"{niche_term} for {_component_of}"
 
     # Fetch authorized_service_brands for both Equipment and Part queries.
     _auth_brands: list[str] = []

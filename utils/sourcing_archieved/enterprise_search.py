@@ -622,7 +622,13 @@ def _build_aftermarket_query(specs: AssetSpecs) -> str:
     parts: list[str] = []
 
     detected = (getattr(specs, "detected_type", None) or "").lower()
-    if detected:
+    # Phase 2 — component-aware (T5b): when component_of is set, lead with the
+    # COMPONENT-for-parent phrase so the aftermarket query targets the seal/etc.
+    # for the named machine, not the bare parent. Inert when component_of is None.
+    _component_of = getattr(specs, "component_of", None)
+    if _component_of and detected:
+        parts.append(f"{detected} for {_component_of}")
+    elif detected:
         parts.append(detected)
 
     # Motor/Equipment fit specs — hp and frame are primary for cross-referencing
