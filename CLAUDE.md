@@ -76,7 +76,7 @@ cd frontend && next dev --port 3000
 
 ## 4. Testing
 
-**A pytest suite exists and is GREEN: 360 passing** on Python 3.11 via uv (offline, mocked externals). It lives at `utils/procurement_agent/tests/`.
+**A pytest suite exists and is GREEN.** It lives at `utils/procurement_agent/tests/` (Python 3.11 via uv, offline, mocked externals). **Don't pin a pass count here** — it goes stale fast (it has grown well past the old 343/360 figures). Run `uv run pytest -q` and cite the actual count.
 
 **How to run it:**
 ```bash
@@ -84,11 +84,13 @@ uv sync --group dev
 uv run pytest        # config in pyproject.toml [tool.pytest.ini_options]
 ```
 
-History note: the suite was once reported as "289 passing" but unverifiable because the old venvs were broken (ABI mismatch). The blocker was environmental — the tests were always real. Do not repeat the old "no suite / 289 fictional" framing; it was wrong. The suite has since grown to 360 (characterization tests + the failure-handling fixes + the Apollo client tests added cases).
+History note: the suite was once reported as "289 passing" but unverifiable because the old venvs were broken (ABI mismatch). The blocker was environmental — the tests were always real. Do not repeat the old "no suite / 289 fictional" framing; it was wrong. The suite has since grown substantially (characterization tests + the failure-handling fixes + the Apollo client tests + the flag-gated redesign work) — always cite the live `uv run pytest -q` count, never a pinned number.
 
 **Coverage is measured (not gated).** Current picture: `utils/` core is well-covered (intake 88%, spec-comparison 84%, sourcing 78%); `price_db.py` ~61%; `api_server.py` was 0% and is now ~77% after a deliberate characterization-testing pass that locked in every workflow endpoint's contract (including the background-task endpoints). **Before refactoring any area, confirm its coverage** — the net is real but uneven.
 
 When asked to "run tests," actually run them (`uv run pytest`) and report the real count. Never fabricate a result.
+
+**Two flag-gated redesigns are in flight, both default-OFF:** `INTAKE_TYPE_AWARE` (intake redesign) and `SCORING_V2` (scoring redesign). The suite is green with them off; flip a flag to exercise its redesign path.
 
 ### Next hardening steps
 With a green baseline and the API characterization net, structural refactors are substantially unblocked — but verify per-area coverage first. Priority (see `docs/arkim_procurement_code_standard.md` §2):
@@ -105,7 +107,7 @@ With a green baseline and the API characterization net, structural refactors are
 - **One commit per logical change. Don't bundle unrelated files.** Commit convention: **Conventional Commits** (`type: summary`, e.g. `fix: key price cache on (manufacturer, part_number)`) — there is no Jira yet. Once Jira is adopted, prefix with the ticket: `HEL-### type: summary`. Branches: `feature/<desc>` / `bugfix/<desc>` now; `feature/HEL-###-<desc>` once Jira exists. See `docs/arkim_procurement_code_standard.md` §3.
 - **Keep the FastAPI response models / React types matched to `utils/` return shapes** when you change the core (see §2).
 - **Update `design/interactions.md`** in the same change as any user-facing behavior change.
-- **Run the suite after every commit** (`uv run pytest`) and report the real result. It runs green (360) on `.venv`; never claim a pass you didn't run.
+- **Run the suite after every commit** (`uv run pytest`) and report the real result. It runs green on `.venv` (cite the live `uv run pytest -q` count, don't pin one — see §4); never claim a pass you didn't run.
 - **Stay in scope.** State out-of-scope items explicitly; don't drive-by refactor or expand scope. Watch for generic exception handlers that mask bugs.
 - Follow the code standard (`docs/arkim_procurement_code_standard.md`) for all new code: injector DI, custom exceptions → central handlers → `{"detail": ...}`, CamelModel, layered `app/` structure, dense type annotations, stdlib pipe-delimited logging. Note the current code largely predates the standard — it's the target to converge toward, not the current state.
 - **Building new code in a codebase that predates the standard.** Much of the existing code doesn't yet have DI / layered `app/` / the exception hierarchy. For new code: write it to the standard *where it can stand alone* (a new module — e.g. an Apollo client, a search adapter — should be clean, typed, tested, fail-soft from the start), but **don't retrofit the surrounding code mid-feature** (don't bolt DI onto api_server.py just to add one endpoint — that's a separate, coverage-gated refactor). Match the immediate surrounding module's conventions for integration points, build new standalone modules to the standard, and flag (in CLEANUP.md) where new clean code abuts old non-compliant code so the refactor boundary is visible. The goal is new code that Sergei accepts as-is — clean, tested, house-style — without it forcing a premature refactor of everything it touches.
@@ -114,7 +116,7 @@ With a green baseline and the API characterization net, structural refactors are
 
 ## 6. Hard constraints & watch-outs
 
-- **`utils/sourcing_archieved/`** (note the typo) is dead/archived code **still in the active import path** — `SourcingAgent` imports it. Do **not** touch it without auditing all `SourcingAgent` call sites first. Several CLEANUP items live here. (CLEANUP §1.1)
+- **`utils/sourcing_archieved/`** (note the typo) is **live code despite the name — not dead/archived.** `SourcingAgent` imports it, and the suitability scorer there (`scoring.py`, carrying the `SCORING_V2` redesign + `part_type_classes.py`) is on the active sourcing path. Still **audit all `SourcingAgent` call sites before touching** — it's load-bearing, not disposable. Several CLEANUP items live here. (CLEANUP §1.1)
 - **`EMAIL_SEND_ENABLED = False`** — Tier 3 outreach emails are never sent. The "Confirm outreach" flow marks vendors "Awaiting" with no real communication. Don't assume email send works. (CLEANUP §2.2)
 - **Highest-risk debt items** (CLEANUP §4.1):
   - `price_db.py` cache PN-collision is **fixed** — keyed on `(manufacturer, part_number)`; old PN-only on-disk entries cleanly miss and re-populate (verified, no migration needed). Keep the composite key when touching this.
@@ -131,7 +133,7 @@ frontend/                   # Next.js/React (calls FastAPI over HTTP) — the sh
 utils/                      # THE CORE — harden here
   procurement_agent/        # agents, state (persistence, approval_rules)
     orchestrator/core.py    # retained, tested; NOT on the shipping path (Streamlit-era coordinator) — §8
-  sourcing_archieved/       # DEAD — still imported; don't touch without auditing (§6)
+  sourcing_archieved/       # LIVE despite the name — scorer (SCORING_V2) on the active path; audit before touching (§6)
   price_db.py               # price cache (PN-collision risk — §6)
   brand_intelligence.py     # LLM manufacturer-relationship cache
   ... (sourcing, scoring, intake, vision, quoting, audit_log)

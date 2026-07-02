@@ -240,5 +240,51 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 
 ---
 
+## 7. Post-Launch Debt (redesigns + observability)
+
+Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AWARE`, `SCORING_V2`, both default-OFF — see CLAUDE.md §4). Non-blocking; captured so they aren't lost.
+
+### 7.1 Cache-hit path skips suitability re-validation — a stale/wrong cached result can surface
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/agents/sourcing_agent.py` (`_result_from_cached_edges`) — the `known_parts` edge cache-hit path |
+| **Kind** | Correctness gap — the cache-hit path returns cached candidates without re-running the suitability check the live path applies |
+| **Why it exists** | The cache short-circuits the pipeline for speed/cost; suitability re-validation was not threaded onto the cache-hit branch (only the live-search branch validates). |
+| **Risk / impact** | A candidate cached from an earlier (looser or wrong) run can surface again without being re-scored against the current request — a wrong result the live path would now reject can still appear via cache. |
+| **Recommended action** | Re-run suitability validation on the cache-hit path before returning, or invalidate/re-score cached edges when the scorer/flag changes. Mirror the live-path validation. |
+
+### 7.2 `SCORING_V2` sub-type gap — gate-valve-on-ball-valve (and similar) not distinguished
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/sourcing_archieved/scoring.py` + `part_type_classes.py` (`SCORING_V2` TypeGate) |
+| **Kind** | Known coverage gap in the redesigned scorer — noun-class TypeGate separates broad part classes but not fine sub-types within a class |
+| **Why it exists** | The TypeGate matches on part-type class from snippet/URL text; distinguishing sub-types (e.g. a gate valve vs a ball valve) needs a page-fetch + LLM read the current text-only gate doesn't do. Deferred to Stage 3. |
+| **Risk / impact** | A wrong sub-type within the right class can pass the gate (e.g. a ball valve surfacing for a gate-valve request). Better than the pre-`SCORING_V2` behavior, but not exact at sub-type granularity. |
+| **Recommended action** | Stage 3: add a page-fetch + LLM sub-type disambiguation step for gate-passed candidates where sub-type matters; cover with a labeled fixture. |
+
+### 7.3 LangSmith tracing built but not landing — 403 on writes at the current plan
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/langsmith_client.py` + the intake-agent `ls.trace` wiring (commit `c39fa6c`) |
+| **Kind** | Observability instrumentation built and fail-soft, but no traces reach LangSmith |
+| **Why it exists** | Instrumentation follows messaging's `ls.trace` pattern (sibling project). Two blockers: (1) run-posting needs the SDK **enable flag** set (`LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2 = true`) — `LANGSMITH_API_KEY` authenticates but does NOT enable; without it `ls.trace` builds the run in memory and never posts (silent). (2) `create_dataset` returns **403** — the key lacks dataset-write scope at the current plan level. |
+| **Risk / impact** | None to the pipeline (fail-soft, no-op without traces). But the observability the instrumentation was built for is unavailable until resolved. |
+| **Recommended action** | Set the enable flag to turn on run-posting; resolve the 403 (plan upgrade / support / scoped key) for dataset writes. Instrumentation itself needs no code change. |
+
+### 7.4 `SCORING_V2` gate + weights are informed defaults — need real-data calibration
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/sourcing_archieved/scoring.py` (`SCORING_V2` gate thresholds + factor weights) |
+| **Kind** | Uncalibrated magic numbers — same character as §4.2 (cache suitability defaults) |
+| **Why it exists** | The redesigned gate/weights were set from reasoning + the labeled eval set, not from a calibration pass against real live-sourcing outcome data. |
+| **Risk / impact** | Ranking/gating may be off at the margins until tuned against real results; defaults are informed but not validated at scale. |
+| **Recommended action** | Once live sourcing data accumulates, calibrate the gate threshold + weights against real outcomes (precision/recall on labeled results); lock in with a regression fixture. |
+
+---
+
 *Items are ordered by section, not by priority. All items are prototype-era technical debt —
 none block the current demo or the post-seed milestone.*
