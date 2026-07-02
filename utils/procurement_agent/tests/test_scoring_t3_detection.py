@@ -160,15 +160,20 @@ class TestDetectionWiring:
         """T3 is detection-only: the suitability float must be identical whether
         the flag is on or off (the TypeGate multiplier is T4, not yet present).
 
-        NOTE: Stage 0 (T2) already changes the score under SCORING_V2 for
-        placeholder-PN cases, so this test uses a CLEAN-PN case (real searched
-        PN, no placeholder) where Stage 0 is inert — isolating T3's contribution.
-        If T3 changes the clean-PN score, that's a real regression."""
+        NOTE: this test ran at T3 time (before T4) against a clean-PN bearing and
+        asserted flag-on == flag-off. T4 (added after T3) introduces the
+        authority cap, which legitimately lowers the flag-on bearing score by 10
+        (auth 20 -> capped 10). That is intended T4 behavior, not a T3 regression.
+        To keep this test a valid T3 isolation (detection adds no score change),
+        we neutralize the auth signal so T4's cap has nothing to cap: a clean-PN
+        case with NO stockist phrase -> auth_pts=0 -> cap is a no-op -> the only
+        flag-on path is T3 detection, which must not change the score."""
         specs = AssetSpecs(
             manufacturer="SKF", model="6205", part_number="6205-2RS",
             voltage="N/A", category="Part", detected_type="ball bearing",
         )
-        snippet = "SKF 6205-2RS deep groove ball bearing. In stock, ships today."
+        # No stockist/authorized phrases -> auth_pts=0 -> T4 auth cap is inert.
+        snippet = "SKF 6205-2RS deep groove ball bearing. Product page."
         url = "https://mrosupply.com/bearings/skf-6205-2rs/"
         monkeypatch.setattr(scoring_mod, "SCORING_V2", True)
         monkeypatch.setattr(scoring_mod, "STAGE0_PLACEHOLDER_FIX_UNCONDITIONAL", False)
@@ -176,7 +181,8 @@ class TestDetectionWiring:
         monkeypatch.setattr(scoring_mod, "SCORING_V2", False)
         score_off = _compute_suitability_score(specs, snippet, url, found_pn="6205-2RS")
         assert score_on == score_off, (
-            f"T3 must not change the clean-PN score; flag-on={score_on} vs flag-off={score_off}"
+            f"T3 must not change the clean-PN score (auth-neutralized); "
+            f"flag-on={score_on} vs flag-off={score_off}"
         )
 
     def test_title_param_improves_result_detection(self, monkeypatch):

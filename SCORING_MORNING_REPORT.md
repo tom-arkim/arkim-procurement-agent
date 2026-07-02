@@ -22,7 +22,7 @@
 | T1 — MRO noun-class dictionary | | | |
 | T2 — Stage 0 placeholder-penalty fix | DONE | _pending_ | toggle `scoring.py:53` (GATED default); tests cover all 4 flag×toggle paths; clean-PN + genuine-mismatch no-regress |
 | T3 — noun-class detection (query+result) | DONE | _pending_ | detection+storage only; flag-off never invokes; clean-PN score unchanged flag-on vs off; `_last_noun_classes` store for T4 |
-| T4 — multiplicative TypeGate | | | |
+| T4 — multiplicative TypeGate | DONE | _pending_ | ANCHOR: Zoro pump fails (≤10), Platinum seal passes; undetectable→0.45 floor; flag-off byte-identical legacy; auth capped ≤10 inside gate |
 | T5 — graded Fit | | | |
 | T6 — inertness wall | | | |
 | T7 — labeled eval dataset | | | |
@@ -49,7 +49,21 @@
 
 ## Gate / weight values chosen (informed defaults — NEED real-data calibration)
 
-_Filled in as T4/T5 land._
+**T4 TypeGate** (`scoring.py` `_type_gate`):
+- `_TYPE_GATE_MATCH_HIGH = 1.0` — same noun-class, URL slug AND text both agree
+- `_TYPE_GATE_MATCH_LOW = 0.7` — same noun-class, only one signal agrees
+- `_TYPE_GATE_RESULT_UNDETECTABLE = 0.45` — result type undetectable (ESCI floor: never zero)
+- `_TYPE_GATE_QUERY_UNDETECTABLE = 1.0` — query type undetectable (neutral; fall back to additive)
+- `_TYPE_GATE_DIFFERENT = 0.1` — confirmed different noun-class (pump on a seal request)
+- `_V2_AUTH_CAP = 10.0` — supplier/authority capped at 10 pts inside the gate
+
+**Anchor behavior under `SCORING_V2=1`:**
+- Platinum seal (SEAL/SEAL, high-conf) → gate 1.0 → ~45 → **passes** (floor 30).
+- Zoro pump (SEAL/PUMP, different) → gate 0.1 → ~4 → **fails** (crushed, not borderline).
+- Undetectable result (SEAL/None) → gate 0.45 → ~20 → not zeroed, but does not blindly pass.
+- Clean-PN bearing (BEARING/BEARING, high-conf) → gate 1.0 → 95→85 (auth cap 20→10) → still passes strongly.
+
+These are informed defaults derived from the research spec, NOT tuned against real sourcing data. The gate values (especially 0.7, 0.45, 0.1) and the auth cap (10) need calibration against live Tier 2/3 results before flipping `SCORING_V2` on in any shipped config.
 
 ---
 

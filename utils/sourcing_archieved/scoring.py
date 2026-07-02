@@ -24,6 +24,7 @@ from utils.brand_intelligence import (
 )
 from utils.sourcing_archieved.part_type_classes import (
     classify_noun_class,
+    classify_noun_class_from_url,
     classify_result_noun_class,
 )
 
@@ -306,6 +307,57 @@ def _detect_noun_classes(specs, snippet: str, url: str,
 
 
 # ---------------------------------------------------------------------------
+# TypeGate (SCORING_V2 / T4) — confidence-aware multiplicative part-type gate
+# ---------------------------------------------------------------------------
+
+# Gate values (informed defaults — NEED real-data calibration, see report):
+#   1.0  -> query+result same noun-class, HIGH confidence (URL slug AND text both agree)
+#   0.7  -> same noun-class, LOW confidence (only one of URL/text agrees)
+#   0.45 -> result noun-class UNDETECTABLE (the ESCI floor: never zero a possibly-
+#           correct result; query known, result category not legible from URL/title)
+#   1.0  -> query noun-class UNDETECTABLE (neutral — we can't gate on a type we
+#           couldn't detect from the request; fall back to the additive score)
+#   0.1  -> confirmed DIFFERENT noun-class (pump page on a seal request)
+_TYPE_GATE_MATCH_HIGH = 1.0
+_TYPE_GATE_MATCH_LOW = 0.7
+_TYPE_GATE_RESULT_UNDETECTABLE = 0.45
+_TYPE_GATE_QUERY_UNDETECTABLE = 1.0
+_TYPE_GATE_DIFFERENT = 0.1
+
+# Under SCORING_V2, supplier/authority is capped at this share of the 100-pt
+# base so a high-authority wrong-type result can't rescue itself. Category-
+# conditioning (specialist bonus for components) is handled at the auth_pts
+# computation; this cap is the upper bound.
+_V2_AUTH_CAP = 10.0
+
+
+def _type_gate(query_cls: Optional[str], result_cls: Optional[str],
+               snippet: str, url: str, title: Optional[str] = None) -> float:
+    """Confidence-aware multiplicative part-type gate (0.1 - 1.0).
+
+    Never returns 0 (the ESCI lesson — never zero a possibly-correct result;
+    an undetectable result gets the 0.45 floor). Returns 1.0 (neutral) when the
+    query noun-class itself is undetectable, so a request we can't classify
+    falls back to the additive score rather than being gated by an unknown type.
+
+    Confidence for a SAME-class match is high (1.0) when BOTH the URL slug and
+    the text (title/snippet) independently classify to the same class, low (0.7)
+    when only one signal agrees.
+    """
+    if query_cls is None:
+        return _TYPE_GATE_QUERY_UNDETECTABLE
+    if result_cls is None:
+        return _TYPE_GATE_RESULT_UNDETECTABLE
+    if query_cls == result_cls:
+        url_cls = classify_noun_class_from_url(url)
+        text_cls = classify_noun_class(title if title else snippet)
+        if url_cls == result_cls and text_cls == result_cls:
+            return _TYPE_GATE_MATCH_HIGH
+        return _TYPE_GATE_MATCH_LOW
+    return _TYPE_GATE_DIFFERENT
+
+
+# ---------------------------------------------------------------------------
 # Main suitability score
 # ---------------------------------------------------------------------------
 
@@ -458,6 +510,25 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     cf_penalty   = _counterfeit_suitability_penalty(url, "Unknown", is_risky_cat)
 
     total = pn_pts + type_pts + mfg_pts + auth_pts + url_pts - pn_mismatch_penalty + home_bonus + cf_penalty
+
+    if SCORING_V2:
+        # T4 — multiplicative TypeGate. Supplier/authority moved INSIDE the gate
+        # and capped (<=_V2_AUTH_CAP) so a high-authority wrong-type result cannot
+        # rescue itself. The gate multiplies the (capped, PN-guardrailed) base;
+        # the collection-page cap is applied last (it overrides — a collection
+        # page is near-zero regardless of type). Flag-off never enters this
+        # branch, so legacy scoring is byte-identical.
+        auth_pts_capped = min(auth_pts, _V2_AUTH_CAP)
+        v2_total = (pn_pts + type_pts + mfg_pts + auth_pts_capped + url_pts
+                    - pn_mismatch_penalty + home_bonus + cf_penalty)
+        if pn_pts == 0:
+            v2_total = min(v2_total, 45)
+        _gate = _type_gate(_last_noun_classes["query"], _last_noun_classes["result"],
+                           snippet, url, title)
+        v2_total = v2_total * _gate
+        if is_coll:
+            v2_total = min(v2_total, 5)
+        return min(100.0, max(0.0, round(float(v2_total), 1)))
 
     if pn_pts == 0:
         total = min(total, 45)
