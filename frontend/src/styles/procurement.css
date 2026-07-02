@@ -322,21 +322,26 @@
 .proc-loading .pl-head { font-size: 25px; font-weight: 700; letter-spacing: -0.01em; color: var(--text-strong); margin-top: 6px; }
 .proc-loading .pl-sub { max-width: 440px; font-family: var(--font-serif); font-style: italic; font-size: 15px; line-height: 1.55; color: var(--text); opacity: 0.86; }
 
-/* Sourcing stepped progress (under .proc-loading): active/done/pending states + a connecting rail. */
-.proc-loading .sp-steps { list-style: none; margin: 16px 0 0; padding: 0; display: flex; flex-direction: column; text-align: left; min-width: 272px; }
-.proc-loading .sp-step { position: relative; display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 14.5px; transition: color 0.35s ease; }
-.proc-loading .sp-step::before { content: ""; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: var(--border); }
-.proc-loading .sp-step:first-child::before { top: 50%; }
-.proc-loading .sp-step:last-child::before { bottom: 50%; }
-.proc-loading .sp-dot { position: relative; z-index: 1; width: 18px; height: 18px; flex: none; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--bg); border: 2px solid var(--border); transition: border-color 0.35s ease, background 0.35s ease; }
+/* Sourcing wait — horizontal split: prominent loader LEFT, checklist RIGHT. */
+.proc-loading-split { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: center; text-align: left; gap: 30px; padding: 44px 16px; }
+.proc-loading-split .pl-loader { flex: none; display: inline-flex; }
+.proc-loading-split .pl-body { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.proc-loading-split .pl-head { margin-top: 0; }
+.proc-loading-split .pl-sub { text-align: left; margin-bottom: 4px; }
+
+/* Stepped checklist — checkmarks TICK IN as each task completes. */
+.proc-loading .sp-steps { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; text-align: left; min-width: 244px; }
+.proc-loading .sp-step { display: flex; align-items: center; gap: 11px; padding: 5px 0; font-size: 15px; transition: color 0.3s ease; }
+.proc-loading .sp-dot { width: 18px; height: 18px; flex: none; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; border: 2px solid var(--muted-2); transition: border-color 0.3s ease; }
 .proc-loading .sp-step[data-state="pending"] { color: var(--muted); }
-.proc-loading .sp-step[data-state="pending"] .sp-dot { border-color: var(--muted-2); }
 .proc-loading .sp-step[data-state="active"] { color: var(--accent-text); font-weight: 600; }
 .proc-loading .sp-step[data-state="active"] .sp-dot { border-color: var(--accent); }
 .proc-loading .sp-step[data-state="active"] .sp-dot::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: sp-pulse 1.25s ease-in-out infinite; }
 .proc-loading .sp-step[data-state="done"] { color: var(--text); }
-.proc-loading .sp-step[data-state="done"] .sp-dot { border-color: var(--accent); background: var(--accent-fill); }
+.proc-loading .sp-step[data-state="done"] .sp-dot { border-color: transparent; }
+.proc-loading .sp-step[data-state="done"] .sp-dot svg { animation: sp-tick 0.34s cubic-bezier(0.2, 0.9, 0.3, 1.25) both; }
 @keyframes sp-pulse { 0%, 100% { transform: scale(0.9); opacity: 0.55; } 50% { transform: scale(1.35); opacity: 1; } }
+@keyframes sp-tick { 0% { transform: scale(0.4); opacity: 0; } 60% { transform: scale(1.12); } 100% { transform: scale(1); opacity: 1; } }
 
 /* ---- quotes comparison ---- */
 .proc-partial { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface-2); margin-bottom: 14px; font-size: 13px; color: var(--text); }

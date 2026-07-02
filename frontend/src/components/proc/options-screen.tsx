@@ -543,23 +543,25 @@ function SourcingProgress() {
   const cur = Math.min(step, steps.length - 1);   // clamp so a shorter (demo) list holds on its last step
 
   return (
-    <div className="proc-loading">
-      <ArkimLoader size={52} />
-      <div className="pl-head">Finding your best options</div>
-      <div className="pl-sub">{sub}</div>
-      <ol className="sp-steps">
-        {steps.map((label, i) => {
-          const state = i < cur ? "done" : i === cur ? "active" : "pending";
-          return (
-            <li key={label} className="sp-step" data-state={state}>
-              <span className="sp-dot" aria-hidden="true">
-                {state === "done" && <ProcIcon name="checkCircle" size={12} color="var(--accent-text)" />}
-              </span>
-              <span className="sp-label">{label}</span>
-            </li>
-          );
-        })}
-      </ol>
+    <div className="proc-loading proc-loading-split">
+      <div className="pl-loader"><ArkimLoader size={64} /></div>
+      <div className="pl-body">
+        <div className="pl-head">Finding your best options</div>
+        <div className="pl-sub">{sub}</div>
+        <ol className="sp-steps">
+          {steps.map((label, i) => {
+            const state = i < cur ? "done" : i === cur ? "active" : "pending";
+            return (
+              <li key={label} className="sp-step" data-state={state}>
+                <span className="sp-dot" aria-hidden="true">
+                  {state === "done" && <ProcIcon name="checkCircle" size={18} color="var(--accent-text)" />}
+                </span>
+                <span className="sp-label">{label}</span>
+              </li>
+            );
+          })}
+        </ol>
+      </div>
     </div>
   );
 }
