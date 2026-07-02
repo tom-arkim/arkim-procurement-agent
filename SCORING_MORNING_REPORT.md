@@ -23,7 +23,7 @@
 | T2 — Stage 0 placeholder-penalty fix | DONE | _pending_ | toggle `scoring.py:53` (GATED default); tests cover all 4 flag×toggle paths; clean-PN + genuine-mismatch no-regress |
 | T3 — noun-class detection (query+result) | DONE | _pending_ | detection+storage only; flag-off never invokes; clean-PN score unchanged flag-on vs off; `_last_noun_classes` store for T4 |
 | T4 — multiplicative TypeGate | DONE | _pending_ | ANCHOR: Zoro pump fails (≤10), Platinum seal passes; undetectable→0.45 floor; flag-off byte-identical legacy; auth capped ≤10 inside gate |
-| T5 — graded Fit | | | |
+| T5 — graded Fit | DONE | _pending_ | exact-PN demoted 40→20 (bonus within Fit); parent-model/size-type/interchange first-class; anchor re-verified (seal passes, pump fails, bearing still passes); flag-off byte-identical |
 | T6 — inertness wall | | | |
 | T7 — labeled eval dataset | | | |
 | T8 — eval run | | | |
@@ -64,6 +64,22 @@
 - Clean-PN bearing (BEARING/BEARING, high-conf) → gate 1.0 → 95→85 (auth cap 20→10) → still passes strongly.
 
 These are informed defaults derived from the research spec, NOT tuned against real sourcing data. The gate values (especially 0.7, 0.45, 0.1) and the auth cap (10) need calibration against live Tier 2/3 results before flipping `SCORING_V2` on in any shipped config.
+
+**T5 graded Fit** (`scoring.py` `_fit_signal`, 0-40 scale replacing the legacy `pn_pts` slot):
+- `_FIT_EXACT_PN = 20.0` — exact/normalized OEM-PN match (the bonus, demoted from the legacy 40)
+- `_FIT_STEM_PN = 12.0` — same PN family stem
+- `_FIT_SUBSTRING_PN = 8.0` — searched PN appears in snippet
+- `_FIT_PARENT_MODEL = 10.0` — `specs.model` token in snippet (the core aftermarket signal)
+- `_FIT_SIZE_TYPE = 5.0` — decimal size / "Type N" token from specs in snippet
+- `_FIT_INTERCHANGE = 10.0` — cross-reference / interchange / replaces / fits / replacement-for language
+- `_FIT_MAX = 40.0` — cap (mirrors the old `pn_pts` ceiling)
+
+The "no PN confirmed" 45-cap now keys on `fit_pts == 0` (no Fit evidence at all) rather than `pn_pts == 0`, so a strong aftermarket-Fit result is no longer capped just for lacking an exact OEM PN. The same calibration caveat applies — these weights are informed defaults, not tuned.
+
+**Anchor behavior under `SCORING_V2=1` after T5:**
+- Platinum seal: fit=25 (parent 10 + size 5 + interchange 10), gate 1.0 → ~70 → **passes**.
+- Zoro pump: fit=10 (parent 3196 only), gate 0.1 → ~4 → **fails**.
+- Clean SKF bearing: fit=30 (exact 20 + parent 10), gate 1.0 → ~75 (was 85 at T4, 95 legacy) → still **passes strongly**; the drift is the intended exact-PN demotion.
 
 ---
 

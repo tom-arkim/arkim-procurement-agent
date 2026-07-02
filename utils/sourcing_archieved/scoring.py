@@ -330,6 +330,83 @@ _TYPE_GATE_DIFFERENT = 0.1
 # computation; this cap is the upper bound.
 _V2_AUTH_CAP = 10.0
 
+# --- Stage 2 / T5 — graded Fit ----------------------------------------------
+# Exact OEM-PN is demoted from a 40-pt dominating factor to a bonus WITHIN Fit.
+# Fit also credits parent-model tokens, size/type tokens, and interchange /
+# cross-reference / "replaces" / "fits" language — so a correct aftermarket
+# component keyed off the parent model isn't penalized for lacking its own OEM PN.
+# Fit lives on the same 0-40 scale as the legacy pn_pts slot so it drops into the
+# additive base without rescaling. Informed defaults — NEED real-data calibration.
+_FIT_EXACT_PN = 20.0       # exact/normalized OEM-PN match (the bonus, not the whole factor)
+_FIT_STEM_PN = 12.0        # same PN family stem
+_FIT_SUBSTRING_PN = 8.0    # searched PN appears in snippet
+_FIT_PARENT_MODEL = 10.0   # specs.model token present in snippet (e.g. "3196")
+_FIT_SIZE_TYPE = 5.0       # size/type token (decimal size, "Type N") in snippet
+_FIT_INTERCHANGE = 10.0    # "cross-reference"/"interchange"/"replaces"/"fits"/"replacement for"
+_FIT_MAX = 40.0            # cap (mirrors the old pn_pts ceiling)
+
+# Interchange / fit-language phrases that signal an aftermarket component keys
+# off the parent model rather than carrying its own OEM PN.
+_FIT_INTERCHANGE_PHRASES = (
+    "cross-reference", "cross reference", "interchange", "interchangeable",
+    "replaces", "replacement for", "equivalent to", "fits", "fit for",
+    "compatible with", "direct replacement", "oem replacement",
+)
+
+
+def _size_type_tokens(specs) -> tuple[str, ...]:
+    """Pull size/type tokens out of specs to look for in the snippet.
+
+    Detects decimal sizes (e.g. '1.375'), 'Type N' / 'Style N' phrases, and
+    bare model tokens. Returns lowercase tokens. Pure.
+    """
+    text = " ".join(filter(None, (
+        getattr(specs, "model", None),
+        getattr(specs, "detected_type", None),
+        getattr(specs, "description", None),
+        getattr(specs, "part_number", None),
+    )))
+    tokens: list[str] = []
+    # decimal sizes: 1.375, 0.5, 2.0
+    for m in re.findall(r"\d+\.\d+", text):
+        tokens.append(m.lower())
+    # "Type 1" / "Style 2" / "Series 3"
+    for m in re.findall(r"(?:type|style|series)\s*\d+", text, flags=re.IGNORECASE):
+        tokens.append(m.lower())
+    return tuple(dict.fromkeys(tokens))  # dedupe, preserve order
+
+
+def _fit_signal(specs, snippet: str, pn_match_level: str) -> float:
+    """Graded Fit score (0-_FIT_MAX) under SCORING_V2 / T5.
+
+    Replaces the legacy exact-PN dominance: exact OEM-PN is a bonus, not the
+    whole factor; parent-model + size/type + interchange language are first-class
+    Fit evidence so a correct aftermarket component that keys off the parent
+    model isn't penalized for lacking its own OEM PN. Pure; flag-off never calls.
+    """
+    s = (snippet or "").lower()
+    fit = 0.0
+    # Exact/normalized OEM-PN bonus (was 40; now one contribution among several).
+    if pn_match_level in ("exact", "normalized"):
+        fit += _FIT_EXACT_PN
+    elif pn_match_level == "stem":
+        fit += _FIT_STEM_PN
+    elif pn_match_level == "substring":
+        fit += _FIT_SUBSTRING_PN
+    # Parent-model token (e.g. "3196") in the snippet — the core aftermarket signal.
+    model = (getattr(specs, "model", None) or "").strip().lower()
+    if model and model not in ("unknown", "n/a", "null") and model in s:
+        fit += _FIT_PARENT_MODEL
+    # Size/type tokens from specs present in the snippet.
+    for tok in _size_type_tokens(specs):
+        if tok and tok in s:
+            fit += _FIT_SIZE_TYPE
+            break  # one size/type hit is enough; avoid double-crediting
+    # Interchange / cross-reference / "replaces" language.
+    if any(p in s for p in _FIT_INTERCHANGE_PHRASES):
+        fit += _FIT_INTERCHANGE
+    return min(fit, _FIT_MAX)
+
 
 def _type_gate(query_cls: Optional[str], result_cls: Optional[str],
                snippet: str, url: str, title: Optional[str] = None) -> float:
@@ -518,10 +595,17 @@ def _compute_suitability_score(specs, snippet: str, url: str,
         # the collection-page cap is applied last (it overrides — a collection
         # page is near-zero regardless of type). Flag-off never enters this
         # branch, so legacy scoring is byte-identical.
+        # T5 — graded Fit replaces exact-PN dominance: fit_pts (0-40) substitutes
+        # for the legacy pn_pts slot, with exact OEM-PN a bonus WITHIN Fit and
+        # parent-model/size-type/interchange language as first-class evidence.
+        # The "no PN confirmed" 45-cap now keys on fit_pts (no Fit evidence at
+        # all) rather than pn_pts==0, so a strong aftermarket-Fit result is not
+        # capped just because it lacks an exact OEM PN.
         auth_pts_capped = min(auth_pts, _V2_AUTH_CAP)
-        v2_total = (pn_pts + type_pts + mfg_pts + auth_pts_capped + url_pts
+        fit_pts = _fit_signal(specs, snippet, pn_match_level)
+        v2_total = (fit_pts + type_pts + mfg_pts + auth_pts_capped + url_pts
                     - pn_mismatch_penalty + home_bonus + cf_penalty)
-        if pn_pts == 0:
+        if fit_pts == 0:
             v2_total = min(v2_total, 45)
         _gate = _type_gate(_last_noun_classes["query"], _last_noun_classes["result"],
                            snippet, url, title)

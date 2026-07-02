@@ -161,10 +161,11 @@ class TestTypeGateInertness:
         assert score == 40.0, f"flag-off pump should be the legacy 40, got {score}"
 
     def test_flag_off_clean_pn_legacy_unchanged(self, monkeypatch):
-        """Flag-off clean-PN bearing is the legacy additive score (95) — proving
-        the flag-off path is byte-identical to pre-T4. The flag-on path differs
-        ONLY by the intended T4 authority cap (auth 20->10, so 95->85) with the
-        type-match gate at 1.0; the bearing still passes strongly."""
+        """The cross-task invariant: flag-off clean-PN bearing is the legacy
+        additive score (95) — byte-identical to pre-T4/T5. Flag-on scores drift
+        as T4 (auth cap) and T5 (exact-PN demotion) land, so we do NOT pin the
+        flag-on absolute here; we assert flag-off is unchanged AND flag-on still
+        clears the floor (the pass/fail verdict is what matters for clean-PN)."""
         specs = AssetSpecs(
             manufacturer="SKF", model="6205", part_number="6205-2RS",
             voltage="N/A", category="Part", detected_type="ball bearing",
@@ -176,12 +177,8 @@ class TestTypeGateInertness:
         score_on = _compute_suitability_score(specs, snippet, url, found_pn="6205-2RS")
         monkeypatch.setattr(scoring_mod, "SCORING_V2", False)
         score_off = _compute_suitability_score(specs, snippet, url, found_pn="6205-2RS")
-        # Flag-off is the unchanged legacy score.
+        # Flag-off is the unchanged legacy score — the byte-identical guarantee.
         assert score_off == 95.0, f"flag-off legacy bearing should be 95, got {score_off}"
-        # Flag-on: gate is 1.0 (type matches), the only delta is the auth cap (-10).
-        assert score_on == 85.0, (
-            f"flag-on bearing should be 95-10(auth cap)=85 with gate 1.0, got {score_on}"
-        )
-        # The bearing still clears the floor comfortably — no regression in the
-        # pass/fail verdict, which is what matters for clean-PN cases.
-        assert score_on >= TIER_FLOOR
+        # Flag-on drifts (auth cap -10, exact-PN demotion -10) but still passes.
+        assert score_on >= TIER_FLOOR, f"flag-on bearing must still clear floor, got {score_on}"
+        assert score_on < score_off  # flag-on is lower (capped/demoted), as intended
