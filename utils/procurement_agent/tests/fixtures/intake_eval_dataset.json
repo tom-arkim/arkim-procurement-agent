@@ -1,0 +1,38 @@
+{
+  "_meta": {
+    "description": "Labeled eval dataset for the intake part-type classifier + extraction component-preservation (T8/T9). Sources: the stress-test scorecard inputs (all tiers) + the observed failure cases. Off-registry inputs MUST label as unknown.",
+    "registry_types": ["mechanical_seal", "pump", "valve", "sensor_instrument", "motor_drive", "unknown"],
+    "splits": ["dev", "holdout"],
+    "note": "Roughly 2/3 dev, 1/3 holdout. Every registry type + unknown represented in both splits where possible. Do NOT tune against the holdout split."
+  },
+  "examples": [
+    {"input": "Goulds 3196 mechanical seal", "expected_part_type": "mechanical_seal", "expected_component_of": "Goulds 3196", "expected_regime": "ANCHORED", "split": "dev"},
+    {"input": "I need a mechanical seal for a Grundfos CR32-5 pump", "expected_part_type": "mechanical_seal", "expected_component_of": "Grundfos CR32-5", "expected_regime": "ANCHORED", "split": "dev"},
+    {"input": "2 inch stainless steel ball valve, tri-clamp", "expected_part_type": "valve", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "Goulds 3196 centrifugal pump", "expected_part_type": "pump", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "Endress+Hauser Cerabar PMC21 pressure transmitter", "expected_part_type": "sensor_instrument", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "30HP 460V 3-phase induction motor, 256T frame, 1800 RPM", "expected_part_type": "motor_drive", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "gibberish asdf qwer zxcv", "expected_part_type": "unknown", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "a 3/4 inch hydraulic hose assembly", "expected_part_type": "unknown", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "Fristam FPX3542 pump, looking for the seals", "expected_part_type": "mechanical_seal", "expected_component_of": "Fristam FPX3542", "expected_regime": "ANCHORED", "split": "dev"},
+    {"input": "sanitary butterfly valve 2 inch tri-clamp 316L", "expected_part_type": "valve", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "VFD for a 30HP motor, 460V", "expected_part_type": "motor_drive", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "Rosemount 3051 pressure transmitter, HART, 4-20mA", "expected_part_type": "sensor_instrument", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "shaft seal for a Gusher 3x4-10 pump", "expected_part_type": "mechanical_seal", "expected_component_of": "Gusher 3x4-10", "expected_regime": "ANCHORED", "split": "dev"},
+    {"input": "a light fixture for the processing hall", "expected_part_type": "unknown", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "Alfa Laval LKH-20 centrifugal pump", "expected_part_type": "pump", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "GRUNDFOS CR seal kit", "expected_part_type": "mechanical_seal", "expected_component_of": "GRUNDFOS CR", "expected_regime": "ANCHORED", "split": "dev"},
+    {"input": "globe valve 1 inch NPT", "expected_part_type": "valve", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+    {"input": "VEGABAR 82 pressure transmitter, sanitary", "expected_part_type": "sensor_instrument", "expected_component_of": null, "expected_regime": "DIRECT", "split": "dev"},
+
+    {"input": "Goulds 3196 mechanical seal, need a cartridge seal", "expected_part_type": "mechanical_seal", "expected_component_of": "Goulds 3196", "expected_regime": "ANCHORED", "split": "holdout"},
+    {"input": "I need 6 of the mechanical seal for the Fristam FPX3542", "expected_part_type": "mechanical_seal", "expected_component_of": "Fristam FPX3542", "expected_regime": "ANCHORED", "split": "holdout"},
+    {"input": "3 inch sanitary ball valve 316L tri-clamp", "expected_part_type": "valve", "expected_component_of": null, "expected_regime": "DIRECT", "split": "holdout"},
+    {"input": "Iwaki MD-100R magnetic drive pump", "expected_part_type": "pump", "expected_component_of": null, "expected_regime": "DIRECT", "split": "holdout"},
+    {"input": "50HP 460V TEFC motor, 365T frame, washdown", "expected_part_type": "motor_drive", "expected_component_of": null, "expected_regime": "DIRECT", "split": "holdout"},
+    {"input": "Endress+Hauser Promag flow meter, sanitary", "expected_part_type": "sensor_instrument", "expected_component_of": null, "expected_regime": "DIRECT", "split": "holdout"},
+    {"input": "a v-belt for the transfer conveyor", "expected_part_type": "unknown", "expected_component_of": null, "expected_regime": "DIRECT", "split": "holdout"},
+    {"input": "O-ring for the valve stem, nothing fancy", "expected_part_type": "unknown", "expected_component_of": null, "expected_regime": "DIRECT", "split": "holdout"},
+    {"input": "seal kit for the Grundfos CR45", "expected_part_type": "mechanical_seal", "expected_component_of": "Grundfos CR45", "expected_regime": "ANCHORED", "split": "holdout"}
+  ]
+}
