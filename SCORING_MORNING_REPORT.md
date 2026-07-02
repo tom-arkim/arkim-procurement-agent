@@ -21,7 +21,7 @@
 | T0 — Setup + baseline | DONE | _pending_ | branch + report scaffold |
 | T1 — MRO noun-class dictionary | | | |
 | T2 — Stage 0 placeholder-penalty fix | DONE | _pending_ | toggle `scoring.py:53` (GATED default); tests cover all 4 flag×toggle paths; clean-PN + genuine-mismatch no-regress |
-| T3 — noun-class detection (query+result) | | | |
+| T3 — noun-class detection (query+result) | DONE | _pending_ | detection+storage only; flag-off never invokes; clean-PN score unchanged flag-on vs off; `_last_noun_classes` store for T4 |
 | T4 — multiplicative TypeGate | | | |
 | T5 — graded Fit | | | |
 | T6 — inertness wall | | | |

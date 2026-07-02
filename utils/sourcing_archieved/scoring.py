@@ -22,6 +22,10 @@ from utils.brand_intelligence import (
     get_parent_brand,
     get_manufacturer_aliases,
 )
+from utils.sourcing_archieved.part_type_classes import (
+    classify_noun_class,
+    classify_result_noun_class,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -247,11 +251,67 @@ def _classify_pn_match(searched_pn: str, found_pn: Optional[str],
 
 
 # ---------------------------------------------------------------------------
+# Noun-class detection (SCORING_V2 / T3) — detection + storage only, no score change yet
+# ---------------------------------------------------------------------------
+
+# Module-level debug store: the most-recent (query_class, result_class) verdict
+# computed under SCORING_V2. T4's TypeGate reads this; tests assert on it. It is
+# NOT part of the score and does not exist on the flag-off path.
+_last_noun_classes: dict = {"query": None, "result": None}
+
+
+def _query_noun_class(specs) -> Optional[str]:
+    """Detect the REQUEST's noun-class from specs (detected_type first, then
+    description / model / part_number as fallback context). Returns a canonical
+    label (e.g. 'SEAL') or None if undetectable. Pure; no score effect.
+
+    detected_type is the highest-signal field (e.g. 'mechanical seal',
+    'centrifugal pump'); the description / model carry weaker context used only
+    when detected_type is absent. None here is the 'undetectable' case the
+    TypeGate (T4) must treat as the 0.4-0.5 floor, never zero.
+    """
+    for field in (getattr(specs, "detected_type", None),
+                  getattr(specs, "description", None),
+                  getattr(specs, "model", None)):
+        if field:
+            cls = classify_noun_class(field)
+            if cls:
+                return cls
+    return None
+
+
+def _result_noun_class(snippet: str, url: str, title: Optional[str] = None) -> Optional[str]:
+    """Detect a RESULT's noun-class from title + URL slug, falling back to the
+    snippet when no title is supplied (the scorer's call sites pass snippet+url
+    but not always a separate title). Returns a canonical label or None
+    (undetectable). Pure; no score effect.
+
+    URL wins on disagreement (vendor's own category breadcrumb > marketing copy)
+    per classify_result_noun_class; when no title is given, the snippet is used
+    as the text signal alongside the URL.
+    """
+    text = title if title else snippet
+    return classify_result_noun_class(text, url)
+
+
+def _detect_noun_classes(specs, snippet: str, url: str,
+                         title: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+    """Return (query_class, result_class) for a (request, result) pair.
+
+    Gated caller convention: only invoked under SCORING_V2 (T3 wires it in; T4
+    consumes the verdict). Both may be None (undetectable) — that is a real
+    verdict, not an error, and the TypeGate applies the undetectable floor.
+    """
+    return _query_noun_class(specs), _result_noun_class(snippet, url, title)
+
+
+# ---------------------------------------------------------------------------
 # Main suitability score
 # ---------------------------------------------------------------------------
 
 def _compute_suitability_score(specs, snippet: str, url: str,
-                                found_pn: Optional[str] = None) -> float:
+                                found_pn: Optional[str] = None,
+                                title: Optional[str] = None) -> float:
     """0-100 score: how well this vendor/page matches the sourcing requirement.
 
     Primary key -- PN mention (guardrail):
@@ -264,12 +324,30 @@ def _compute_suitability_score(specs, snippet: str, url: str,
       Manufacturer    : 0-10 pts  (+40 parent-brand bonus)
       Authorized dist : 0-20 pts  (bonus for authorized distributor / service center)
       Direct URL      : 0-10 pts  (product page vs list/search page)
+
+    SCORING_V2 (T3, detection-only here): when the flag is on, the query and
+    result noun-classes are detected and stored on the module-level
+    ``_last_noun_classes`` debug dict (T4's TypeGate consumes them). Flag-off
+    never runs detection, so the score is byte-identical to pre-T3. ``title`` is
+    an optional result-title hint (improves result noun-class detection when the
+    caller has it); absent -> the snippet is used as the text signal.
     """
     s = (snippet or "").lower()
 
     _spn_early = (specs.part_number or "").upper().strip()
     if _is_low_value_landing_page(url, snippet, _spn_early):
         return 0.0
+
+    # T3 — noun-class detection (SCORING_V2 only): detect + store, no score
+    # change yet. The TypeGate (T4) consumes _last_noun_classes. Flag-off never
+    # runs this, so the score stays byte-identical to pre-T3.
+    if SCORING_V2:
+        _q_cls, _r_cls = _detect_noun_classes(specs, snippet, url, title)
+        _last_noun_classes["query"] = _q_cls
+        _last_noun_classes["result"] = _r_cls
+    else:
+        _last_noun_classes["query"] = None
+        _last_noun_classes["result"] = None
 
     # Guardrail 0: niche mismatch — hard 0.0 when 3+ wrong-category terms appear in
     # the snippet.  Counts only snippet hits (not URL hits) to avoid false-positives
