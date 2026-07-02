@@ -24,7 +24,7 @@
 | T3 — noun-class detection (query+result) | DONE | _pending_ | detection+storage only; flag-off never invokes; clean-PN score unchanged flag-on vs off; `_last_noun_classes` store for T4 |
 | T4 — multiplicative TypeGate | DONE | _pending_ | ANCHOR: Zoro pump fails (≤10), Platinum seal passes; undetectable→0.45 floor; flag-off byte-identical legacy; auth capped ≤10 inside gate |
 | T5 — graded Fit | DONE | _pending_ | exact-PN demoted 40→20 (bonus within Fit); parent-model/size-type/interchange first-class; anchor re-verified (seal passes, pump fails, bearing still passes); flag-off byte-identical |
-| T6 — inertness wall | | | |
+| T6 — inertness wall | DONE | _pending_ | 14-fixture battery vs baseline ecfeaf9 (all byte-identical); falsy-token parity (8 tokens→OFF, 8→ON); Stage 0 toggle-default audit (placeholder stays 25 flag-off) |
 | T7 — labeled eval dataset | | | |
 | T8 — eval run | | | |
 | T9 — morning report (this file) | | | |
