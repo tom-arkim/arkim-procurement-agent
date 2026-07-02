@@ -25,7 +25,7 @@
 | T4 — multiplicative TypeGate | DONE | _pending_ | ANCHOR: Zoro pump fails (≤10), Platinum seal passes; undetectable→0.45 floor; flag-off byte-identical legacy; auth capped ≤10 inside gate |
 | T5 — graded Fit | DONE | _pending_ | exact-PN demoted 40→20 (bonus within Fit); parent-model/size-type/interchange first-class; anchor re-verified (seal passes, pump fails, bearing still passes); flag-off byte-identical |
 | T6 — inertness wall | DONE | _pending_ | 14-fixture battery vs baseline ecfeaf9 (all byte-identical); falsy-token parity (8 tokens→OFF, 8→ON); Stage 0 toggle-default audit (placeholder stays 25 flag-off) |
-| T7 — labeled eval dataset | | | |
+| T7 — labeled eval dataset | DONE | _pending_ | 24 cases (17 dev / 7 holdout); schema-validated; anchors present (seal pass, pump fail, SKF pass); spans SEAL/PUMP/BEARING/VALVE/MOTOR/DRIVE/IMPELLER/COUPLING/GASKET + undetectable + collection + marketplace |
 | T8 — eval run | | | |
 | T9 — morning report (this file) | | | |
 

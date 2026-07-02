@@ -1,0 +1,200 @@
+{
+  "_meta": {
+    "purpose": "Labeled scoring eval dataset for the SCORING_V2 redesign (T7/T8). Each case is a (request, result) pair with the suitability verdict the scorer should reach under SCORING_V2=1. The anchor is the Goulds 3196 seal-vs-pump case. Fix the scorer, never relabel a case to pass.",
+    "schema": {
+      "id": "string, unique",
+      "split": "dev | holdout",
+      "request": {
+        "manufacturer": "string",
+        "model": "string",
+        "part_number": "string (UNKNOWN-PN placeholder when the part's own PN is unknown)",
+        "voltage": "string",
+        "category": "Part | Equipment",
+        "detected_type": "string (drives query noun-class)",
+        "hp": "string (optional, equipment)"
+      },
+      "result": {
+        "snippet": "string (page text the scorer sees)",
+        "url": "string (URL slug drives result noun-class)",
+        "title": "string (optional title hint)",
+        "found_pn": "string | null (the vendor's extracted PN; null when none)"
+      },
+      "expected": {
+        "should_pass_floor": "bool (suitability >= 30 under SCORING_V2=1)",
+        "rationale": "string (why this verdict is correct)"
+      }
+    },
+    "floor": 30.0,
+    "note": "should_pass_floor is the floor-clearance verdict under SCORING_V2=1 (TypeGate + graded Fit + Stage 0 placeholder fix). Clean-PN cases that pass flag-off must ALSO pass flag-on (no regression). Wrong-part-marketplace cases that pass flag-off (authority bias) must FAIL flag-on (the TypeGate fix)."
+  },
+  "cases": [
+    {
+      "id": "goulds_seal_platinum",
+      "split": "dev",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Platinum Performance Products Goulds 3196 mechanical seal, Type 1, 1.375 inch shaft. Part number ST-1.375-T1. In stock, ships same day. Cross-reference / interchange for Goulds 3196.", "url": "https://platinumperformanceproducts.com/mechanical-seals/goulds/3196-st", "title": "Goulds 3196 Mechanical Seal - Platinum Performance Products", "found_pn": "ST-1.375-T1"},
+      "expected": {"should_pass_floor": true, "rationale": "THE ANCHOR — right-part specialist. Real seal PN (ST-1.375-T1) must not be penalized against the UNKNOWN-PN placeholder (Stage 0); SEAL/SEAL gate 1.0; strong Fit (parent 3196 + size 1.375 + Type 1 + interchange). Must clear the 30 floor."}
+    },
+    {
+      "id": "goulds_pump_zoro",
+      "split": "dev",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 centrifugal pump, 5HP, 3450 RPM. In stock at Zoro. Free shipping on orders over $250.", "url": "https://zoro.com/pump/centrifugal/goulds-3196/i/", "title": "Goulds 3196 Centrifugal Pump", "found_pn": null},
+      "expected": {"should_pass_floor": false, "rationale": "THE ANCHOR — wrong-part-from-a-big-vendor. A pump page on a seal request: SEAL/PUMP different noun-class -> TypeGate ~0.1 -> crushed below floor. This is the defect the redesign fixes (passes flag-off on authority, fails flag-on)."}
+    },
+    {
+      "id": "skf_bearing_clean",
+      "split": "dev",
+      "request": {"manufacturer": "SKF", "model": "6205", "part_number": "6205-2RS", "voltage": "N/A", "category": "Part", "detected_type": "ball bearing"},
+      "result": {"snippet": "SKF 6205-2RS deep groove ball bearing. In stock, ships today. Add to cart. Price $14.99.", "url": "https://mrosupply.com/bearings/skf-6205-2rs/", "title": "SKF 6205-2RS Deep Groove Ball Bearing", "found_pn": "6205-2RS"},
+      "expected": {"should_pass_floor": true, "rationale": "Clean-PN no-regression case. Exact OEM PN, BEARING/BEARING gate 1.0, exact-PN bonus within Fit. Must pass flag-on AND flag-off (legacy 95)."}
+    },
+    {
+      "id": "goulds_seal_specialist_thin_url",
+      "split": "dev",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 mechanical seal replacement, 1.375 inch, Type 1. Interchange part. In stock. Ships same day.", "url": "https://sealspecialist.com/products/sku-4471", "title": "Goulds 3196 Seal Replacement", "found_pn": "ST-1.375-T1"},
+      "expected": {"should_pass_floor": true, "rationale": "Right-part specialist with a thin URL (no category slug) but a clear title + interchange language. Title drives SEAL detection; Fit from parent/size/interchange. Must clear the floor (undetectable-URL should not zero a correct result)."}
+    },
+    {
+      "id": "goulds_seal_marketplace_correct",
+      "split": "dev",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 mechanical seal, Type 1, 1.375 inch. Cross-reference interchange. In stock, ships today. Add to cart.", "url": "https://grainger.com/product/goulds-3196-mechanical-seal/ST-1.375-T1", "title": "Goulds 3196 Mechanical Seal ST-1.375-T1", "found_pn": "ST-1.375-T1"},
+      "expected": {"should_pass_floor": true, "rationale": "Anti-inversion guard: a MARKETPLACE/generalist result that PASSES the type gate with strong Fit must still beat a specialist with weak Fit. SEAL/SEAL, real PN, interchange. Must pass — do not invert the bug into an anti-marketplace bug."}
+    },
+    {
+      "id": "goulds_pump_on_seal_marketplace",
+      "split": "dev",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 centrifugal pump unit, 5HP, 3450 RPM. Authorized distributor. In stock. Price $1,890.", "url": "https://grainger.com/product/goulds-3196-pump/G3196", "title": "Goulds 3196 Centrifugal Pump", "found_pn": "G3196"},
+      "expected": {"should_pass_floor": false, "rationale": "Wrong-part (pump) on a seal request from a high-authority marketplace. SEAL/PUMP different class -> TypeGate ~0.1 -> fails despite authority + real PN. Proves the gate beats authority on a DIFFERENT-class result."}
+    },
+    {
+      "id": "valve_ball_correct",
+      "split": "dev",
+      "request": {"manufacturer": "Crane", "model": "D100", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "ball valve"},
+      "result": {"snippet": "Crane D100 forged steel ball valve, 2 inch, 150# class. Cross-reference / interchange. In stock, ships same day.", "url": "https://valve-supply.com/valves/ball-valves/crane-d100", "title": "Crane D100 Ball Valve", "found_pn": "D100-BV-2"},
+      "expected": {"should_pass_floor": true, "rationale": "Right-part valve specialist. VALVE/VALVE gate 1.0, Fit from parent model + interchange. Must clear floor."}
+    },
+    {
+      "id": "valve_gate_on_ball_request",
+      "split": "dev",
+      "request": {"manufacturer": "Crane", "model": "D100", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "ball valve"},
+      "result": {"snippet": "Crane D100 gate valve, 2 inch, 150# class. In stock. Authorized distributor.", "url": "https://valve-supply.com/valves/gate-valves/crane-d100-gate", "title": "Crane D100 Gate Valve", "found_pn": "D100-GV-2"},
+      "expected": {"should_pass_floor": false, "rationale": "Wrong valve TYPE (gate on a ball-valve request) — but both classify to VALVE noun-class, so the TypeGate is SAME-class. This tests whether same-class-wrong-subtype still fails. Expected FAIL because the brief's gate is noun-class-level only (gate valve vs ball valve both = VALVE); this case documents a known gap (sub-type gating is Stage 3, out of scope). SHOULD FAIL the floor via weak Fit/no exact PN — but flag if it passes (would indicate over-credit). Marked should_pass_floor=false as the desired verdict; see T8 notes."}
+    },
+    {
+      "id": "bearing_clean_pn_mcmaster",
+      "split": "dev",
+      "request": {"manufacturer": "SKF", "model": "6205", "part_number": "6205-2RS", "voltage": "N/A", "category": "Part", "detected_type": "ball bearing"},
+      "result": {"snippet": "Double-sealed deep-groove ball bearing, 25mm bore, 52mm OD. In stock. Unit price $12.50. SKF 6205-2RS.", "url": "https://mcmaster.com/5972K36/", "title": "Deep-Groove Ball Bearing 25mm Bore 6205-2RS", "found_pn": "6205-2RS"},
+      "expected": {"should_pass_floor": true, "rationale": "Second clean-PN bearing case (different vendor/URL). No-regression: must pass flag-on and flag-off."}
+    },
+    {
+      "id": "motor_correct_oem",
+      "split": "dev",
+      "request": {"manufacturer": "US Motors", "model": "EM7054T", "part_number": "EM7054T", "voltage": "460V", "category": "Equipment", "detected_type": "Electric Motor", "hp": "30"},
+      "result": {"snippet": "US Motors 30HP TEFC motor, 460V 3-phase, 1800RPM, 326T frame. Part: EM7054T. In stock. Authorized distributor.", "url": "https://grainger.com/product/30HP-motor-460V/EM7054T", "title": "US Motors EM7054T 30HP 460V TEFC Motor", "found_pn": "EM7054T"},
+      "expected": {"should_pass_floor": true, "rationale": "Equipment-category correct part. MOTOR/MOTOR gate 1.0, exact PN. Must pass."}
+    },
+    {
+      "id": "vfd_correct",
+      "split": "dev",
+      "request": {"manufacturer": "Allen-Bradley", "model": "PowerFlex 525", "part_number": "25B-D013N104", "voltage": "480V", "category": "Part", "detected_type": "variable frequency drive"},
+      "result": {"snippet": "Allen-Bradley PowerFlex 525 VFD, 25B-D013N104, 13HP, 480V. In stock. Authorized distributor. Cross-reference available.", "url": "https://abdrives.com/drives/powerflex-525/25B-D013N104", "title": "Allen-Bradley PowerFlex 525 VFD 25B-D013N104", "found_pn": "25B-D013N104"},
+      "expected": {"should_pass_floor": true, "rationale": "VFD/DRIVE correct part. DRIVE/DRIVE gate 1.0, exact PN. Must pass."}
+    },
+    {
+      "id": "motor_starter_on_vfd_request",
+      "split": "dev",
+      "request": {"manufacturer": "Allen-Bradley", "model": "PowerFlex 525", "part_number": "25B-D013N104", "voltage": "480V", "category": "Part", "detected_type": "variable frequency drive"},
+      "result": {"snippet": "Allen-Bradley NEMA motor starter, 30A, 480V. In stock. Authorized distributor. Price $320.", "url": "https://abdrives.com/starters/nema-30a", "title": "Allen-Bradley NEMA Motor Starter 30A", "found_pn": "140M-C8E-30"},
+      "expected": {"should_pass_floor": false, "rationale": "Wrong part type (motor starter on a VFD request). DRIVE detected for request (VFD), result has 'starter' which classifies DRIVE (starter is a DRIVE synonym). Same-class gate — documents the synonym-overlap boundary. Desired FAIL via no-Fit (no exact/stem PN, no parent-model token 'PowerFlex 525' in snippet, no interchange)."}
+    },
+    {
+      "id": "goulds_seal_collection_page",
+      "split": "dev",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Browse our Goulds 3196 mechanical seals collection. Many sizes in stock.", "url": "https://sealsrus.com/collections/mechanical-seals/goulds", "title": "Goulds 3196 Mechanical Seals Collection", "found_pn": null},
+      "expected": {"should_pass_floor": false, "rationale": "Collection/category page (/collections/). The is_coll cap forces <=5 regardless of type. Must fail the floor."}
+    },
+    {
+      "id": "goulds_seal_undetectable_result",
+      "split": "dev",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 replacement component, in stock, ships same day. Cross-reference available.", "url": "https://industrialparts.com/products/sku-8812", "title": "Goulds 3196 Replacement Component", "found_pn": null},
+      "expected": {"should_pass_floor": false, "rationale": "Undetectable result noun-class (no seal/pump noun in URL or title, 'component' is not a class) -> gate 0.45 floor (NOT zero). Fit from parent 3196 + interchange, but 0.45 gate + no exact PN. Documents the 0.45 undetectable floor — should NOT pass (no PN, gate <1) but must not be zeroed."}
+    },
+    {
+      "id": "marketplace_bearing_counterfeit_risk",
+      "split": "dev",
+      "request": {"manufacturer": "SKF", "model": "6205", "part_number": "6205-2RS", "voltage": "N/A", "category": "Part", "detected_type": "ball bearing"},
+      "result": {"snippet": "6205-2RS ball bearing SKF. Cheap price. Free shipping.", "url": "https://ebay.com/itm/6205-2rs-bearing", "title": "6205-2RS Ball Bearing SKF", "found_pn": "6205-2RS"},
+      "expected": {"should_pass_floor": true, "rationale": "Marketplace (ebay) with the right PN and right type. Counterfeit-risk penalty applies (-30 marketplace+risky category) but exact PN + type keep it above floor. BEARING/BEARING gate 1.0. Desired PASS (the PN is right; counterfeit risk is flagged separately, not a hard floor fail)."}
+    },
+    {
+      "id": "gusher_seal_clean",
+      "split": "dev",
+      "request": {"manufacturer": "Gusher Pumps", "model": "Type 21", "part_number": "TYPE21", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Gusher Type 21 mechanical seal. In stock, ships same day. Cross-reference available.", "url": "https://springer-pumps.com/seal-kits/type-21", "title": "Gusher Type 21 Mechanical Seal", "found_pn": "TYPE21"},
+      "expected": {"should_pass_floor": true, "rationale": "Clean-PN seal with exact PN TYPE21. SEAL/SEAL gate 1.0. Must pass flag-on and flag-off (legacy 70)."}
+    },
+    {
+      "id": "endress_sensor_correct",
+      "split": "dev",
+      "request": {"manufacturer": "Endress+Hauser", "model": "PMC11", "part_number": "PMC11-AA1U1HBWBJJ", "voltage": "N/A", "category": "Part", "detected_type": "pressure sensor"},
+      "result": {"snippet": "Endress Hauser PMC11 pressure sensor. Authorized distributor. PMC11AA1U1HBWBJJ in stock. Price on request.", "url": "https://instrumart.com/products/endress-hauser/pmc11", "title": "Endress+Hauser PMC11 Pressure Sensor", "found_pn": "PMC11-AA1U1HBWBJJ"},
+      "expected": {"should_pass_floor": true, "rationale": "Sensor (undetectable noun-class — 'pressure sensor' has no class in the dictionary). Query undetectable -> neutral gate 1.0; exact PN drives Fit. Must pass (no-regression on a type the dictionary doesn't cover yet)."}
+    },
+    {
+      "id": "goulds_impeller_correct",
+      "split": "holdout",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "impeller"},
+      "result": {"snippet": "Goulds 3196 pump impeller, 7.5 inch diameter. Cross-reference / interchange. In stock, ships same day.", "url": "https://platinumperformanceproducts.com/impellers/goulds/3196-impeller", "title": "Goulds 3196 Pump Impeller", "found_pn": "A05-IMP-75"},
+      "expected": {"should_pass_floor": true, "rationale": "HOLDOUT. Right-part impeller (IMPELLER class). IMPELLER/IMPELLER gate 1.0, Fit from parent + interchange. Must clear floor."}
+    },
+    {
+      "id": "goulds_impeller_on_seal_request",
+      "split": "holdout",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 pump impeller, 7.5 inch. In stock. Authorized distributor. Price $189.", "url": "https://zoro.com/impeller/goulds-3196/i/", "title": "Goulds 3196 Pump Impeller", "found_pn": "A05-IMP-75"},
+      "expected": {"should_pass_floor": false, "rationale": "HOLDOUT. Wrong part (impeller on a seal request). SEAL/IMPELLER different class -> TypeGate ~0.1 -> fails despite authority + real PN. Generalization check: the gate must crush any different-class result, not just pump-on-seal."}
+    },
+    {
+      "id": "coupling_correct",
+      "split": "holdout",
+      "request": {"manufacturer": "Lovejoy", "model": "L150", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "shaft coupling"},
+      "result": {"snippet": "Lovejoy L150 jaw coupling, 1.5 inch bore. Cross-reference / interchange. In stock, ships today.", "url": "https://couplingsupply.com/couplings/jaw-couplings/lovejoy-l150", "title": "Lovejoy L150 Jaw Coupling", "found_pn": "L150-NBR"},
+      "expected": {"should_pass_floor": true, "rationale": "HOLDOUT. Right-part coupling (COUPLING class). Fit from parent + interchange. Must clear floor."}
+    },
+    {
+      "id": "gasket_correct_aftermarket",
+      "split": "holdout",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "gasket"},
+      "result": {"snippet": "Goulds 3196 gasket kit, full set. Replacement for Goulds 3196. Interchange. In stock.", "url": "https://sealspecialist.com/gaskets/goulds-3196-gasket-kit", "title": "Goulds 3196 Gasket Kit", "found_pn": "3196-GSK-KIT"},
+      "expected": {"should_pass_floor": true, "rationale": "HOLDOUT. Right-part gasket aftermarket (no exact OEM PN, keys off parent 3196 + 'replacement for' + interchange). GASKET/GASKET gate 1.0; Fit from parent + interchange. Must clear floor — the graded-Fit thesis: aftermarket components that key off the parent model pass."}
+    },
+    {
+      "id": "goulds_pump_correct_on_pump_request",
+      "split": "holdout",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "G3196", "voltage": "460V", "category": "Equipment", "detected_type": "centrifugal pump", "hp": "5"},
+      "result": {"snippet": "Goulds 3196 centrifugal pump, 5HP, 460V, 3450 RPM. Part G3196. In stock. Authorized distributor.", "url": "https://zoro.com/pump/centrifugal/goulds-3196/i/", "title": "Goulds 3196 Centrifugal Pump G3196", "found_pn": "G3196"},
+      "expected": {"should_pass_floor": true, "rationale": "HOLDOUT. The CORRECT pump on a PUMP request (mirrors the anchor's wrong-part case but with the right request type). PUMP/PUMP gate 1.0, exact PN. Must pass — proves the gate doesn't penalize pumps in general, only pumps-on-seal-requests."}
+    },
+    {
+      "id": "goulds_seal_wrong_pn_mismatch",
+      "split": "holdout",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "ST-1.375-T1", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 mechanical seal, Type 2, 1.5 inch shaft. Part number ST-1.500-T2. In stock.", "url": "https://sealspecialist.com/mechanical-seals/goulds/3196-st-t2", "title": "Goulds 3196 Mechanical Seal Type 2", "found_pn": "ST-1.500-T2"},
+      "expected": {"should_pass_floor": false, "rationale": "HOLDOUT. Right TYPE (seal) but WRONG size/PN (ST-1.500-T2 vs searched ST-1.375-T1, different size). Real searched PN (not placeholder) -> genuine -30 mismatch penalty fires (Stage 0 does NOT suppress — searched PN is real). SEAL/SEAL gate 1.0 but -30 penalty + weak Fit (no parent credit since model is the PN). Desired FAIL — documents that the genuine-mismatch penalty still works under SCORING_V2."}
+    },
+    {
+      "id": "goulds_seal_marketplace_wrong_pn",
+      "split": "holdout",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"snippet": "Goulds 3196 pump seal kit, various sizes. Browse our collection. In stock.", "url": "https://grainger.com/collections/goulds-3196-seals", "title": "Goulds 3196 Pump Seal Kits", "found_pn": null},
+      "expected": {"should_pass_floor": false, "rationale": "HOLDOUT. Collection page (/collections/) for the right type. is_coll cap -> <=5. Must fail floor regardless of type match."}
+    }
+  ]
+}
