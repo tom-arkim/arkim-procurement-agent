@@ -375,6 +375,30 @@ class IntakeAgent:
         self._api_key = anthropic_api_key
 
     # ------------------------------------------------------------------
+    # Phase 1 — part-type classification (gated, internal `_-keys, fail-soft)
+    # ------------------------------------------------------------------
+
+    def _maybe_classify(self, merged: dict, text: str) -> None:
+        """Classify the first message under INTAKE_TYPE_AWARE and store the result
+        as internal `_`-prefixed keys on the merged specs. Fail-soft: any error or
+        UNKNOWN result leaves the specs untouched (intake proceeds generically).
+        The classifier uses the raw api.anthropic.com requests.post pattern (via
+        its own default llm_call) — never ANTHROPIC_BASE_URL, never the SDK. A
+        missing key -> the classifier returns UNKNOWN silently (no network)."""
+        try:
+            from utils.procurement_agent.part_type_classifier import classify_part_type
+            classification = classify_part_type(text)
+        except Exception as exc:
+            # Belt-and-suspenders: the classifier itself never raises, but a
+            # defensive guard ensures an import/transport error can't crash intake.
+            print(f"[IntakeAgent] part-type classification failed: {exc}")
+            return
+        merged["_classified_type"] = classification.part_type
+        merged["_classified_regime"] = classification.regime
+        merged["_component_of"] = classification.component_of
+        merged["_classified_confidence"] = classification.confidence
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
@@ -437,6 +461,17 @@ class IntakeAgent:
         if _intake_type_aware():
             from utils.procurement_agent.quantity_capture import apply_quantity
             apply_quantity(merged, text)
+
+        # Phase 1 — part-type classification (gated behind INTAKE_TYPE_AWARE). Run
+        # ONCE, against the user's FIRST message (no prior specs yet), so the type
+        # is known before the first clarification and the registry's q2_template
+        # can drive the next question (T5). The result rides as internal `_`-keys
+        # on asset_specs_json (filtered from context summary + RunDetail). A
+        # classification failure (UNKNOWN) is non-fatal: intake proceeds exactly
+        # as the current generic behavior (T4/T5 fall through on UNKNOWN). The
+        # classifier's llm_call is fail-soft — it never raises into the pipeline.
+        if _intake_type_aware() and not prior_specs and not images:
+            self._maybe_classify(merged, text)
 
         # Fix 1: units-based classification override (runs after VLM merge)
         new_type, new_cat, override_applied = classify_by_units(merged)
