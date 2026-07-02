@@ -39,6 +39,7 @@ import type {
   SendMessageResponse,
   SourcingRunDetail,
   BasketRollup,
+  HealthResponse,
   SourcingRunListItem,
 } from "@/types";
 
@@ -149,6 +150,11 @@ export async function listRuns(params?: {
 
 export async function getRun(runId: string): Promise<SourcingRunDetail> {
   return request(`/runs/${runId}`);
+}
+
+/** Backend liveness + demo state — the UI derives demo_mode from the backend it talks to. */
+export async function getHealth(): Promise<HealthResponse> {
+  return request("/health");
 }
 
 /** Basket rollup for a group — per-part label/phase/selected_amount + basket status/total. */

@@ -305,8 +305,17 @@ class SpecComparisonAgent:
 
         try:
             import anthropic
+            # Pin the base_url to an APP-OWNED env var (default real Anthropic) instead of the
+            # SDK's default ANTHROPIC_BASE_URL. The latter is Claude Code / LiteLLM proxy config
+            # that leaks into the uvicorn subprocess; the SDK would then route the comparison
+            # call to that proxy (which serves glm-5p2, not Claude), 400-ing on the model name.
+            # Every other agent uses requests.post to the hardcoded api.anthropic.com and is
+            # immune; this is the only SDK-based call. APP_ANTHROPIC_BASE_URL is the escape
+            # hatch if the app ever deliberately runs behind a proxy — distinct from Claude
+            # Code's ANTHROPIC_BASE_URL so the leak can't redirect it.
             client = anthropic.Anthropic(
-                api_key=self._anthropic_key or os.environ.get("ANTHROPIC_API_KEY", "")
+                api_key=self._anthropic_key or os.environ.get("ANTHROPIC_API_KEY", ""),
+                base_url=os.environ.get("APP_ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
             )
             message = client.messages.create(
                 model="claude-haiku-4-5-20251001",

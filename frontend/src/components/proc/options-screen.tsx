@@ -14,7 +14,7 @@
 import { useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useRunLive, useOrderNow, useOrders, useGroup } from "@/lib/queries";
+import { useRunLive, useOrderNow, useOrders, useGroup, useDemoMode } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
@@ -164,7 +164,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
   if (WORKING_PHASES.includes(phase)) {
     return (
       <Shell sub={partLabel} onHome={() => router.push("/")} strip={basketStrip}>
-        <Working label="Finding your best options…" sub="Checking the Arkim network, marketplaces, and specialist suppliers — this can take a minute or two." spin />
+        <SourcingProgress />
       </Shell>
     );
   }
@@ -502,6 +502,65 @@ function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin
       <div>
         <div className="w-t">{label}</div>
         {sub && <div className="w-s">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+// The steps mirror the real sourcing tiers. Under DEMO_MODE, Tier 1 (the "Arkim network" catalog)
+// is gated off / returns nothing, so we DROP that step + mention — the loader must tell the same
+// story the demo actually tells (live search across marketplaces + specialist suppliers). Non-demo
+// keeps the full four (Tier 1 runs there). The labels are honest about what runs; the TIMING is
+// approximate — the backend holds phase="sourcing" for the whole run and emits no per-tier events,
+// so this is a frontend-only progression, NOT backend-synced.
+const SOURCING_STEPS_FULL = [
+  "Searching the Arkim network",
+  "Scanning marketplaces",
+  "Checking specialist suppliers",
+  "Comparing candidates",
+];
+const SOURCING_STEPS_DEMO = [
+  "Scanning marketplaces",
+  "Checking specialist suppliers",
+  "Comparing candidates",
+];
+
+/** Prominent, alive sourcing-in-progress screen for the 30–60s live-search wait. Advances the
+ *  steps on a timer and HOLDS on the last one until results arrive (the parent unmounts this
+ *  when the run flips to comparison), so a step never reads "done" before the data is actually in. */
+function SourcingProgress() {
+  const demo = useDemoMode();
+  const steps = demo ? SOURCING_STEPS_DEMO : SOURCING_STEPS_FULL;
+  const sub = demo
+    ? "Searching live across marketplaces and specialist suppliers — this can take up to a minute."
+    : "Searching live across the Arkim network, marketplaces, and specialist suppliers — this can take up to a minute.";
+
+  const [step, setStep] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setStep((s) => s + 1), 9000);
+    return () => clearInterval(t);
+  }, []);
+  const cur = Math.min(step, steps.length - 1);   // clamp so a shorter (demo) list holds on its last step
+
+  return (
+    <div className="proc-loading proc-loading-split">
+      <div className="pl-loader"><ArkimLoader size={64} /></div>
+      <div className="pl-body">
+        <div className="pl-head">Finding your best options</div>
+        <div className="pl-sub">{sub}</div>
+        <ol className="sp-steps">
+          {steps.map((label, i) => {
+            const state = i < cur ? "done" : i === cur ? "active" : "pending";
+            return (
+              <li key={label} className="sp-step" data-state={state}>
+                <span className="sp-dot" aria-hidden="true">
+                  {state === "done" && <ProcIcon name="checkCircle" size={18} color="var(--accent-text)" />}
+                </span>
+                <span className="sp-label">{label}</span>
+              </li>
+            );
+          })}
+        </ol>
       </div>
     </div>
   );

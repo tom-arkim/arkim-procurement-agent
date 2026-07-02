@@ -33,8 +33,14 @@ const val = (v?: string | null) => (v && !NULLS.has(String(v).toLowerCase().trim
 
 function specsReady(specs?: AssetSpecs): boolean {
   if (!specs) return false;
+  // Spec-based commit (proceed_spec_based / forced_commit) is a deliberate backend "ready"
+  // signal — the intake committed to source by category with NO manufacturer/model/PN. The
+  // mfg && identity gate below would short-circuit on the missing manufacturer and never
+  // honor it, so recognize it first. The "Matching by category" meta line renders in the
+  // card to qualify this as identified-by-spec, not by identity.
+  if (specs.spec_based_sourcing) return true;
   const mfg = val(specs.manufacturer);
-  return Boolean(mfg && (val(specs.part_number) || val(specs.model) || specs.spec_based_sourcing));
+  return Boolean(mfg && (val(specs.part_number) || val(specs.model)));
 }
 
 type Stage = "entry" | "working" | "identify" | "error";
@@ -268,12 +274,10 @@ export function RequestScreen() {
 
       {/* WORKING */}
       {stage === "working" && (
-        <div className="proc-working">
-          <ArkimLoader size={36} />
-          <div>
-            <div className="w-t">{file ? "Reading the nameplate…" : "Identifying part…"}</div>
-            <div className="w-s">{file ? "Pulling the part details from your photo." : "Checking service records and manuals."}</div>
-          </div>
+        <div className="proc-loading">
+          <ArkimLoader size={52} />
+          <div className="pl-head">{file ? "Reading the nameplate" : "Identifying part"}</div>
+          <div className="pl-sub">{file ? "Pulling the part details from your photo." : "Checking service records and manuals."}</div>
         </div>
       )}
 

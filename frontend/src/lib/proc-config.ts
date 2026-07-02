@@ -7,7 +7,7 @@
  * auth + a real facilities wire.
  */
 
-export const PROC_TENANT = { name: "CAPTEK", sub: "Softgel" };
+export const PROC_TENANT = { name: "Northgate", sub: "Manufacturing" };
 
 /**
  * The facility id proc runs route against. The customer create-run flow posts no
@@ -37,25 +37,25 @@ export interface ProcSite {
 export const PROC_SITES: ProcSite[] = [
   {
     id: "lamirada",
-    name: "La Mirada",
+    name: "Riverside",
     sub: "Plant · West",
     shipTo: {
-      company: "CAPTEK Softgel International",
-      address: "14704 Industry Circle",
-      city: "La Mirada, CA 90638",
-      attention: "Sam Torres — Maintenance",
+      company: "Northgate Manufacturing Co.",
+      address: "1200 Commerce Way",
+      city: "Riverside, CA 92507",
+      attention: "Receiving — Maintenance",
       hours: "Mon–Fri, 7:00 AM – 3:30 PM",
-      instructions: "Deliver to Dock 2 (north side). Call Sam 30 min ahead for liftgate deliveries.",
+      instructions: "Deliver to Dock 2 (north side). Call the dock 30 min ahead for liftgate deliveries.",
     },
   },
   {
     id: "rancho",
-    name: "Rancho Cucamonga",
+    name: "Fontana",
     sub: "Plant · East",
     shipTo: {
-      company: "CAPTEK Softgel International",
-      address: "9774 Crescent Center Dr, Suite 402",
-      city: "Rancho Cucamonga, CA 91730",
+      company: "Northgate Manufacturing Co.",
+      address: "875 Distribution Dr, Suite 402",
+      city: "Fontana, CA 91335",
       attention: "Receiving — front office",
       hours: "Mon–Fri, 8:00 AM – 4:00 PM",
       instructions: "",

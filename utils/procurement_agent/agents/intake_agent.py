@@ -41,7 +41,18 @@ CATEGORY_REQUIRED_FIELDS: dict[str, list[str]] = {
 
 SUFFICIENCY_THRESHOLD = 70  # both confidences must reach this in the symmetric case
 
+# Hard cap on clarification turns: after this many non-sufficient clarification turns, the
+# agent stops asking and commits to spec-based sourcing with whatever specs it has (so a
+# vague / unanswerable intake never loops indefinitely). Counted as the turn number of the
+# current clarification turn (1-indexed); when it reaches the cap, the turn commits instead
+# of asking another question.
+INTAKE_TURN_CAP = 3
+
 _NULL_VALUES = {None, "", "null", "N/A", "Unknown", "UNKNOWN-PN", "none", "unknown"}
+
+# Identity fields — when ANY of these is established, the part has an identifier (the opener
+# question is skipped and spec-based commit is not "pure spec-based").
+_IDENTITY_FIELDS = ("manufacturer", "model", "part_number")
 
 # ---------------------------------------------------------------------------
 # Fix 1 — Units-based classification override
@@ -126,6 +137,65 @@ def _first_missing_required_field(specs: dict) -> Optional[str]:
     return None
 
 
+def _has_identity(specs: dict) -> bool:
+    """True when any part identifier (manufacturer, model, or part number) is established."""
+    return any(specs.get(k) not in _NULL_VALUES for k in _IDENTITY_FIELDS)
+
+
+def _spec_based_ready(specs: dict) -> bool:
+    """True when the intake can commit to SPEC-BASED sourcing without a manufacturer/PN.
+
+    The manufacturer-refinement gate (over-questioning fix #4): once the part type is
+    confidently known AND every category-required dimension is present AND no part identity
+    (model or part number) is established, there is no more specific identifier to chase —
+    sourcing should proceed spec-based instead of looping on the manufacturer question.
+    A model or PN present means we still have a more specific handle, so this returns False
+    and the existing caveat / full-confidence paths apply.
+    """
+    if _has_identity(specs):
+        return False
+    detected = (specs.get("detected_type") or "").lower()
+    if not detected:
+        return False
+    for key, fields in CATEGORY_REQUIRED_FIELDS.items():
+        if key in detected:
+            # No PN here (guarded above), so the dimension requirements apply in full.
+            return all(specs.get(f) not in _NULL_VALUES for f in fields)
+    return False  # unknown category — can't confirm dims, keep asking
+
+
+def _first_unasked_missing_field(specs: dict, asked: list) -> Optional[str]:
+    """First category-required DIMENSION field (excluding detected_type itself) that is still
+    missing AND has not already been asked. Used by the never-re-ask picker to find a fresh
+    field when the assessor's nominated field was already asked. Returns None when the type
+    has no category entry or every missing dim has already been asked."""
+    detected = (specs.get("detected_type") or "").lower()
+    if not detected:
+        return None
+    for key, fields in CATEGORY_REQUIRED_FIELDS.items():
+        if key in detected:
+            for f in fields:
+                if f == "detected_type":
+                    continue
+                if f in asked:
+                    continue
+                if specs.get(f) in _NULL_VALUES:
+                    return f
+            return None
+    return None
+
+
+def _field_is_missing(specs: dict, field: str) -> bool:
+    """Whether a given question-target field is genuinely still unanswered in specs."""
+    if field == "part_type":
+        return specs.get("detected_type") in _NULL_VALUES
+    if field == "manufacturer":
+        return specs.get("manufacturer") in _NULL_VALUES
+    if field == "part_identity":
+        return not _has_identity(specs)
+    return specs.get(field) in _NULL_VALUES
+
+
 def assess_proceed_state(
     specs: dict, mfg_conf: float, part_conf: float
 ) -> tuple:
@@ -134,6 +204,9 @@ def assess_proceed_state(
     States:
         proceed_full_confidence          — both confident, required fields present
         proceed_with_manufacturer_caveat — mfg<70, pid≥80; proceed with banner
+        proceed_spec_based               — mfg<70, pid≥70, type known + category dims
+                                          present + no identity; commit spec-based
+                                          (manufacturer-refinement gate, fix #4)
         needs_clarification              — both confident but a required field is missing
         blocked_need_part_id             — mfg≥70, pid<70
         blocked_need_either              — mfg<70 and pid<80
@@ -143,6 +216,15 @@ def assess_proceed_state(
         if missing:
             return "needs_clarification", missing, None
         return "proceed_full_confidence", None, None
+
+    # Fix #4 — manufacturer is NOT blocking once the part type is confidently known AND the
+    # category-required dimensions are present AND there is no part identity (no model/PN).
+    # Commit spec-based instead of looping on the manufacturer question forever. Slotted
+    # before the caveat branch so a dims-present case prefers spec-based over the banner.
+    if (mfg_conf < SUFFICIENCY_THRESHOLD
+            and part_conf >= SUFFICIENCY_THRESHOLD
+            and _spec_based_ready(specs)):
+        return "proceed_spec_based", None, None
 
     if mfg_conf < SUFFICIENCY_THRESHOLD and part_conf >= 80:
         return "proceed_with_manufacturer_caveat", None, _PROCEED_CAVEAT
@@ -258,6 +340,12 @@ _DEFAULT_QUESTIONS: dict[str, str] = {
     "psi":             "What is the operating pressure rating in PSI?",
     "connection_size": "What is the connection size or pipe diameter? (e.g., 2 inch NPT, DN50)",
     "detected_type":   "What type of equipment or part is this exactly? (e.g., centrifugal pump, induction motor, mechanical seal)",
+    # Identity-first opener: asked verbatim (NOT via the haiku clarification generator) on the
+    # first clarification turn when no part identity is established yet. Gets the user reading
+    # the nameplate / old part markings before anything else — the single highest-value question.
+    "part_identity":   ("Is there a manufacturer name, model, or part number visible — on the part "
+                        "itself, its nameplate, or the equipment it's mounted on? If you can read a "
+                        "plate or an old part's markings, type what you see."),
 }
 
 
@@ -371,11 +459,27 @@ class IntakeAgent:
 
         # Fix 3: asymmetric stop condition
         state, missing_field, caveat = assess_proceed_state(merged, mfg_conf, part_conf)
-        sufficient = state in ("proceed_full_confidence", "proceed_with_manufacturer_caveat")
+        if state == "proceed_spec_based":
+            merged["spec_based_sourcing"] = True
+        sufficient = state in (
+            "proceed_full_confidence",
+            "proceed_with_manufacturer_caveat",
+            "proceed_spec_based",
+        )
 
         follow_up = None
+        commit_message = None
         if not sufficient:
-            follow_up = self._generate_clarification(merged, missing_field or "detected_type")
+            follow_up, commit_message = self._next_clarification(
+                merged, prior_specs, missing_field or "detected_type"
+            )
+            if commit_message is not None:
+                # Over-questioning fix #3: cap reached OR nothing left to ask — commit to
+                # spec-based sourcing with the specs we have instead of looping.
+                merged["spec_based_sourcing"] = True
+                state = "forced_commit"
+                sufficient = True
+                follow_up = None
 
         return {
             "asset_specs":             merged,
@@ -384,6 +488,7 @@ class IntakeAgent:
             "sufficient":              sufficient,
             "follow_up_question":      follow_up,
             "manufacturer_caveat":     caveat,
+            "commit_message":          commit_message,
             "confidence_summary": {
                 "manufacturer_confidence": mfg_conf,
                 "part_id_confidence":      part_conf,
@@ -437,11 +542,14 @@ class IntakeAgent:
         """Return all populated prior spec fields including confidence scores.
 
         Confidence scores are intentionally included so the LLM knows what's already
-        established and can score new information relative to that baseline.
+        established and can score new information relative to that baseline. Internal
+        `_`-prefixed keys (turn counter, asked-fields ledger) are excluded so they never
+        leak into the extractor context.
         """
         return {
             k: v for k, v in prior_specs.items()
             if not isinstance(v, (list, dict)) and v not in _NULL_VALUES
+            and not k.startswith("_")
         }
 
     def _pn_prefix_hint(self, text: str, prior_specs: dict) -> Optional[tuple]:
@@ -559,7 +667,8 @@ class IntakeAgent:
             summary = {k: v for k, v in prior_specs.items()
                        if not isinstance(v, (list, dict))
                        and k not in ("manufacturer_confidence", "part_id_confidence",
-                                     "confidence_reasoning") and v not in _NULL_VALUES}
+                                     "confidence_reasoning")
+                       and not k.startswith("_") and v not in _NULL_VALUES}
             context = f"Previously extracted specs:\n{json.dumps(summary)}\n\n"
 
         content.append({
@@ -625,6 +734,77 @@ class IntakeAgent:
     # Clarification generation
     # ------------------------------------------------------------------
 
+    _COMMIT_MESSAGE = (
+        "I'll search on the specs we have; I couldn't confirm the exact manufacturer "
+        "— you can refine from the results."
+    )
+
+    def _pick_question_field(self, specs: dict, asked: list, missing_field: str) -> tuple:
+        """Choose which field to ask about this turn, never re-asking a field already asked
+        and still unanswered. Returns (field, do_commit): when do_commit is True there is
+        nothing fresh left to ask and the caller should commit to spec-based sourcing."""
+        # 1. The assessor's nominated field, if it hasn't been asked yet.
+        if missing_field and missing_field not in asked:
+            return missing_field, False
+        # 2. A different still-missing category-required dimension that hasn't been asked.
+        alt = _first_unasked_missing_field(specs, asked)
+        if alt:
+            return alt, False
+        # 3. Broader identity/type fields for the blocked (no-category) case.
+        for f in ("part_type", "manufacturer", "part_identity"):
+            if f not in asked and _field_is_missing(specs, f):
+                return f, False
+        # 4. Nothing fresh to ask — commit spec-based rather than re-ask.
+        return None, True
+
+    def _next_clarification(self, merged: dict, prior_specs: dict, missing_field: str) -> tuple:
+        """Decide this clarification turn's question OR a spec-based commit.
+
+        Returns (follow_up_question, commit_message): exactly one is non-None.
+        Implements the three over-questioning fixes:
+          - identity-first opener (#1): first clarification turn + no identity → ask the
+            part_identity question verbatim (not via the haiku generator).
+          - never re-ask (#2): a field already asked-and-still-unanswered is skipped for a
+            fresh missing field, or, if none remains, the turn commits.
+          - hard cap (#3): when the clarification-turn counter reaches INTAKE_TURN_CAP and
+            the intake is still not sufficient, commit to spec-based sourcing.
+
+        Internal `_`-prefixed ledger keys (`_asked_fields`, `_intake_turns`) ride on
+        asset_specs_json (the existing state vehicle — no new column) and persist across
+        turns; they are filtered out of the extractor context and the frontend specs display.
+        """
+        prior_turns = int(prior_specs.get("_intake_turns") or 0)
+        asked = list(prior_specs.get("_asked_fields") or [])
+        this_turn = prior_turns + 1   # 1-indexed clarification turn counter
+
+        # Fix #3 — hard cap: this turn reaches the cap and the intake is still insufficient.
+        if this_turn >= INTAKE_TURN_CAP:
+            merged["_asked_fields"] = asked
+            merged["_intake_turns"] = this_turn
+            return None, self._COMMIT_MESSAGE
+
+        # Fix #1 — identity-first opener: first clarification turn + no part identity.
+        if prior_turns == 0 and not _has_identity(merged):
+            field = "part_identity"
+        else:
+            field, do_commit = self._pick_question_field(merged, asked, missing_field)
+            if do_commit:
+                merged["_asked_fields"] = asked
+                merged["_intake_turns"] = this_turn
+                return None, self._COMMIT_MESSAGE
+
+        # part_identity is asked verbatim (never via the haiku generator).
+        if field == "part_identity":
+            follow_up = _DEFAULT_QUESTIONS["part_identity"]
+        else:
+            follow_up = self._generate_clarification(merged, field)
+
+        # Fix #2 — record the asked field so it is never re-asked while still unanswered.
+        asked.append(field)
+        merged["_asked_fields"] = asked
+        merged["_intake_turns"] = this_turn
+        return follow_up, None
+
     def _generate_clarification(self, specs: dict, missing_field: str) -> str:
         if not self._api_key:
             return _DEFAULT_QUESTIONS.get(missing_field,
@@ -632,6 +812,7 @@ class IntakeAgent:
 
         specs_summary = {k: v for k, v in specs.items()
                          if not isinstance(v, (list, dict)) and v not in _NULL_VALUES
+                         and not k.startswith("_")
                          and k not in ("manufacturer_confidence", "part_id_confidence",
                                        "confidence_reasoning")}
         user_msg = (

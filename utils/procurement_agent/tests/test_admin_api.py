@@ -429,14 +429,14 @@ class TestBuyerLoopEndpoints:
     def test_site_shipto_get_empty_put_get(self, admin_api):
         # No ship-to saved yet -> null (UI falls back to its seeded default).
         assert admin_api.get("/api/sites/lamirada/ship-to").json()["ship_to"] is None
-        body = {"company": "CAPTEK Softgel", "address": "14704 Industry Circle",
-                "city": "La Mirada, CA 90638", "attention": "Sam Torres — Maintenance",
+        body = {"company": "Northgate Manufacturing Co.", "address": "1200 Commerce Way",
+                "city": "Riverside, CA 92507", "attention": "Receiving — Maintenance",
                 "hours": "Mon–Fri 7–3:30", "instructions": "Dock 2"}
         r = admin_api.put("/api/sites/lamirada/ship-to", json=body)
-        assert r.status_code == 200 and r.json()["ship_to"]["company"] == "CAPTEK Softgel"
+        assert r.status_code == 200 and r.json()["ship_to"]["company"] == "Northgate Manufacturing Co."
         # persisted + readable
         got = admin_api.get("/api/sites/lamirada/ship-to").json()["ship_to"]
-        assert got["address"] == "14704 Industry Circle" and got["attention"].startswith("Sam Torres")
+        assert got["address"] == "1200 Commerce Way" and got["attention"].startswith("Receiving")
         # upsert replaces in place (one row per site)
         admin_api.put("/api/sites/lamirada/ship-to", json={**body, "instructions": "Dock 4"})
         assert admin_api.get("/api/sites/lamirada/ship-to").json()["ship_to"]["instructions"] == "Dock 4"

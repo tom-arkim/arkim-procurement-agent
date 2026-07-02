@@ -264,6 +264,13 @@ export interface ChatMessage {
 // API request / response shapes
 // ---------------------------------------------------------------------------
 
+/** GET /api/health — liveness + the backend's demo state (single source of truth for the UI). */
+export interface HealthResponse {
+  status: string;
+  version: string;
+  demo_mode: boolean;
+}
+
 /** One row of the basket rollup (GET /api/groups/{gid}) — mirrors the backend BasketRunRow. */
 export interface BasketRunRow {
   run_id: string | null;

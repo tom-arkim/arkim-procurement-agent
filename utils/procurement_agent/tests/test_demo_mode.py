@@ -201,6 +201,8 @@ class TestDemoAllowlistWorks:
         r = client.get("/api/health")
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
+        # health surfaces demo_mode so the frontend derives the demo state from the backend.
+        assert r.json()["demo_mode"] is True
 
     def test_facilities_reaches_handler(self, demo_on):
         client, _ = demo_on
