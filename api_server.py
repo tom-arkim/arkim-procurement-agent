@@ -974,7 +974,22 @@ def _result_from_cached_edges(edges: list) -> dict:
     A STALE cached price is marked low-confidence so the transform flags it
     priceUnverified (a stale price shown as current is an overclaim — same honesty
     discipline as the unverified-price work). No comparison artifact on cache hits —
-    the spec comparison is recomputed only on a fresh discovery."""
+    the spec comparison is recomputed only on a fresh discovery.
+
+    Fix B1 — validation parity with the fresh-discovery path: cached edges are
+    run through the SAME suitability floor + rejection_reason filter the
+    SourcingAgent applies to live results, so a cached edge that is below-floor
+    (or was written with a rejection_reason) does NOT surface to the UI just
+    because the cache-hit path bypassed SourcingAgent. Without this, a poisoned
+    cache entry (wrong-part results that scored >=30 on vendor authority when
+    the QUERY was wrong) would be served forever without re-validation. The
+    filter here only catches below-suitability cached edges; it does NOT catch
+    wrong-PART-TYPE edges (a pump edge cached under a seal part-key can still
+    score >=30) — clearing those requires the query fix (Fix A) + clearing the
+    poisoned cache key (Fix B2), not this floor. Re-uses the same
+    TIER_SURFACE_MIN_SUITABILITY constant and the annotate-then-skip discipline
+    the SourcingAgent + _transform_sourcing_results use."""
+    from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
     tiers: dict = {1: [], 2: [], 3: []}
     for e in edges:
         price = e.get("price")
@@ -998,6 +1013,18 @@ def _result_from_cached_edges(edges: list) -> dict:
             "lead_time_days":    e.get("lead_days") or 5,
             "from_cache":        True,
         }
+        # Fix B1 — drop cached edges already carrying a rejection_reason, and
+        # apply the suitability floor to the rest (same threshold as live runs).
+        if e.get("rejection_reason"):
+            continue
+        if float(cand["suitability_score"] or 0.0) < TIER_SURFACE_MIN_SUITABILITY:
+            cand["rejection_reason"] = "suitability_below_floor"
+            print(
+                f"[Sourcing] Rejected cached edge (suitability_below_floor): "
+                f"{cand['vendor_name']} suitability={cand['suitability_score']:.1f}% "
+                f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
+            )
+            continue
         t = e.get("tier") if e.get("tier") in (1, 2, 3) else (3 if price is None else 2)
         tiers[t].append(cand)
 
