@@ -435,6 +435,15 @@ function ItemCard({
       setQtyBusy(false);
     }
   };
+  // Stepper: clamp at 1, optimistic display, persist via commitQty (the PUT path).
+  const stepQty = (delta: number) => {
+    if (qtyBusy) return;
+    const current = qty ?? specs?.quantity ?? 1;
+    const next = Math.max(1, current + delta);
+    if (next === current) return;
+    setQty(next);
+    void commitQty(next);
+  };
 
   // Report this item's ready state up whenever it changes (onReady is stable via useCallback).
   useEffect(() => { onReady?.(runId, ready); }, [runId, ready, onReady]);
@@ -476,25 +485,25 @@ function ItemCard({
             <div className="id-meta">Matching by category — no exact part number needed.</div>
           )}
           {ready && specs?.quantity != null && (
-            <div className="proc-qty" style={{ marginTop: 8 }}>
+            <div className="proc-qty" style={{ marginTop: 10 }}>
               <span className="ql">Qty</span>
-              <input
-                type="number"
-                min={1}
-                value={qty ?? specs.quantity}
-                disabled={qtyBusy}
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  setQty(Number.isFinite(n) ? n : null);
-                }}
-                onBlur={() => {
-                  const n = qty ?? specs.quantity ?? 1;
-                  const next = Math.max(1, Math.floor(n));
-                  if (next !== (specs.quantity ?? null)) void commitQty(next);
-                  else setQty(specs.quantity ?? null);
-                }}
-                aria-label="Quantity"
-              />
+              <div className="proc-stepper">
+                <button
+                  type="button"
+                  className="proc-stepper-btn"
+                  aria-label="Decrease quantity"
+                  disabled={qtyBusy || (qty ?? specs.quantity) <= 1}
+                  onClick={() => stepQty(-1)}
+                >−</button>
+                <div className="proc-stepper-val" aria-live="polite">{qty ?? specs.quantity}</div>
+                <button
+                  type="button"
+                  className="proc-stepper-btn"
+                  aria-label="Increase quantity"
+                  disabled={qtyBusy}
+                  onClick={() => stepQty(1)}
+                >+</button>
+              </div>
             </div>
           )}
           {!ready && reply && <div className="id-meta" style={{ marginTop: 4 }}>{reply}</div>}

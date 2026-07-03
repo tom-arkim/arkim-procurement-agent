@@ -444,14 +444,16 @@
 .proc-id .id-reply { padding: 0 18px 14px; font-size: 13px; color: var(--muted); line-height: 1.55; }
 .proc-idinput { width: 100%; font-family: var(--font-sans); font-size: 14px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--r); background: var(--bg); color: var(--text); outline: none; box-shadow: 0 0 0 3px var(--accent-fill); }
 
-/* Editable quantity control on the identified-part card — themed to match the card's
-   inputs (proc-idinput) at a compact size. Native number spinner is retained (accent-
-   tinted) so up/down still work; only the presentation changes. */
-.proc-qty { display: inline-flex; align-items: center; gap: 9px; font-size: 13px; color: var(--muted); }
+/* Editable quantity control on the identified-part card — a themed segmented stepper
+   (− / value / +) matching the card's dark aesthetic. Value persists via the asset-specs
+   PUT on each step; no free typing. */
+.proc-qty { display: inline-flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
 .proc-qty .ql { font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; font-size: 11px; }
-.proc-qty input { width: 60px; font-family: var(--font-sans); font-size: 13.5px; font-weight: 600; text-align: center; padding: 6px 8px; border: 1px solid var(--accent); border-radius: var(--r); background: var(--bg); color: var(--text-strong); outline: none; accent-color: var(--accent-text); transition: border-color 0.14s, box-shadow 0.14s; }
-.proc-qty input:focus { border-color: var(--accent-line); box-shadow: 0 0 0 3px var(--accent-fill); }
-.proc-qty input:disabled { opacity: 0.55; cursor: default; }
+.proc-stepper { display: inline-flex; align-items: stretch; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--bg); }
+.proc-stepper-btn { width: 38px; height: 38px; border: none; background: transparent; color: var(--muted); font-size: 19px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background-color 0.14s, color 0.14s; }
+.proc-stepper-btn:hover:not(:disabled) { background: var(--accent-fill); color: var(--text-strong); }
+.proc-stepper-btn:disabled { opacity: 0.4; cursor: default; }
+.proc-stepper-val { min-width: 50px; padding: 0 8px; display: flex; align-items: center; justify-content: center; border-left: 1px solid var(--border); border-right: 1px solid var(--border); font-family: var(--font-sans); font-size: 15px; font-weight: 600; color: var(--text-strong); font-variant-numeric: tabular-nums; }
 
 /* ---- settings ---- */
 .proc-sitetabs { display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap; }
