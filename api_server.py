@@ -1199,6 +1199,9 @@ def _run_sourcing_background(
             _run_capture.capture_query(run_id, _tier_n, _query_intent, part_key=part_key or None)
             for _idx, _cand in enumerate(result.get(_tier_key, {}).get("results", [])):
                 _cand_id = f"{_cand.get('vendor_name', '')}-t{_tier_n}-{_idx}"
+                # Capture EVERY candidate — scored OR rejected — so the flywheel
+                # sees the full verdict set (the rejected ones carry the gate's
+                # rejection_reason: the "why this was cut" signal).
                 _run_capture.capture_candidate(run_id, _tier_n, {**_cand, "candidate_id": _cand_id, "tier": _tier_n})
         _displayed = [
             {**_c, "candidate_id": f"{_c.get('vendor_name', '')}-t{_n}-{_i}", "tier": _n}
