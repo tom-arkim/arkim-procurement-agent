@@ -1,0 +1,103 @@
+{
+  "_meta": {
+    "purpose": "Detection-fix eval: query-contaminated wrong-part cases. The prior synthetic evals hit 100% and BOTH failed on the first real input because they tested clean cases and missed query-contaminated ones. This dataset exists to CATCH the live bug (a pump page ranked #1 above seals at 46%) before any fix is applied.",
+    "the_bug": "On 'Goulds 3196 mechanical seal', a PUMP (Pumpman, opaque URL shoppumps.com/category-s/355.htm) ranked #1 at 46% above real seals. Root cause: opaque URL -> detection falls back to text; the page text echoes the query term ('mechanical seal' / 'seal kit'); classify_noun_class is longest-synonym-first, so 'mechanical seal' (len 15) beat 'pump' (len 4) -> result classified SEAL -> same-class gate ~1.0 -> pump not crushed.",
+    "schema": {
+      "id": "string",
+      "kind": "live_failure | contaminated_wrong_part | true_positive | clean_negative",
+      "request": {"manufacturer": "string", "model": "string", "part_number": "string", "voltage": "string", "category": "Part | Equipment", "detected_type": "string", "hp": "string?"},
+      "result": {"vendor": "string (the vendor name — a corroborating signal for the fix)", "snippet": "string (page text; contaminated cases echo the query noun)", "url": "string", "title": "string?", "found_pn": "string | null"},
+      "expected": {"should_pass_floor": "bool", "expected_noun_class": "string | null (the class a correct detector SHOULD assign to the result)", "rationale": "string"}
+    },
+    "floor": 30.0,
+    "flag": "SCORING_V2=1, INTAKE_TYPE_AWARE=1, Stage 0 GATED",
+    "known_gap_ids": ["residual_uncorroborated_opaque_pump"],
+    "note": "The live_failure case (pumpman_pump_seal_kit_page) MUST wrongly-pass against the CURRENT (unfixed) code — that is the bug reproduced in the eval. If it does not wrongly-pass, the eval is not testing the real bug and we fix the eval before touching any code. expected_noun_class is the verdict a CORRECT dominant-class detector would reach (PUMP for a pump page, even if it mentions a seal). The residual_uncorroborated_opaque_pump case is a documented known-gap: a wrong-part result with an opaque URL AND an unclassifiable vendor/domain — the structural-signal fix cannot reach it, so it will STILL wrongly pass after the fix. It is NOT relabeled and the fix is NOT stretched to catch it; the flywheel sizes that residual with real data."
+  },
+  "cases": [
+    {
+      "id": "pumpman_pump_seal_kit_page",
+      "kind": "live_failure",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "Pumpman", "snippet": "Goulds 3196 pump with mechanical seal kit. Pumpman industrial pump distributor. In stock, ships today. Cross-reference available.", "url": "https://www.shoppumps.com/category-s/355.htm", "title": "Goulds 3196 Pump - Pumpman", "found_pn": "3196ST"},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "PUMP", "rationale": "THE LIVE BUG. A Goulds 3196 PUMP listing on Pumpman (opaque URL /category-s/355.htm, no slug). The page text mentions 'mechanical seal kit' (echoing the seal-led query). Current detector: longest-synonym-first -> 'mechanical seal' (15) beats 'pump' (4) -> SEAL -> same-class gate ~1.0 -> survives at ~46%. CORRECT verdict: the vendor 'Pumpman' + domain 'shoppumps.com' + 'pump distributor' all say PUMP; the 'seal kit' is incidental. Must be classified PUMP and crushed (different class) below floor. expected should_pass_floor=FALSE."}
+    },
+    {
+      "id": "pumpman_pump_with_mechanical_seal",
+      "kind": "contaminated_wrong_part",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "Pumpman", "snippet": "ITT Goulds 3196 pump with mechanical seal. Pumpman authorized distributor. In stock. Price on request.", "url": "https://www.shoppumps.com/category-s/355.htm", "title": "Goulds 3196 Pump with Mechanical Seal", "found_pn": null},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "PUMP", "rationale": "Contaminated: pump page whose text contains 'mechanical seal' (query echo). Current detector -> SEAL (longest synonym) -> gate ~1.0 -> wrongly survives. Correct: PUMP (vendor + 'pump' is the product; 'mechanical seal' is a component OF the pump, echoed from the query). Must FAIL floor."}
+    },
+    {
+      "id": "zoro_pump_seal_replacement_text",
+      "kind": "contaminated_wrong_part",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "Zoro", "snippet": "Goulds 3196 centrifugal pump. Mechanical seal replacement available. In stock at Zoro. Free shipping.", "url": "https://zoro.com/pump/centrifugal/goulds-3196/i/", "title": "Goulds 3196 Centrifugal Pump", "found_pn": null},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "PUMP", "rationale": "Contaminated pump-on-seal. URL slug /pump/centrifugal/ says PUMP, but snippet also says 'Mechanical seal replacement' (query echo). Current detector: URL-wins-on-disagreement -> PUMP (URL slug present) -> gate 0.1 -> crushed. This case should ALREADY fail correctly (URL slug saves it) — included to confirm the URL-slug path works and contrast with the opaque-URL Pumpman cases that don't."}
+    },
+    {
+      "id": "valve_on_bearing_request_echoed_bearing",
+      "kind": "contaminated_wrong_part",
+      "request": {"manufacturer": "SKF", "model": "6205", "part_number": "6205-2RS", "voltage": "N/A", "category": "Part", "detected_type": "ball bearing"},
+      "result": {"vendor": "ValveWorks", "snippet": "Brass ball valve 2 inch. Bearing-compatible housing. In stock. ValveWorks distributor.", "url": "https://valveworks.com/products/ball-valve-2in", "title": "Brass Ball Valve 2 Inch", "found_pn": "BV-200"},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "VALVE", "rationale": "Contaminated valve-on-bearing. Request is a ball bearing; result is a brass ball VALVE whose text mentions 'Bearing-compatible' (query echo of 'bearing'). Current detector: 'ball bearing'(len 11) or 'bearing'(7) vs 'ball valve'(9) -> longest-synonym-first may pick BEARING -> same-class gate -> wrongly survives. Correct: VALVE (the product is a valve; 'bearing-compatible' is incidental). Must FAIL floor. Tests the contamination generalizes beyond seal/pump."}
+    },
+    {
+      "id": "motor_on_seal_request_echoed_seal",
+      "kind": "contaminated_wrong_part",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "ElectricMotorCo", "snippet": "Goulds 3196 pump motor, 5HP, 3450 RPM. Shaft seal included. In stock. ElectricMotorCo.", "url": "https://electricmotorco.com/products/5hp-motor", "title": "Goulds 3196 Pump Motor 5HP", "found_pn": "EM-5HP"},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "MOTOR", "rationale": "Contaminated motor-on-seal. Result is a MOTOR whose text mentions 'Shaft seal' (query echo). Current detector: 'shaft seal'(len 10) or 'seal'(4) vs 'motor'(5) or 'pump motor' -> longest-synonym may pick SEAL -> same-class gate -> wrongly survives. Correct: MOTOR (the product; 'shaft seal included' is incidental). Must FAIL floor."}
+    },
+    {
+      "id": "impeller_on_seal_request_echoed_seal",
+      "kind": "contaminated_wrong_part",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "PumpPartsPro", "snippet": "Goulds 3196 pump impeller, 7.5 inch. Mechanical seal compatible. In stock. PumpPartsPro.", "url": "https://pumppartspro.com/products/impeller-75", "title": "Goulds 3196 Impeller 7.5 inch", "found_pn": "IMP-75"},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "IMPELLER", "rationale": "Contaminated impeller-on-seal. Result is an IMPELLER whose text mentions 'Mechanical seal compatible' (query echo). Current detector: 'mechanical seal'(15) vs 'impeller'(8) -> SEAL -> same-class gate -> wrongly survives. Correct: IMPELLER (the product; 'seal compatible' is incidental). Must FAIL floor."}
+    },
+    {
+      "id": "real_seal_specialist_must_pass",
+      "kind": "true_positive",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "Platinum Performance Products", "snippet": "Platinum Goulds 3196 mechanical seal, Type 1, 1.375 inch shaft. Part ST-1.375-T1. In stock, ships same day. Cross-reference / interchange for Goulds 3196.", "url": "https://platinumperformanceproducts.com/mechanical-seals/goulds/3196-st", "title": "Goulds 3196 Mechanical Seal - Platinum", "found_pn": "ST-1.375-T1"},
+      "expected": {"should_pass_floor": true, "expected_noun_class": "SEAL", "rationale": "True positive: a REAL seal specialist. Must STILL pass after the fix — the dominant-class detector must classify it SEAL (the product IS a seal; 'mechanical seal' is the product, not an echo) and the gate stays ~1.0. Guards against the fix over-correcting and crushing real seals."}
+    },
+    {
+      "id": "real_seal_kit_aftermarket_must_pass",
+      "kind": "true_positive",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "SealSpecialist", "snippet": "Goulds 3196 seal kit, Type 1, 1.375 inch. Replacement for Goulds 3196. Interchange. In stock, ships today.", "url": "https://sealspecialist.com/mechanical-seals/goulds/3196-seal-kit", "title": "Goulds 3196 Seal Kit", "found_pn": "3196-SK-T1"},
+      "expected": {"should_pass_floor": true, "expected_noun_class": "SEAL", "rationale": "True positive: a real seal kit aftermarket. The text says 'seal kit' (the product) and 'pump' is NOT mentioned, so no contamination. Must pass. Guards the anti-inversion: a marketplace/specialist that legitimately sells the seal must still beat a pump."}
+    },
+    {
+      "id": "real_bearing_clean_must_pass",
+      "kind": "true_positive",
+      "request": {"manufacturer": "SKF", "model": "6205", "part_number": "6205-2RS", "voltage": "N/A", "category": "Part", "detected_type": "ball bearing"},
+      "result": {"vendor": "MRO Supply", "snippet": "SKF 6205-2RS deep groove ball bearing. In stock, ships today. Add to cart. Price $14.99.", "url": "https://mrosupply.com/bearings/skf-6205-2rs/", "title": "SKF 6205-2RS Deep Groove Ball Bearing", "found_pn": "6205-2RS"},
+      "expected": {"should_pass_floor": true, "expected_noun_class": "BEARING", "rationale": "Clean-PN no-regression true positive. Must pass flag-on and flag-off. Guards against the fix perturbing clean cases."}
+    },
+    {
+      "id": "clean_pump_on_pump_request_must_pass",
+      "kind": "true_positive",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "G3196", "voltage": "460V", "category": "Equipment", "detected_type": "centrifugal pump", "hp": "5"},
+      "result": {"vendor": "Zoro", "snippet": "Goulds 3196 centrifugal pump, 5HP, 460V, 3450 RPM. In stock at Zoro. Authorized distributor.", "url": "https://zoro.com/pump/centrifugal/goulds-3196/i/", "title": "Goulds 3196 Centrifugal Pump G3196", "found_pn": "G3196"},
+      "expected": {"should_pass_floor": true, "expected_noun_class": "PUMP", "rationale": "True positive: a CORRECT pump on a PUMP request. The dominant-class detector must classify it PUMP and the gate stays ~1.0. Guards the fix doesn't penalize pumps generally — only pumps-on-seal-requests. Mirrors the redesign eval's goulds_pump_correct_on_pump_request."}
+    },
+    {
+      "id": "opaque_pump_no_contamination_clean_negative",
+      "kind": "clean_negative",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "Pumpman", "snippet": "Goulds 3196 pump. In stock, ships today. Pumpman distributor.", "url": "https://www.shoppumps.com/category-s/355.htm", "title": "Goulds 3196 Pump - Pumpman", "found_pn": null},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "PUMP", "rationale": "Clean negative: the SAME Pumpman opaque-URL pump page but WITHOUT the 'seal' contamination in the text. Current detector: 'pump' -> PUMP -> gate 0.1 -> crushed correctly (~4). Confirms the current code already handles the opaque-URL pump when the text doesn't echo the query — isolates the contamination as the sole cause of the bug."}
+    },
+    {
+      "id": "residual_uncorroborated_opaque_pump",
+      "kind": "known_gap",
+      "request": {"manufacturer": "Goulds", "model": "3196", "part_number": "UNKNOWN-PN", "voltage": "N/A", "category": "Part", "detected_type": "mechanical seal"},
+      "result": {"vendor": "MB Glick", "snippet": "Goulds 3196 pump with mechanical seal. In stock, ships today. MB Glick industrial supply.", "url": "https://mbglick.com/products/g3196-pump-unit", "title": "Goulds 3196 Pump - MB Glick", "found_pn": null},
+      "expected": {"should_pass_floor": false, "expected_noun_class": "PUMP", "rationale": "RESIDUAL KNOWN-GAP (do NOT relabel, do NOT stretch the fix). A pump page with an OPAQUE URL (/products/g3196-pump-unit — no part-type slug the dictionary reads, NOT a collection page) AND an UNCLASSIFIABLE vendor/domain ('MB Glick' / 'mbglick.com' carry no noun-class). The structural-signal fix cannot reach it (no vendor/domain class to override the snippet echo), so it STILL wrongly passes after the fix (snippet 'mechanical seal' -> SEAL -> same-class gate ~1.0 -> base survives the floor). This is the honest residual: uncorroborated opaque-URL wrong-part cases remain until the flywheel sizes them with real data (Stage 3 page-fetch/LLM, out of scope). Desired verdict FALSE; reported as known-gap, not asserted."}
+    }
+  ]
+}
