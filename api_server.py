@@ -70,6 +70,7 @@ if DEMO_MODE:
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
 from utils.models import SourcingRun
 from utils.marketplace_registry import is_marketplace
+from utils import run_capture as _run_capture  # Night 1 — RUN_CAPTURE flag-gated, inert when off
 
 import secrets
 
@@ -1183,6 +1184,32 @@ def _run_sourcing_background(
             orm.current_phase = Phase.COMPARISON.value
             orm.updated_at = datetime.now(timezone.utc)
             session.commit()
+    # Night 1 — capture the sourcing result set (RUN_CAPTURE-gated, fail-soft).
+    # Captured HERE (not at the deep `[Sourcing]` print sites in
+    # enterprise_search.py) because run_id is in scope only at this boundary —
+    # the per-tier query builders have no run_id (I2 EXPECTED, confirmed).
+    # query_issued captures the per-tier INTENT derived from specs (the literal
+    # provider query string is built deeper and is a flagged not-captured gap).
+    try:
+        _mfr = specs_dict.get("manufacturer") or ""
+        _model = specs_dict.get("model") or ""
+        _pn = specs_dict.get("part_number") or ""
+        _query_intent = " ".join(p for p in (_mfr, _model, _pn) if p).strip() or "(spec-based)"
+        for _tier_key, _tier_n in (("tier_1", 1), ("tier_2", 2), ("tier_3", 3)):
+            _run_capture.capture_query(run_id, _tier_n, _query_intent, part_key=part_key or None)
+            for _idx, _cand in enumerate(result.get(_tier_key, {}).get("results", [])):
+                _cand_id = f"{_cand.get('vendor_name', '')}-t{_tier_n}-{_idx}"
+                _run_capture.capture_candidate(run_id, _tier_n, {**_cand, "candidate_id": _cand_id, "tier": _tier_n})
+        _displayed = [
+            {**_c, "candidate_id": f"{_c.get('vendor_name', '')}-t{_n}-{_i}", "tier": _n}
+            for _tk, _n in (("tier_1", 1), ("tier_2", 2), ("tier_3", 3))
+            for _i, _c in enumerate(result.get(_tk, {}).get("results", []))
+            if not _c.get("rejection_reason")
+        ]
+        _run_capture.capture_results_displayed(run_id, _displayed)
+    except Exception:
+        # Capture must never break sourcing write-back; run_capture counts its own failures.
+        pass
     log.info("[%s] Sourcing complete → comparison", run_id)
 
 
@@ -1657,6 +1684,11 @@ def send_message(run_id: str, body: SendMessageRequest, request: Request):
     thread = _messages.setdefault(run_id, [])
     thread.append({"id": str(uuid.uuid4()), "role": "user",
                    "content": body.content, "created_at": now})
+    # Night 1 — capture the user turn (RUN_CAPTURE-gated, fail-soft, no-op when off).
+    # The user/agent turn is NOT durably persisted anywhere today (in-memory
+    # `_messages`); this is the first durable home (I1 gap). Stores text as-is
+    # (no redaction pipeline exists — I3 default; flagged PII surface).
+    _run_capture.capture_turn(run_id, "user", body.content)
 
     # Find the last agent clarification question for context
     prior_question: Optional[str] = None
@@ -1757,6 +1789,17 @@ def send_message(run_id: str, body: SendMessageRequest, request: Request):
         "created_at": now,
     }
     thread.append(agent_reply)
+    # Night 1 — capture the agent reply + the intake result for this turn.
+    _run_capture.capture_turn(run_id, "agent", reply_text)
+    _run_capture.capture_intake_result(
+        run_id,
+        sufficient=bool(result.get("sufficient")),
+        proceed_state=proceed_state or None,
+        manufacturer_confidence=result.get("manufacturer_confidence"),
+        part_id_confidence=result.get("part_id_confidence"),
+        asset_specs=result.get("asset_specs"),
+        follow_up_question=result.get("follow_up_question"),
+    )
 
     return SendMessageResponse(
         run_id=run_id,
@@ -1927,6 +1970,18 @@ async def upload_nameplate(
         "created_at": now,
     }
     thread.append(agent_reply)
+    # Night 1 — capture the nameplate upload turn + intake result (RUN_CAPTURE-gated).
+    _run_capture.capture_turn(run_id, "agent", reply_text)
+    if result is not None:
+        _run_capture.capture_intake_result(
+            run_id,
+            sufficient=bool(result.get("sufficient")),
+            proceed_state=proceed_state or None,
+            manufacturer_confidence=result.get("manufacturer_confidence"),
+            part_id_confidence=result.get("part_id_confidence"),
+            asset_specs=result.get("asset_specs"),
+            follow_up_question=result.get("follow_up_question"),
+        )
 
     return {
         "run_id":   run_id,
@@ -2086,6 +2141,9 @@ def select_candidate(run_id: str, body: SelectCandidateRequest):
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the select-candidate user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "select_candidate",
+                                     detail={"candidate_id": body.candidate_id, "tier": body.tier})
     return {"run_id": run_id, "phase": Phase.PENDING_FIRST_APPROVAL.value}
 
 
@@ -2234,6 +2292,11 @@ def create_order_now(run_id: str, body: OrderNowRequest):
             run.updated_at = now
             phase = run.current_phase
             session.commit()
+            # Night 1 — capture the order-now user action (at/above-threshold path).
+            _run_capture.capture_user_action(run_id, "order_now",
+                                             detail={"candidate_id": body.candidate_id, "tier": body.tier,
+                                                     "quantity": qty, "channel": channel,
+                                                     "pending_approval": True})
             return {"pending_approval": True, "order": None, "phase": phase}
 
         # Sub-threshold (auto-approved, 0 approvers): advance the run THROUGH approval so
@@ -2265,6 +2328,11 @@ def create_order_now(run_id: str, body: OrderNowRequest):
     if not order:
         raise HTTPException(status_code=500, detail="Order capture failed")
     _persist_order_on_run(run_id, order)
+    # Night 1 — capture the order-now user action (sub-threshold path; the
+    # at/above-threshold path returns earlier and is captured below).
+    _run_capture.capture_user_action(run_id, "order_now",
+                                     detail={"candidate_id": body.candidate_id, "tier": body.tier,
+                                             "quantity": qty, "channel": channel})
     return {"pending_approval": False, "order": order, "phase": phase}
 
 
@@ -2340,6 +2408,9 @@ def approve_run(run_id: str, body: ApproveRequest, caller: Optional[Caller] = De
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the approve user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "approve",
+                                     detail={"approver_role": body.approver_role, "next_phase": next_phase.value})
     return {"run_id": run_id, "phase": next_phase.value}
 
 
@@ -2373,6 +2444,8 @@ def reject_run(run_id: str, body: RejectRequest):
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the reject user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "reject", detail={"approver_role": body.approver_role})
     return {"run_id": run_id, "phase": Phase.COMPARISON.value}
 
 
@@ -2439,6 +2512,8 @@ def confirm_intake(
     background_tasks.add_task(
         _run_sourcing_background, run_id, specs_dict, urgency_factor, warranty_status
     )
+    # Night 1 — capture the confirm-intake user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "confirm_intake", detail={"exact_only": exact_only})
     return {"run_id": run_id, "phase": Phase.SOURCING.value}
 
 
@@ -2464,6 +2539,8 @@ def initiate_outreach(run_id: str, body: OutreachRequest):
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the outreach user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "outreach", detail={"candidate_ids": body.candidate_ids})
     return {
         "run_id": run_id,
         "candidates_contacted": len(body.candidate_ids),
@@ -2602,7 +2679,14 @@ def health():
     # demo_mode lets the frontend derive the demo state from the backend it's actually talking
     # to (single source of truth) — used to gate transparency copy (e.g. drop the gated-off
     # Tier-1 "Arkim network" mention from the sourcing loader) so the UI matches what runs.
-    return {"status": "ok", "version": "1.0.0-phase1", "demo_mode": DEMO_MODE}
+    body = {"status": "ok", "version": "1.0.0-phase1", "demo_mode": DEMO_MODE}
+    # Night 1 — surface the capture-write failure counter ONLY when RUN_CAPTURE
+    # is on, so the flag-off health response stays byte-identical (T5 inertness).
+    # The existing test_health assertion (test_api_server.py) pins the flag-off
+    # body and stays green untouched.
+    if _run_capture.RUN_CAPTURE:
+        body["capture_failures"] = _run_capture.capture_failures()
+    return body
 
 
 @app.get("/api/debug/llm")
