@@ -221,15 +221,115 @@ def classify_noun_class_from_url(url: str) -> Optional[str]:
     return None
 
 
+def _registered_domain(url: str) -> Optional[str]:
+    """Return the registered domain (e.g. 'shoppumps.com' from a full URL),
+    stripped of www./subdomains. Structural identity signal — what the vendor
+    IS, immune to query echo. Returns None on parse failure.
+    """
+    if not url:
+        return None
+    from urllib.parse import urlparse
+    try:
+        hostname = (urlparse(url.lower()).hostname or "").replace("www.", "")
+    except Exception:
+        return None
+    if not hostname:
+        return None
+    # Reduce to the last two labels (the registered domain). Coarse heuristic
+    # (ignores public-suffix edge cases like .co.uk) but adequate for a noun-
+    # class corroboration signal — false negatives (None) are safe.
+    parts = [p for p in hostname.split(".") if p]
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return hostname or None
+
+
+def classify_noun_class_from_domain(url: str) -> Optional[str]:
+    """Classify a result by its registered DOMAIN (vendor identity signal).
+
+    Unlike ``classify_noun_class_from_url`` (path-only by design, so
+    ``pumpcatalog.com`` does not classify a seal page as a pump), THIS reads the
+    domain itself — ``shoppumps.com`` -> PUMP, ``sealspecialist.com`` -> SEAL.
+    The domain is a structural signal about what the vendor sells, so it is a
+    legitimate noun-class corroboration on the opaque-URL fallback path (where
+    there is no path slug to read). Returns the canonical label or None.
+    """
+    domain = _registered_domain(url)
+    if not domain:
+        return None
+    label = domain.rsplit(".", 1)[0]  # drop the TLD
+    if not label:
+        return None
+    return classify_noun_class(label)
+
+
 def classify_result_noun_class(title: str, url: str) -> Optional[str]:
     """Combine title + URL-slug evidence into a single noun-class verdict for a
     result. Title-only and URL-only both classify; if they disagree, the URL
     wins (the vendor's own category breadcrumb is more authoritative than
     marketing title copy). Either-way-undetectable -> None (caller applies the
     0.4-0.5 floor, never zero).
+
+    Backward-compatible 2-arg form (no vendor) — kept for existing callers/tests.
+    Does NOT apply the dominant-class structural-signal logic; use
+    ``classify_result_noun_class_dominant`` (which takes the vendor) for the
+    opaque-URL fallback where query-echo contamination bites.
     """
     url_cls = classify_noun_class_from_url(url)
     title_cls = classify_noun_class(title)
     if url_cls:
         return url_cls
     return title_cls
+
+
+def classify_result_noun_class_dominant(
+    vendor: Optional[str], title: Optional[str], snippet: str, url: str,
+) -> Optional[str]:
+    """Dominant-class result noun-class detection (the query-echo fix).
+
+    Problem this solves: on the opaque-URL fallback path, detection falls back
+    to the snippet, which may ECHO the query noun (a pump page that mentions
+    "mechanical seal" because the query asked for a seal). The legacy
+    longest-synonym-first rule then lets the echoed phrase ("mechanical seal",
+    len 15) beat the product noun ("pump", len 4) -> wrong class -> same-class
+    TypeGate ~1.0 -> wrong part survives.
+
+    Fix: structural identity signals — the VENDOR NAME and the registered
+    DOMAIN — are immune to query echo (they describe what the vendor IS, not
+    what the query asked for). On the opaque-URL path, a structural signal
+    overrides a snippet echo. This generalizes across all noun-classes (no
+    seal/pump hand-tuning).
+
+    Resolution order:
+      1. URL path slug -> authoritative (vendor's own category breadcrumb).
+      2. Opaque URL -> structural signals (vendor name + registered domain).
+         If they yield a class, return it (overrides any snippet echo).
+         Vendor + domain are aggregated; if they agree, that's the verdict. If
+         they disagree, the vendor name wins (it is the more deliberate identity
+         signal than a domain coinage).
+      3. No structural signal -> fall back to the legacy text verdict (title +
+         snippet, longest-synonym-first via ``classify_result_noun_class``).
+         This is deliberately conservative: without structural corroboration we
+         do NOT query-echo-flip the text verdict, because a real "mechanical
+         seal for Goulds 3196 pump" page (a SEAL page that names its application)
+         must NOT be collateral. The residual uncorroborated-opaque-URL case is
+         a documented known-gap sized by the flywheel with real data.
+
+    ``snippet`` is accepted (and used in the text fallback) because the live
+    path may pass only a snippet when no clean title is available.
+    """
+    # 1. URL path slug — authoritative, unchanged.
+    url_cls = classify_noun_class_from_url(url)
+    if url_cls:
+        return url_cls
+
+    # 2. Structural signals (vendor name + registered domain) — immune to echo.
+    vendor_cls = classify_noun_class(vendor) if vendor else None
+    domain_cls = classify_noun_class_from_domain(url)
+    if vendor_cls or domain_cls:
+        # Vendor name is the more deliberate identity signal than a domain
+        # coinage; prefer it when present.
+        return vendor_cls or domain_cls
+
+    # 3. No structural signal -> conservative legacy text verdict (no echo-flip).
+    return classify_result_noun_class(title if title else snippet, url)

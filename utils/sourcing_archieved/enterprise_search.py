@@ -186,7 +186,13 @@ def _call_enterprise_api(specs: AssetSpecs,
                 price = None
 
             snippet = snippet_map.get(url, "")
-            suit    = _compute_suitability_score(specs, snippet, url, found_pn)
+            # T3 (detection-fix): pass the vendor name so the dominant-class
+            # detector can use it as a structural signal on the opaque-URL path,
+            # overriding a query-echoed phrase in the snippet (a pump page that
+            # mentions 'mechanical seal' still classifies PUMP via vendor
+            # 'Pumpman'). Without this the live path would test a code path the
+            # fix can't reach — the clean-title trap, now applied to vendor.
+            suit    = _compute_suitability_score(specs, snippet, url, found_pn, vendor=vendor)
 
             if sanity_flagged:
                 suit = 0.0
@@ -519,7 +525,9 @@ def _discover_national_specialists(specs: AssetSpecs,
 
         # Pass found_pn to scoring only when we have a confirmed match
         scoring_pn = found_pn if pn_status in ("exact_match", "partial_match") else None
-        suit = _compute_suitability_score(specs, snippet, url or "", found_pn=scoring_pn)
+        # T3 (detection-fix): pass `name` (the Tier-3 vendor/specialist name) as
+        # the vendor structural signal for the dominant-class detector.
+        suit = _compute_suitability_score(specs, snippet, url or "", found_pn=scoring_pn, vendor=name)
 
         # Check for OEM Authorized Distributor BEFORE the suitability cap so we can bypass it
         _is_oem_auth = _is_oem_authorized_distributor(
@@ -772,7 +780,8 @@ def _discover_aftermarket_specialists(
                     snippet = stext
                     break
 
-        suit = _compute_suitability_score(specs, snippet, url or "", found_pn=None)
+        # T3 (detection-fix): pass `name` as the vendor structural signal.
+        suit = _compute_suitability_score(specs, snippet, url or "", found_pn=None, vendor=name)
         # Aftermarket: -15 confidence penalty (match by inference, not by PN)
         conf = max(0.0, _compute_confidence_score(specs, suit, "Aftermarket Equivalent", "Unknown") - 15.0)
 

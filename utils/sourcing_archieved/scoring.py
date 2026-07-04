@@ -26,6 +26,7 @@ from utils.sourcing_archieved.part_type_classes import (
     classify_noun_class,
     classify_noun_class_from_url,
     classify_result_noun_class,
+    classify_result_noun_class_dominant,
 )
 
 
@@ -281,29 +282,35 @@ def _query_noun_class(specs) -> Optional[str]:
     return None
 
 
-def _result_noun_class(snippet: str, url: str, title: Optional[str] = None) -> Optional[str]:
-    """Detect a RESULT's noun-class from title + URL slug, falling back to the
-    snippet when no title is supplied (the scorer's call sites pass snippet+url
-    but not always a separate title). Returns a canonical label or None
-    (undetectable). Pure; no score effect.
+def _result_noun_class(snippet: str, url: str, title: Optional[str] = None,
+                      vendor: Optional[str] = None) -> Optional[str]:
+    """Detect a RESULT's noun-class, using the dominant-class path when the
+    vendor is known. Returns a canonical label or None (undetectable). Pure.
 
-    URL wins on disagreement (vendor's own category breadcrumb > marketing copy)
-    per classify_result_noun_class; when no title is given, the snippet is used
-    as the text signal alongside the URL.
+    When ``vendor`` is supplied, uses ``classify_result_noun_class_dominant``
+    (the query-echo fix): on the opaque-URL fallback path, structural signals
+    (vendor name + registered domain) override a snippet echo of the query noun.
+    When ``vendor`` is None, falls back to the legacy title+url text verdict.
+    URL slug always authoritative when present.
     """
+    if vendor:
+        return classify_result_noun_class_dominant(vendor, title, snippet, url)
     text = title if title else snippet
     return classify_result_noun_class(text, url)
 
 
 def _detect_noun_classes(specs, snippet: str, url: str,
-                         title: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+                         title: Optional[str] = None,
+                         vendor: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
     """Return (query_class, result_class) for a (request, result) pair.
 
     Gated caller convention: only invoked under SCORING_V2 (T3 wires it in; T4
     consumes the verdict). Both may be None (undetectable) — that is a real
     verdict, not an error, and the TypeGate applies the undetectable floor.
+
+    ``vendor`` enables the dominant-class query-echo fix on the opaque-URL path.
     """
-    return _query_noun_class(specs), _result_noun_class(snippet, url, title)
+    return _query_noun_class(specs), _result_noun_class(snippet, url, title, vendor)
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +447,8 @@ def _type_gate(query_cls: Optional[str], result_cls: Optional[str],
 
 def _compute_suitability_score(specs, snippet: str, url: str,
                                 found_pn: Optional[str] = None,
-                                title: Optional[str] = None) -> float:
+                                title: Optional[str] = None,
+                                vendor: Optional[str] = None) -> float:
     """0-100 score: how well this vendor/page matches the sourcing requirement.
 
     Primary key -- PN mention (guardrail):
@@ -471,7 +479,7 @@ def _compute_suitability_score(specs, snippet: str, url: str,
     # change yet. The TypeGate (T4) consumes _last_noun_classes. Flag-off never
     # runs this, so the score stays byte-identical to pre-T3.
     if SCORING_V2:
-        _q_cls, _r_cls = _detect_noun_classes(specs, snippet, url, title)
+        _q_cls, _r_cls = _detect_noun_classes(specs, snippet, url, title, vendor)
         _last_noun_classes["query"] = _q_cls
         _last_noun_classes["result"] = _r_cls
     else:
