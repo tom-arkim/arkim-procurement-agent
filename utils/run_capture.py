@@ -328,6 +328,15 @@ OUTCOME_ALL_REJECTED = "all_rejected"
 OUTCOME_REPHRASED = "rephrased"
 OUTCOME_INCOMPLETE = "incomplete"  # not enough signal yet
 
+# User actions that act on sourcing RESULTS (a completion signal), vs
+# `confirm_intake` which is a phase-transition action (pre-results — it advances
+# the run to sourcing, it is NOT "acted on a result"). The outcome classifier
+# only treats result-actions as `completed_with_action`.
+_COMPLETION_ACTIONS = {
+    "select_candidate", "order_now", "approve", "reject",
+    "outreach", "save_outreach", "rfq_draft", "mark_delivered",
+}
+
 
 def _events_for(run_id: str) -> list[Dict[str, Any]]:
     """Read all events for a run, oldest-first (helper for outcome computation)."""
@@ -360,12 +369,19 @@ def compute_outcome(run_id: str) -> str:
         return OUTCOME_INCOMPLETE
 
     types = [e["event_type"] for e in events]
-    has_user_action = USER_ACTION in types
     has_displayed = RESULTS_DISPLAYED in types
     has_scored = CANDIDATE_SCORED in types
     has_rejected = CANDIDATE_REJECTED in types
+    # A "completion" is a user action that acts on sourcing RESULTS (select /
+    # order / approve / reject / outreach / ...). `confirm_intake` is a
+    # phase-transition action (pre-results — it advances the run to sourcing),
+    # NOT a completion, so it does not by itself mark a run completed.
+    has_completion_action = any(
+        e["event_type"] == USER_ACTION and e["payload"].get("action") in _COMPLETION_ACTIONS
+        for e in events
+    )
 
-    if has_user_action:
+    if has_completion_action:
         return OUTCOME_COMPLETED_WITH_ACTION
 
     if has_displayed:
