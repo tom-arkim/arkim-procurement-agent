@@ -314,6 +314,53 @@ def _detect_noun_classes(specs, snippet: str, url: str,
 
 
 # ---------------------------------------------------------------------------
+# Cache type-gate (CLEANUP §7.1 / Phase 1 T2)
+# ---------------------------------------------------------------------------
+# A cache-served candidate (price_db hit or known_parts edge) bypasses
+# _compute_suitability_score, so it is never re-checked against the REQUEST's
+# part type. A poisoned cache (a motor URL cached under the shared
+# unknown|UNKNOWN-PN bucket, or a pump edge cached under a seal part-key) then
+# surfaces on an unrelated request at a hard-coded score. The null-PN guard
+# (T1) stops NEW contamination of the price_db bucket; this gate catches
+# wrong-PART-TYPE cache entries that already exist or slip in via known_parts
+# (which keys on manufacturer+PN, so a mis-keyed edge can still score >=30).
+#
+# Verdict (Phase 1 confirmed): classify the cached candidate's noun-class from
+# its vendor + url (no snippet is stored in either cache) and compare to the
+# request's noun-class:
+#   - request class None  -> keep (neutral; we can't gate on a type we couldn't
+#     detect from the request — mirrors _TYPE_GATE_QUERY_UNDETECTABLE = 1.0).
+#   - result class None   -> keep (undetectable — the ESCI floor: never drop a
+#     possibly-correct result whose category isn't legible from vendor+url).
+#   - same class          -> keep.
+#   - confirmed-different -> DROP (both non-None and unequal: a motor page on a
+#     valve request, a pump page on a motor request).
+#
+# This is annotate-don't-remove's inverse on the cache path: the cache already
+# bypassed the scorer, so there is no score to gate multiplicatively — the
+# wrong-type entry is dropped outright (it is not re-discoverable evidence, it
+# is a stale remembered row, and serving it on an unrelated request is the
+# contamination). Re-discovery on the next fresh run repopulates correctly.
+def _cache_type_gate(specs, vendor: Optional[str], url: Optional[str]) -> bool:
+    """True if a cache-served candidate should be SERVED on this request.
+
+    Uses ``classify_result_noun_class_dominant`` (vendor + url; no snippet is
+    stored in either cache) against the request noun-class from
+    ``_query_noun_class(specs)``. See module comment for the verdict table.
+    Conservative on every undetectable case (returns True = keep); drops only
+    on a confirmed different class. Pure; no score effect, no flag gating —
+    this is the cache path's type-safety check, independent of SCORING_V2.
+    """
+    q_cls = _query_noun_class(specs)
+    if q_cls is None:
+        return True
+    r_cls = classify_result_noun_class_dominant(vendor, None, "", url or "")
+    if r_cls is None:
+        return True
+    return r_cls == q_cls
+
+
+# ---------------------------------------------------------------------------
 # TypeGate (SCORING_V2 / T4) — confidence-aware multiplicative part-type gate
 # ---------------------------------------------------------------------------
 

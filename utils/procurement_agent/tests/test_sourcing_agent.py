@@ -734,6 +734,104 @@ class TestTier2CacheSuitability:
 
 
 # ---------------------------------------------------------------------------
+# Cache-hit type-gate (CLEANUP §7.1 / Phase 1 T2)
+# ---------------------------------------------------------------------------
+# A price_db cache hit bypasses _compute_suitability_score, so a wrong-PART-TYPE
+# cached entry (a motor URL cached, then served on a valve request) would surface
+# at the hard-coded 50.0 score. T2 drops a confirmed-different-type entry; keeps
+# same-class and undetectable entries. The null-PN guard (T1) already prevents
+# PN-less specs from reading the cache, so these tests use a real identity (PN
+# present) — the gate is belt-and-suspenders for a real key that cached a
+# wrong-type listing (e.g. a category page saved under a real PN).
+class TestTier2CacheTypeGate:
+    """T2 — cache-served candidates are type-gated against the request's noun-class."""
+
+    def _run_tier2_with_cache(self, specs: dict, cache: dict) -> list[dict]:
+        agent = SourcingAgent()
+        run   = _make_run(specs=specs)
+        # _make_run injects voltage/category if absent; _dict_to_specs filters to
+        # AssetSpecs fields so extra keys are tolerated.
+        sp = agent._dict_to_specs(run.asset_specs_json)
+        weights = _URGENCY_WEIGHTS["predictive"]
+        with patch("utils.price_db.get_cached_prices", return_value=cache):
+            with patch("utils.sourcing_archieved.tavily_client._search_vendor_prices", return_value=[]):
+                with patch("utils.sourcing_archieved.llm_parsing._llm_parse_results", return_value=[]):
+                    return agent._run_tier2(sp, weights)
+
+    # The live contamination case: a motor URL cached, then served on a VALVE
+    # request. Confirmed-different (MOTOR != VALVE) -> dropped.
+    def test_motor_url_dropped_on_valve_request(self):
+        valve_specs = {
+            "manufacturer": "Tri-Clover", "model": "X", "part_number": "TV-2IN-TC",
+            "voltage": "N/A", "detected_type": "2 inch stainless ball valve tri-clamp",
+        }
+        cache = {
+            "eMotors Direct": {
+                "price": 500.0, "lead_days": 5,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://us.emotorsdirect.ca/item/baldor-bp5000bk08sp",
+            }
+        }
+        results = self._run_tier2_with_cache(valve_specs, cache)
+        assert not any(r["vendor_name"] == "eMotors Direct" for r in results), \
+            "Motor URL must be dropped on a valve request (confirmed-different noun-class)"
+
+    # Same cached entry, served on a MOTOR request -> same class -> kept.
+    def test_motor_url_kept_on_motor_request(self):
+        motor_specs = {
+            "manufacturer": "Baldor", "model": "EM3546T", "part_number": "EM3546T",
+            "voltage": "460V", "detected_type": "1.5 HP motor 56C frame",
+        }
+        cache = {
+            "eMotors Direct": {
+                "price": 500.0, "lead_days": 5,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://us.emotorsdirect.ca/item/baldor-bp5000bk08sp",
+            }
+        }
+        results = self._run_tier2_with_cache(motor_specs, cache)
+        assert any(r["vendor_name"] == "eMotors Direct" for r in results), \
+            "Motor URL must be kept on a motor request (same noun-class)"
+
+    # Undetectable result class (vendor + url carry no noun signal) -> kept on
+    # any request (the ESCI floor: never drop a possibly-correct result whose
+    # category isn't legible). Mirrors the existing CachedVendor test fixture.
+    def test_undetectable_vendor_survives(self):
+        valve_specs = {
+            "manufacturer": "Tri-Clover", "model": "X", "part_number": "TV-2IN-TC",
+            "voltage": "N/A", "detected_type": "2 inch stainless ball valve tri-clamp",
+        }
+        cache = {
+            "CachedVendor": {
+                "price": 250.0, "lead_days": 3,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://cachedvendor.com/product/PN-TEST-001",
+            }
+        }
+        results = self._run_tier2_with_cache(valve_specs, cache)
+        assert any(r["vendor_name"] == "CachedVendor" for r in results), \
+            "Undetectable-class cached entry must survive (no signal to gate on)"
+
+    # Request class undetectable -> keep everything (neutral; can't gate on a
+    # type we couldn't detect from the request). Mirrors _TYPE_GATE_QUERY_UNDETECTABLE.
+    def test_undetectable_request_keeps_wrong_type(self):
+        unk_specs = {
+            "manufacturer": "Acme", "model": "X", "part_number": "ACME-999",
+            "voltage": "N/A", "detected_type": "industrial spare",
+        }
+        cache = {
+            "eMotors Direct": {
+                "price": 500.0, "lead_days": 5,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://us.emotorsdirect.ca/item/baldor-bp5000bk08sp",
+            }
+        }
+        results = self._run_tier2_with_cache(unk_specs, cache)
+        assert any(r["vendor_name"] == "eMotors Direct" for r in results), \
+            "Undetectable request class must keep cached entries (neutral gate)"
+
+
+# ---------------------------------------------------------------------------
 # Cross-tier dedup — by vendor name OR identical listing URL (sourcing honesty).
 # Resolves the URL-identical subset of §5a; NOT the alias root cause (same supplier
 # under different names at DIFFERENT urls — e.g. OTC — still needs entity resolution).

@@ -24,6 +24,7 @@ from utils.sourcing_archieved.scoring import (
     _home_field_bonus,
     _compute_confidence_score,
     _is_collection_url,
+    _cache_type_gate,
 )
 from utils.sourcing_archieved.filtering import _counterfeit_risk_flag
 from utils.sourcing_archieved.tavily_client import _search_vendor_prices, _build_tier3_query
@@ -89,6 +90,17 @@ def _call_enterprise_api(specs: AssetSpecs,
             source     = data.get("source", "live")
             label      = "Pre-Negotiated" if source == "rfq" else "Cached"
             cached_url = data.get("url")
+            # T2 — cache type-gate. A price_db hit bypasses _compute_suitability_score,
+            # so without this a poisoned/wrong-type cached entry (a motor URL under a
+            # valve request, etc.) surfaces at the hard-coded score below. Drop a
+            # confirmed-different-type entry outright; keep undetectable + same-class.
+            # The null-PN guard (T1) already returns {} for PN-less specs, so this gate
+            # is belt-and-suspenders for real-identity keys that nonetheless cached a
+            # wrong-type listing (e.g. a category page saved under a real PN).
+            if not _cache_type_gate(specs, vendor_name, cached_url):
+                print(f"[Sourcing] Price DB HIT DROPPED (type-gate): {vendor_name} "
+                      f"url={cached_url} (cached under a different noun-class than request)")
+                continue
             # Option B: no snippet is stored in the cache, so _compute_suitability_score
             # cannot run. A confirmed price is strong evidence of a real product listing;
             # use a floor-clearing default so cache hits survive the 30% suitability gate.

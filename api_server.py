@@ -741,6 +741,30 @@ def _vendor_type(merchant_type: str) -> str:
     }.get(merchant_type, "NationalDistributor")
 
 
+def _specs_from_dict(specs_dict: dict):
+    """Build an AssetSpecs from the run's asset_specs_json dict for the cache path.
+
+    Minimal, mock-independent field-filter (mirrors SourcingAgent._dict_to_specs'
+    filtering without coupling the cache path to the SourcingAgent class — which
+    tests mock, and which the discovery path below replaces wholesale). Used only
+    to detect the request noun-class for the T2 cache type-gate; on any failure
+    the caller treats the class as undetectable (None) and keeps cached edges.
+    """
+    import dataclasses
+    from utils.models import AssetSpecs
+    fields = {f.name for f in dataclasses.fields(AssetSpecs)}
+    filtered = {k: v for k, v in (specs_dict or {}).items() if k in fields}
+    required = {"manufacturer", "model", "part_number", "voltage"}
+    kwargs = {k: v for k, v in filtered.items() if k not in required}
+    return AssetSpecs(
+        manufacturer=filtered.get("manufacturer") or "Unknown",
+        model=filtered.get("model") or "Unknown",
+        part_number=filtered.get("part_number") or "UNKNOWN-PN",
+        voltage=filtered.get("voltage") or "N/A",
+        **kwargs,
+    )
+
+
 def _pn_match_level(opt: dict, tier: int) -> str:
     if tier == 1:
         return "exact" if opt.get("found_part_number") else "none"
@@ -968,7 +992,7 @@ def _transform_sourcing_results(raw: dict, quote_index: Optional[dict] = None) -
 # Background sourcing task
 # ---------------------------------------------------------------------------
 
-def _result_from_cached_edges(edges: list) -> dict:
+def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = None) -> dict:
     """Reconstruct the SourcingAgent result shape from cached known_parts edges, so a
     cache hit flows through the same transform/persist path without re-discovery.
 
@@ -989,8 +1013,21 @@ def _result_from_cached_edges(edges: list) -> dict:
     score >=30) — clearing those requires the query fix (Fix A) + clearing the
     poisoned cache key (Fix B2), not this floor. Re-uses the same
     TIER_SURFACE_MIN_SUITABILITY constant and the annotate-then-skip discipline
-    the SourcingAgent + _transform_sourcing_results use."""
+    the SourcingAgent + _transform_sourcing_results use.
+
+    T2 — cache type-gate (CLEANUP §7.1 / Phase 1): in addition to the floor, a
+    cached edge is DROPPED when its noun-class (classified from vendor + url) is
+    confirmed DIFFERENT from the request's noun-class. This catches the
+    wrong-PART-TYPE case the floor misses (the :987-990 comment above): a pump
+    edge cached under a seal part-key can still score >=30, but it is NOT a
+    seal, so on a seal request it is now dropped. ``request_noun_class`` is the
+    request's detected noun-class (from ``scoring._query_noun_class``), threaded
+    in from the call site; None (request undetectable) → keep everything
+    (neutral, mirrors the TypeGate's query-undetectable floor). Undetectable
+    result class → keep (ESCI floor). Same class → keep. Confirmed-different
+    → drop."""
     from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+    from utils.sourcing_archieved.scoring import classify_result_noun_class_dominant
     tiers: dict = {1: [], 2: [], 3: []}
     for e in edges:
         price = e.get("price")
@@ -1026,6 +1063,19 @@ def _result_from_cached_edges(edges: list) -> dict:
                 f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
             )
             continue
+        # T2 — cache type-gate: drop a confirmed-different-type cached edge. The
+        # floor above catches below-score edges; this catches wrong-PART-TYPE
+        # edges that score well (the :987-990 known-gap, now closed).
+        if request_noun_class is not None:
+            r_cls = classify_result_noun_class_dominant(
+                cand["vendor_name"], None, "", cand.get("source_url") or "")
+            if r_cls is not None and r_cls != request_noun_class:
+                print(
+                    f"[Sourcing] Rejected cached edge (type_gate): "
+                    f"{cand['vendor_name']} result_class={r_cls} "
+                    f"!= request_class={request_noun_class}"
+                )
+                continue
         t = e.get("tier") if e.get("tier") in (1, 2, 3) else (3 if price is None else 2)
         tiers[t].append(cand)
 
@@ -1070,12 +1120,25 @@ def _run_sourcing_background(
     part_key = ""
     try:
         from utils import known_parts
+        from utils.sourcing_archieved.scoring import _query_noun_class
         part_key = known_parts.canonical_part_key(
             specs_dict.get("manufacturer"), specs_dict.get("part_number"))
         if part_key and not specs_dict.get("exact_only"):
             edges = known_parts.get_edges(part_key)
             if edges:
-                result = _result_from_cached_edges(edges)
+                # T2 — detect the request's noun-class once, thread it into the
+                # cache reconstruction so wrong-PART-TYPE cached edges are dropped
+                # (a pump edge cached under a seal part-key, etc.). None on
+                # undetectable → _result_from_cached_edges keeps everything.
+                # Built directly off AssetSpecs fields (not SourcingAgent._dict_to_specs)
+                # so the cache path doesn't depend on the SourcingAgent class — which
+                # tests mock, and which the discovery path below replaces wholesale.
+                req_cls = None
+                try:
+                    req_cls = _query_noun_class(_specs_from_dict(specs_dict))
+                except Exception:
+                    req_cls = None
+                result = _result_from_cached_edges(edges, request_noun_class=req_cls)
                 log.info("[%s] known_parts cache HIT (%d suppliers) — skipping discovery", run_id, len(edges))
     except Exception as exc:
         log.warning("[%s] known_parts cache read failed: %s", run_id, exc)
