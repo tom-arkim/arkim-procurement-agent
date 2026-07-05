@@ -284,6 +284,16 @@ Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AW
 | **Risk / impact** | Ranking/gating may be off at the margins until tuned against real results; defaults are informed but not validated at scale. |
 | **Recommended action** | Once live sourcing data accumulates, calibrate the gate threshold + weights against real outcomes (precision/recall on labeled results); lock in with a regression fixture. |
 
+### 7.5 Test conftest does not isolate `brand_intelligence._DB_PATH` — live runs pollute test outcomes
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/tests/conftest.py` (isolates persistence + supplier_registry, but NOT `brand_intelligence`) |
+| **Kind** | Test isolation gap — on-disk store state leaks into tests |
+| **Why it exists** | `conftest.py` was built before `brand_intelligence.sqlite` carried test-relevant state. `_seeded_tier3_candidates` reads `get_brand_relationships`, which reads the real DB; a row written by a live harness/dev run (e.g. `grundfos\|pump` with 2 authorized_service_brands) makes seeding fire and prepends non-pivot candidates, flipping `test_capability_pivot_tags_results` red regardless of test order. |
+| **Risk / impact** | A test that asserts on seeding/sourcing behavior is non-deterministic in any working copy that has run live sourcing (harness, dev UI). Masked as "green" only on a pristine DB. |
+| **Recommended action** | Structural: add `brand_intelligence._DB_PATH` (and audit other non-isolated on-disk stores tests may read — `run_capture.sqlite`, `price_db.json`) to the conftest isolation set alongside `supplier_registry`/`known_parts`, so the suite is hermetic regardless of dev working-copy state. The per-test monkeypatch in `test_capability_pivot_tags_results` is a band-aid for one test; the conftest fix covers the class. |
+
 ---
 
 *Items are ordered by section, not by priority. All items are prototype-era technical debt —

@@ -562,7 +562,20 @@ class TestTier3CapabilityPivot:
             seeded_results = [r for r in result if r.get("is_mock")]
             assert pivot_results or seeded_results
 
-    def test_capability_pivot_tags_results(self):
+    def test_capability_pivot_tags_results(self, monkeypatch, tmp_path):
+        # Isolate from on-disk brand_intelligence state. The assertion below
+        # requires _seeded_tier3_candidates to return [] (pure pivot results),
+        # but seeding fires when brand_intelligence has a cached row for the
+        # manufacturer+equipment_type (e.g. a 'grundfos|pump' row written by a
+        # live harness/dev run). conftest does not isolate brand_intelligence,
+        # so a polluted dev DB flips this test red regardless of test order.
+        # Pointing _DB_PATH at an empty tmp file makes get_brand_relationships
+        # return the empty record (no authorized_service_brands) → seeding
+        # short-circuits at `if not auth_brands: return []` → pure pivot.
+        # Production seeding logic is untouched; only the test's store is reset.
+        from utils import brand_intelligence
+        monkeypatch.setattr(brand_intelligence, "_DB_PATH", str(tmp_path / "bi_empty.sqlite"))
+
         agent  = SourcingAgent()
         specs  = agent._dict_to_specs({
             "manufacturer":  "Grundfos",
