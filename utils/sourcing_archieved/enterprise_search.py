@@ -118,6 +118,17 @@ def _call_enterprise_api(specs: AssetSpecs,
                 source_url=cached_url,
                 price_tbd=False,
                 suitability_score=cached_suit,
+                # T3 — honest provenance. The price_db cache stores a price found
+                # for a (manufacturer, PN) key but does NOT store the PN-match
+                # verdict (no found_part_number, no pn_match_status). Defaulting
+                # to the SourcingOption model default ("Exact OEM") would set
+                # isExactMatch=True in the frontend with no PN evidence — an
+                # overclaim. "Functional Alternative" is the least-dishonest
+                # label: we know a price exists at this vendor/URL, not that the
+                # listed PN is an exact OEM match. The frontend's PnMatchLevel
+                # derives from pn_match_status (None here -> "none"), not
+                # match_type, so this needs no frontend enum change.
+                match_type="Functional Alternative",
             ))
             cached_vendors.add(vendor_name)
     else:

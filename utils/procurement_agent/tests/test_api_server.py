@@ -1344,6 +1344,43 @@ class TestKnownPartsCacheTypeGate:
             "Undetectable-class cached edge must survive (no signal to gate on)"
 
 
+class TestKnownPartsCacheProvenance:
+    """T3 — the known_parts cache-hit path already defaults match_type honestly
+    (`or 'Functional Alternative'`); this locks that in so a future change can't
+    silently revert to the 'Exact OEM' overclaim. A cached edge with NO stored
+    match_type must surface as Functional Alternative, never Exact OEM."""
+
+    def test_edge_without_match_type_defaults_honestly(self, api, monkeypatch, tmp_path):
+        from utils import known_parts
+        monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
+        pk = known_parts.canonical_part_key("Gusher Pumps", "84004-28-C238CBC")
+        # No match_type on the candidate -> upsert_edges stores None.
+        known_parts.upsert_edges(pk, [{
+            "vendor_name": "sealit123.com",
+            "source_url": "https://sealit123.com/mechanical-seals/x",
+            "tier": 2, "price": 53.25, "suitability_score": 75.0,
+        }])
+        specs = json.dumps({
+            "manufacturer": "Gusher Pumps", "part_number": "84004-28-C238CBC",
+            "detected_type": "mechanical seal", "model": "3196", "voltage": "N/A",
+        })
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=specs)
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing(), artifact=None)
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        cand = next((c for c in detail["sourcing_results"]["tier2"]
+                     if c["vendorName"] == "sealit123.com"), None)
+        assert cand is not None
+        # isExactMatch is mapped from match_type == "Exact OEM"; a cached edge
+        # with no stored match_type must NOT claim exact.
+        assert cand["isExactMatch"] is False, \
+            "Cached edge with no stored match_type must not surface as Exact OEM"
+        assert cand["isAftermarket"] is False, \
+            "Cached edge with no stored match_type is Functional Alternative, not Aftermarket"
+
+
 class TestRejectSubmission:
     def test_happy_transitions_to_cancelled(self, api):
         rid = _create_pending(api, submission_id="sub-rej")

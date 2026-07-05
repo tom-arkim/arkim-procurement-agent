@@ -734,6 +734,68 @@ class TestTier2CacheSuitability:
 
 
 # ---------------------------------------------------------------------------
+# Cache-hit honest provenance (CLEANUP §7.1 / Phase 1 T3)
+# ---------------------------------------------------------------------------
+# The price_db cache stores a price found for a (manufacturer, PN) key but NOT
+# the PN-match verdict (no found_part_number, no pn_match_status). The
+# SourcingOption model default for match_type is "Exact OEM" — so a cache hit
+# that didn't set match_type would surface as isExactMatch=True with zero PN
+# evidence, an overclaim. T3 sets "Functional Alternative" (the least-dishonest
+# label) explicitly. The known_parts path already defaults honestly via
+# `or "Functional Alternative"`.
+class TestTier2CacheProvenance:
+    """T3 — a price_db cache hit must NOT default to match_type='Exact OEM'."""
+
+    def _run_tier2_with_cache(self, source: str) -> list[dict]:
+        agent = SourcingAgent()
+        run   = _make_run()
+        specs = agent._dict_to_specs(run.asset_specs_json)
+        weights = _URGENCY_WEIGHTS["predictive"]
+        cache = {
+            "CachedVendor": {
+                "price":        250.0,
+                "lead_days":    3,
+                "date_fetched": "2026-05-13T00:00:00",
+                "source":       source,
+                "url":          "https://cachedvendor.com/product/PN-TEST-001",
+            }
+        }
+        with patch("utils.price_db.get_cached_prices", return_value=cache):
+            with patch("utils.sourcing_archieved.tavily_client._search_vendor_prices", return_value=[]):
+                with patch("utils.sourcing_archieved.llm_parsing._llm_parse_results", return_value=[]):
+                    return agent._run_tier2(specs, weights)
+
+    def test_live_cache_hit_not_marked_exact_oem(self):
+        results = self._run_tier2_with_cache("live")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("match_type") != "Exact OEM", \
+            f"Cache hit must not default to 'Exact OEM' (no PN-match evidence), got: {vendor.get('match_type')}"
+        assert vendor.get("match_type") == "Functional Alternative", \
+            f"Expected 'Functional Alternative' (least-dishonest label), got: {vendor.get('match_type')}"
+
+    def test_rfq_cache_hit_not_marked_exact_oem(self):
+        results = self._run_tier2_with_cache("rfq")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("match_type") != "Exact OEM", \
+            f"rfq cache hit must not default to 'Exact OEM' (no PN-match evidence), got: {vendor.get('match_type')}"
+        assert vendor.get("match_type") == "Functional Alternative"
+
+    def test_cache_hit_emits_no_pn_match_status(self):
+        # The frontend's PnMatchLevel derives from pn_match_status; a cache hit
+        # has none (None -> "none"), so the UI shows no part-match claim —
+        # consistent with the "Functional Alternative" match_type.
+        results = self._run_tier2_with_cache("live")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("pn_match_status") is None, \
+            f"Cache hit must not synthesize a pn_match_status, got: {vendor.get('pn_match_status')}"
+        assert vendor.get("found_part_number") is None, \
+            f"Cache hit must not synthesize a found_part_number, got: {vendor.get('found_part_number')}"
+
+
+# ---------------------------------------------------------------------------
 # Cache-hit type-gate (CLEANUP §7.1 / Phase 1 T2)
 # ---------------------------------------------------------------------------
 # A price_db cache hit bypasses _compute_suitability_score, so a wrong-PART-TYPE
