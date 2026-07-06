@@ -55,10 +55,27 @@ def _build_search_query(specs, search_mode: str = "exact") -> str:
     if specs.category == "Equipment":
         parts: list[str] = []
 
+        # Phase 2 — component-aware (T5b / defense-in-depth): when component_of is
+        # set, lead with the COMPONENT-for-parent phrase so the query targets the
+        # component for the named machine, never the bare parent. This mirrors the
+        # Part branch below + _build_tier3_query + _build_aftermarket_query. The
+        # intended classifier path only sets component_of for mechanical_seal
+        # (categorized Part), so this branch is reached for a component-of part
+        # only via an LLM extraction misclassification of the seal as Equipment —
+        # defensive, but closes the last parent-led hole and keeps all four
+        # builders consistent. Inert when component_of is None.
+        from utils.procurement_agent.component_query import build_component_aware_query
+        component_phrase = build_component_aware_query(specs)  # "X for Y" or None
+        if component_phrase:
+            parts.append(component_phrase)
+
         desc = (specs.description or "").strip()
         if desc:
             parts.append(desc)
-        else:
+        elif not component_phrase:
+            # No component phrase and no description — fall back to the legacy
+            # model-keyword heuristics. Skipped when component_phrase already
+            # leads (the phrase carries the component + parent identity).
             model_lower = (specs.model or "").lower()
             for kw, label in [("pump", "pump"), ("motor", "motor"),
                                ("compressor", "compressor"), ("blower", "blower")]:

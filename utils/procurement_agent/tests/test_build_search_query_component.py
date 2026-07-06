@@ -104,6 +104,62 @@ def test_fix_a_equivalents_mode_also_component_led():
 
 
 # ===========================================================================
+# T2 — Equipment branch honors component_of (defense-in-depth).
+# The intended classifier path only sets component_of for mechanical_seal
+# (categorized Part), so a component-of part reaches the Equipment branch only
+# via an LLM extraction misclassification of the seal as Equipment. This test
+# proves the Equipment branch is component-led when component_of is set, so the
+# last parent-led hole is closed and all four builders are consistent. This
+# assertion FAILS on pre-T2 code (the Equipment branch ignored component_of and
+# led with description / mfg+model) and PASSES after T2.
+# ===========================================================================
+
+def _seal_specs_as_equipment(component_of=None) -> AssetSpecs:
+    """A component-of part (seal) MISCLASSIFIED as Equipment by extraction."""
+    return AssetSpecs(
+        manufacturer="Goulds",
+        model="3196",
+        part_number="UNKNOWN-PN",
+        voltage="N/A",
+        category="Equipment",
+        detected_type="mechanical seal",
+        component_of=component_of,
+    )
+
+
+def test_t2_equipment_branch_honors_component_of_when_set():
+    """A component-of part categorized Equipment must still get a component-led
+    query — the 'mechanical seal for Goulds 3196' phrase leads, NOT a bare
+    parent query. Pre-T2 the Equipment branch ignored component_of and produced
+    a parent-led query (description/mfg+model)."""
+    specs = _seal_specs_as_equipment(component_of="Goulds 3196")
+    q = _build_search_query(specs, search_mode="exact")
+    assert "mechanical seal for goulds 3196" in q.lower(), (
+        f"Equipment branch must lead with the component-for-parent phrase when "
+        f"component_of is set, got {q!r}"
+    )
+    assert is_bare_parent_query(q, "Goulds 3196") is False, (
+        f"Equipment branch must not produce a bare-parent query: {q!r}"
+    )
+
+
+def test_t2_equipment_branch_no_component_of_byte_identical_to_legacy():
+    """When component_of is NOT set, the Equipment branch is byte-identical to
+    the pre-T2 query (no component-of part → no component lead). Guards against
+    the fix changing the non-component-of Equipment path."""
+    specs_off = _seal_specs_as_equipment(component_of=None)
+    q = _build_search_query(specs_off, search_mode="exact")
+    # Legacy Equipment form: description (or model-keyword fallback) + mfg+model
+    # tail — NO 'mechanical seal for ...' phrase.
+    assert "mechanical seal for" not in q.lower(), (
+        f"non-component-of Equipment query must not carry the component phrase: {q!r}"
+    )
+    assert "goulds 3196" in q.lower(), (
+        f"parent identity still anchors the Equipment query: {q!r}"
+    )
+
+
+# ===========================================================================
 # Fix B1 — _result_from_cached_edges applies the suitability floor + rejection
 # filter, so a below-floor / rejection_reason cached edge does NOT surface.
 # ===========================================================================

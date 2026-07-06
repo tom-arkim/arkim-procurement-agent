@@ -275,14 +275,20 @@ Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AW
 | **Recommended action** | Set the enable flag to turn on run-posting; resolve the 403 (plan upgrade / support / scoped key) for dataset writes. Instrumentation itself needs no code change. |
 
 ### 7.4 `SCORING_V2` gate + weights are informed defaults — need real-data calibration
-
-| Field | Detail |
-|---|---|
-| **File** | `utils/sourcing_archieved/scoring.py` (`SCORING_V2` gate thresholds + factor weights) |
 | **Kind** | Uncalibrated magic numbers — same character as §4.2 (cache suitability defaults) |
 | **Why it exists** | The redesigned gate/weights were set from reasoning + the labeled eval set, not from a calibration pass against real live-sourcing outcome data. |
 | **Risk / impact** | Ranking/gating may be off at the margins until tuned against real results; defaults are informed but not validated at scale. |
 | **Recommended action** | Once live sourcing data accumulates, calibrate the gate threshold + weights against real outcomes (precision/recall on labeled results); lock in with a regression fixture. |
+
+### 7.5 Component-of context is seal-only — non-seal components get no parent-context query
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/part_type_classifier.py` + `part_type_registry.py` (ANCHORED regime is `mechanical_seal` only) |
+| **Kind** | Classifier/registry scope decision — not a bug. The ANCHORED regime (which sets `_component_of`) covers just `mechanical_seal`, so non-seal components (impeller, wear ring, shaft sleeve, diaphragm kit, drive chain, etc.) never get `_component_of` set and never reach the component-aware "[component] for [parent]" sourcing query. They stay clean only because Fix A (commit `1363b6f`) makes `_build_search_query` lead with `detected_type` unconditionally — so the query is component-led ("impeller ...") but carries no parent-machine context ("... for Goulds 3196"). |
+| **Why it exists** | The overnight intake redesign scoped the registry to 5 types with `mechanical_seal` as the sole ANCHORED type (the priority pair). Non-seal component-of detection was intentionally out of scope. |
+| **Risk / impact** | A non-seal component's sourcing query lacks the parent-machine anchor that disambiguates the right variant (e.g. an impeller for a Goulds 3196 vs a Goulds 3175). Sourcing still works via the component term, but is less precise than a seal query. |
+| **Recommended action** | Do NOT fix as a bug. Extending ANCHORED-regime component detection to other component types is a classifier/registry scope decision — evaluate against real trial demand for non-seal components before investing. If pursued, add the component types to the registry with `REGIME_ANCHORED` and update the classifier's `component_of` rules + the eval dataset's `test_component_of_only_for_anchored` invariant. |
 
 ---
 
