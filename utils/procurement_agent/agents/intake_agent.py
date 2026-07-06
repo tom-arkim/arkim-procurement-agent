@@ -304,6 +304,23 @@ Rules:
   - description: one line summarizing what the item is, from the input
   - If prior specs are provided, merge carefully: only update fields with new information
 
+COMPONENT-OF A PART (critical — do not attribute the parent's OEM to the component):
+  When the input describes a COMPONENT of a named parent machine — a replacement
+  part FOR a specific pump/motor/etc. (e.g. "impeller for a Goulds 3196",
+  "seal kit for an Alfa Laval LKH-10", "drive chain for a Hytrol conveyor",
+  "shaft sleeve for a Waukesha 060") — the `manufacturer` and `model` fields
+  describe the COMPONENT'S OWN make, which is usually NOT known at intake.
+  Set `manufacturer` and `model` to null in that case — do NOT copy the parent
+  machine's OEM or model number into them. The parent machine's identity
+  (brand + model) goes in `use_case` and/or `description` (e.g. use_case =
+  "for Goulds 3196 pump"), NOT in manufacturer/model. The part being sourced is
+  the COMPONENT (the impeller/seal/chain), not the parent machine — sourcing
+  must never collapse to a bare query for the parent machine itself.
+  A parent OEM/model is only the component's make when the input states the
+  component is made BY that OEM (e.g. "Goulds 3196 impeller, OEM part" — still
+  attribute only if the OEM is explicitly the component's manufacturer, not just
+  the parent's). When in doubt, leave manufacturer/model null.
+
 MULTIPLE DISTINCT PARTS -> JSON ARRAY:
 If the input describes TWO OR MORE distinct parts/components — items that would each be
 ordered separately (different part numbers, or different component types) — return a JSON
