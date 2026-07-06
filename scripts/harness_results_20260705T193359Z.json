@@ -1,0 +1,1026 @@
+{
+  "generated_at": "20260705T193359Z",
+  "base_url": "http://localhost:8001",
+  "demo_mode": false,
+  "run_capture_on": true,
+  "health": {
+    "status": "ok",
+    "version": "1.0.0-phase1",
+    "demo_mode": false,
+    "capture_failures": 0
+  },
+  "capture_report": {
+    "available": true,
+    "db": "C:\\Users\\tom\\Downloads\\_Arkim\\Arkim Procurement Agent Prototype\\data\\run_capture.sqlite",
+    "per_run": {
+      "f7fb01ad-21f5-4c59-8a2a-b044efc24ee7": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_rejected": 11,
+          "candidate_scored": 5,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "deefed40-0250-4136-8575-c47983601f6a": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_rejected": 2,
+          "candidate_scored": 4,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "f7bd5efe-51b4-416b-8f2b-062348802bb3": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_scored": 5,
+          "candidate_rejected": 10,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "02754581-ea8b-4fb9-a1c2-68f8cb6918ac": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_rejected": 8,
+          "candidate_scored": 2,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "b81d4f95-b29f-4234-81b3-073626d30041": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_scored": 3,
+          "candidate_rejected": 6,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "3bbed23e-ab06-4596-8851-a96737a8affe": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_rejected": 12,
+          "candidate_scored": 3,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "40aafb8f-3b7b-499b-bff6-9ca251e03f9e": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_scored": 5,
+          "candidate_rejected": 5,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "31fa76b0-228c-4d58-84c4-d997bced70a5": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_scored": 9,
+          "candidate_rejected": 4,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "e7e33935-0586-4807-8921-489a9ded29ed": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_rejected": 9,
+          "candidate_scored": 3,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "1e135a16-aa3e-4af4-9353-301d4efda1bc": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_rejected": 10,
+          "candidate_scored": 3,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "f9b8db2e-0e9a-4d9b-af26-de74c304d83f": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_scored": 5,
+          "candidate_rejected": 4,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      },
+      "595465d5-d311-4020-8eb2-6ce725c50db3": {
+        "event_counts": {
+          "turn_user": 1,
+          "turn_agent": 1,
+          "intake_result": 1,
+          "user_action": 1,
+          "query_issued": 3,
+          "candidate_rejected": 5,
+          "candidate_scored": 5,
+          "results_displayed": 1
+        },
+        "outcome": "abandoned_after_results",
+        "has_turn": true,
+        "has_intake_result": true,
+        "has_candidate": true,
+        "has_displayed": true
+      }
+    }
+  },
+  "records": [
+    {
+      "part_id": "vague-motor",
+      "desc": "1.5 HP motor 56C frame",
+      "expect": "vague (specs, no PN)",
+      "run_id": "f7fb01ad-21f5-4c59-8a2a-b044efc24ee7",
+      "identified_as": "electric motor",
+      "duration_s": 50.2,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 2,
+          "vendor": "Worldwide Electric",
+          "price": null,
+          "suitability": 30.0,
+          "confidence": 37.0,
+          "match_type": "none",
+          "url": "https://worldwideelectric.com/products/electric_motors/general_purpose_motors/single_phase_fractional_nt_series/nt1-5-18-56cb",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "MRO Supply",
+          "price": 346.78,
+          "suitability": 30.0,
+          "confidence": 37.0,
+          "match_type": "none",
+          "url": "https://www.mrosupply.com/popular_products/15-hp-56c-motors",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "East Coast Electrical Equipment Company",
+          "price": null,
+          "suitability": 23.1,
+          "confidence": 23.6,
+          "match_type": "none",
+          "url": "https://eastcoastmotor.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Electric Motor Wholesale",
+          "price": null,
+          "suitability": 21.0,
+          "confidence": 22.5,
+          "match_type": "none",
+          "url": "https://www.electricmotorwholesale.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Malloy Electric",
+          "price": null,
+          "suitability": 30.0,
+          "confidence": 27.0,
+          "match_type": "none",
+          "url": "https://www.malloyelectric.com/motors",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "1.5 HP motor 56C frame",
+          "agent": "HP, RPM, voltage/phase, and frame? And is it VFD-fed (inverter duty)?"
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-gearbox-oil",
+      "desc": "food-grade gearbox oil",
+      "expect": "vague (category only)",
+      "run_id": "deefed40-0250-4136-8575-c47983601f6a",
+      "identified_as": "lubricant / gear oil",
+      "duration_s": 30.3,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 3,
+          "vendor": "Tilley Distribution",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.tilleydistribution.com/products/exxonmobil-products",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "U.S. Lubricants",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.uslube.com/our-solutions/industrial-lubricants-fluids/gear-oil",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Lube Squad",
+          "price": null,
+          "suitability": 38.0,
+          "confidence": 29.0,
+          "match_type": "none",
+          "url": "https://lube-squad.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Santie Midwest",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://santiemidwest.com",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "food-grade gearbox oil",
+          "agent": "Is there a manufacturer name, model, or part number visible \u2014 on the part itself, its nameplate, or the equipment it's mounted on? If you can read a plate or an old part's markings, type what you see."
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-valve",
+      "desc": "2 inch stainless ball valve tri-clamp",
+      "expect": "vague (specs, no PN)",
+      "run_id": "f7bd5efe-51b4-416b-8f2b-062348802bb3",
+      "identified_as": "ball valve",
+      "duration_s": 33.9,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 2,
+          "vendor": "AVCO",
+          "price": null,
+          "suitability": 31.5,
+          "confidence": 25.8,
+          "match_type": "none",
+          "url": "https://avcovalve.com/avcovalve",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "MK Valve Sales",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "http://www.mkvalvesales.com/product/ball-valve",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "DNOW",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.dnow.com/balon-valves",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "American Precision Supply",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.apsupplies.com/products/valves",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "The Specialty Mfg. Co.",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.specialtymfg.com/products/valves/ball-valves",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "2 inch stainless ball valve tri-clamp",
+          "agent": "Sourcing by category \u2014 we have enough specs (manufacturer, type, key dimensions) to find functionally equivalent options. No specific part number or model is required."
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-solenoid",
+      "desc": "3/4 inch NPT stainless solenoid valve 24VDC",
+      "expect": "vague (specs, no PN)",
+      "run_id": "02754581-ea8b-4fb9-a1c2-68f8cb6918ac",
+      "identified_as": "solenoid valve",
+      "duration_s": 33.7,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 3,
+          "vendor": "Solenoid Solutions Inc.",
+          "price": null,
+          "suitability": 24.5,
+          "confidence": 22.2,
+          "match_type": "none",
+          "url": "https://www.solenoidsolutionsinc.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "SEMCOR",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.semcor.net/products/valves/solenoid-valves",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "3/4 inch NPT stainless solenoid valve 24VDC",
+          "agent": "Type, size, connection, and body material? (And pressure class if known.)"
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-transmitter",
+      "desc": "sanitary pressure transmitter 4-20mA 0-100 psi",
+      "expect": "vague (specs, no PN)",
+      "run_id": "b81d4f95-b29f-4234-81b3-073626d30041",
+      "identified_as": "pressure transmitter",
+      "duration_s": 25.0,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 2,
+          "vendor": "BriceBarclay",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.bricebarclay.com/product-category/pressure-instrument-distributor/pressure-transmitter-distributor",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "JY Flowmeter",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.jyflowmeter.com/pressure-transmitters/pressure-transmitter-sensor.html",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "William E Young",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 37.5,
+          "match_type": "normalized",
+          "url": "https://wmyoung.com/your-trusted-distributor-for-rosemount-pressure-transmitters",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "sanitary pressure transmitter 4-20mA 0-100 psi",
+          "agent": "What does it measure and over what range, what output (4-20mA / 0-10V / HART), and what process connection/thread?"
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-starter",
+      "desc": "10 HP 460V motor starter NEMA 4X washdown",
+      "expect": "vague (specs, no PN)",
+      "run_id": "3bbed23e-ab06-4596-8851-a96737a8affe",
+      "identified_as": "motor starter",
+      "duration_s": 34.5,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 3,
+          "vendor": "Bay Power",
+          "price": null,
+          "suitability": 3.5,
+          "confidence": 11.8,
+          "match_type": "none",
+          "url": "https://www.baypower.com/motor-and-lighting-control/motor-starters",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Electric Motors (electricmotors.com)",
+          "price": null,
+          "suitability": 2.5,
+          "confidence": 0.0,
+          "match_type": "none",
+          "url": "https://electricmotors.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "KMParts (Kl\u00f6ckner Moeller)",
+          "price": null,
+          "suitability": 31.5,
+          "confidence": 25.8,
+          "match_type": "none",
+          "url": "https://klocknermoeller.com",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "10 HP 460V motor starter NEMA 4X washdown",
+          "agent": "HP, RPM, voltage/phase, and frame? And is it VFD-fed (inverter duty)?"
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-hose",
+      "desc": "1 inch stainless braided flexible hose 24 inch long",
+      "expect": "vague (specs, no PN)",
+      "run_id": "40aafb8f-3b7b-499b-bff6-9ca251e03f9e",
+      "identified_as": "flexible hose",
+      "duration_s": 23.0,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 2,
+          "vendor": "Kanaflex",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://kanaflex.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "Unisource Manufacturing",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://unisource-mfg.com/flexible-metal-hose",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "Hose Solutions",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://hosesolutions.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Peerless, Inc.",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://peerless-inc.com/resources/partner-spotlight/aflex-hose",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "The Hope Group",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.thehopegroup.com/our-products/fluid-connectors/hose",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "1 inch stainless braided flexible hose 24 inch long",
+          "agent": "Is there a manufacturer name, model, or part number visible \u2014 on the part itself, its nameplate, or the equipment it's mounted on? If you can read a plate or an old part's markings, type what you see."
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-belting",
+      "desc": "FDA food grade conveyor belt 12 inch wide",
+      "expect": "vague (specs, no PN)",
+      "run_id": "31fa76b0-228c-4d58-84c4-d997bced70a5",
+      "identified_as": "conveyor belt",
+      "duration_s": 42.3,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 2,
+          "vendor": "Storage Equipment Systems",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://storageequipmentsystems.com/conveyor-belts-for-sale",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "MIR Inc.",
+          "price": null,
+          "suitability": 45.0,
+          "confidence": 32.5,
+          "match_type": "none",
+          "url": "https://mir-belting.com/conveyor-belts",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "AIRMATIC",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.airmatic.com/manufacturers/conveyor-components-company",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Texas Belting and Supply",
+          "price": null,
+          "suitability": 45.0,
+          "confidence": 32.5,
+          "match_type": "none",
+          "url": "https://texasbelting.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Murdock Industrial",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://murdockindustrial.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Sparks Belting Company",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.sparksbelting.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "SEMCOR",
+          "price": null,
+          "suitability": 45.0,
+          "confidence": 32.5,
+          "match_type": "none",
+          "url": "https://www.semcor.net",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Tide Industrial",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 12.5,
+          "match_type": "none",
+          "url": "https://www.tideindustrial.com/food-grade-conveyor-belt",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Fluent Conveyors",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 12.5,
+          "match_type": "none",
+          "url": "https://fluentconveyors.com/conveyor-replacement-belts/food-grade-conveyor-belts",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "FDA food grade conveyor belt 12 inch wide",
+          "agent": "Is there a manufacturer name, model, or part number visible \u2014 on the part itself, its nameplate, or the equipment it's mounted on? If you can read a plate or an old part's markings, type what you see."
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-gasket",
+      "desc": "high temperature steam gasket 150 lb flange",
+      "expect": "vague (specs, no PN)",
+      "run_id": "e7e33935-0586-4807-8921-489a9ded29ed",
+      "identified_as": "flange gasket",
+      "duration_s": 42.9,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 3,
+          "vendor": "Automated Gasket Corporation",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.automatedgasketcorp.com/gasket-types/flange-ring-gaskets",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "API International, Inc.",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://apiint.com/flange-gaskets",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "John M. Ellsworth Company, Inc.",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.jmesales.com/flange-gaskets",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "high temperature steam gasket 150 lb flange",
+          "agent": "Is there a manufacturer name, model, or part number visible \u2014 on the part itself, its nameplate, or the equipment it's mounted on? If you can read a plate or an old part's markings, type what you see."
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-washdown-motor",
+      "desc": "washdown duty motor 2 HP 145TC",
+      "expect": "vague (specs, no PN)",
+      "run_id": "1e135a16-aa3e-4af4-9353-301d4efda1bc",
+      "identified_as": "washdown duty motor",
+      "duration_s": 40.5,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 3,
+          "vendor": "Electric Motor Warehouse",
+          "price": null,
+          "suitability": 17.5,
+          "confidence": 20.8,
+          "match_type": "none",
+          "url": "https://electricmotorwarehouse.com/wash-down-duty",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "MROSupply.com",
+          "price": null,
+          "suitability": 17.5,
+          "confidence": 20.8,
+          "match_type": "none",
+          "url": "https://www.mrosupply.com/electric-motors/ac-motors/ac-washdown-duty-motors",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "VXB Bearings",
+          "price": 2161.49,
+          "suitability": 2.5,
+          "confidence": 0.0,
+          "match_type": "none",
+          "url": "https://vxb.com/products/three-phase-washdown-motor-2-hp-145tc-frame-rugged",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "washdown duty motor 2 HP 145TC",
+          "agent": "HP, RPM, voltage/phase, and frame? And is it VFD-fed (inverter duty)?"
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-chain",
+      "desc": "number 60 roller chain 10 feet",
+      "expect": "vague (specs, no PN)",
+      "run_id": "f9b8db2e-0e9a-4d9b-af26-de74c304d83f",
+      "identified_as": "roller chain",
+      "duration_s": 20.0,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 2,
+          "vendor": "Baldwin Supply",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 37.5,
+          "match_type": "none",
+          "url": "https://www.baldwinsupply.com/catsearch/996/roller-chains",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "ISC Companies",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.isccompanies.com/parts-distribution/chain/roller-chain",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 2,
+          "vendor": "Universal Chain",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.universalchain.net/blogs/top-industrial-chain-manufacturers-list-in-the-usa",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Bearings & Industrial Supply Co., Inc.",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.bearingsandindustrialsupply.com/chains.html",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "BK Industrial Solutions",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.bkindsolutions.com/product-category/power-transmission-chain/roller-chain",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "number 60 roller chain 10 feet",
+          "agent": "Specs extracted but the manufacturer could not be confirmed. Verify the manufacturer in the panel before confirming."
+        }
+      ],
+      "error": null
+    },
+    {
+      "part_id": "vague-level",
+      "desc": "level sensor for a stainless mixing tank",
+      "expect": "vague (component-of, no PN)",
+      "run_id": "595465d5-d311-4020-8eb2-6ce725c50db3",
+      "identified_as": "level sensor",
+      "duration_s": 36.3,
+      "phase": "comparison",
+      "candidates": [
+        {
+          "tier": 2,
+          "vendor": "The Transmitter Shop",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.transmittershop.com/product-category/transmitters/level-transmitters",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "McIntosh Controls",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.mcintoshcontrols.com/product-level.php",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Nordic Sensors Industrial, Inc. (Baumer Authorized Distributor)",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://baumer.sales-nsi.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Flowline",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.flowline.com",
+          "rejected": false,
+          "rejection_reason": null
+        },
+        {
+          "tier": 3,
+          "vendor": "Advanced Industrial Products (MTS Sensors Distributor)",
+          "price": null,
+          "suitability": 35.0,
+          "confidence": 27.5,
+          "match_type": "none",
+          "url": "https://www.aipoh.com/mts-sensors-distributor",
+          "rejected": false,
+          "rejection_reason": null
+        }
+      ],
+      "intake_turns": [
+        {
+          "user": "level sensor for a stainless mixing tank",
+          "agent": "What does it measure and over what range, what output (4-20mA / 0-10V / HART), and what process connection/thread?"
+        }
+      ],
+      "error": null
+    }
+  ],
+  "wrongness_flags": {
+    "vague-motor": [],
+    "vague-gearbox-oil": [],
+    "vague-valve": [],
+    "vague-solenoid": [],
+    "vague-transmitter": [],
+    "vague-starter": [],
+    "vague-hose": [],
+    "vague-belting": [],
+    "vague-gasket": [],
+    "vague-washdown-motor": [],
+    "vague-chain": [],
+    "vague-level": []
+  }
+}
