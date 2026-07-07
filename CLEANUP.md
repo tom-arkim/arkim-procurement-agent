@@ -228,6 +228,17 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 
 ## 6. Documentation
 
+### 6.0a Stale `test_health` assertion — /api/health legitimately gained flywheel fields
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/tests/test_api_server.py` (`TestStaticEndpoints::test_health`) |
+| **Kind** | Stale test assertion (not a code bug) |
+| **Why it exists** | The health endpoint legitimately grew extra fields from the flywheel work — `capture_failures` (run_capture) and `label_failures` (labeling) are now surfaced on `/api/health`. The test still asserts the old exact dict {`status`, `version`, `demo_mode`}, so it fails on the 2 added keys. |
+| **Risk / impact** | Cosmetic — the endpoint is correct; only the test is stale. But it makes the suite report 1 failed, obscuring the real green baseline. |
+| **Recommended action** | One-line fix: update the expected dict to include `capture_failures` and `label_failures` (assert equal with the new shape, or assert the 3 original keys as a subset). Do NOT bundle with an unrelated change — fix it as its own commit so the baseline is honestly green. |
+| **Status** | Open. Pre-existing; surfaced (not introduced) by the PN-aware floor work. Observed baseline: 1598 passed / 73 skipped / 1 failed (this test). |
+
 ### 6.1 `WHATS_NEXT.md` — stale Streamlit-era document, superseded by this file
 
 | Field | Detail |
