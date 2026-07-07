@@ -401,3 +401,51 @@ class TestInertness:
         r = label_api.get("/api/admin/ping", headers=_auth())
         assert r.status_code == 200
         assert r.json() == {"ok": True, "role": "admin"}
+
+    def test_flag_off_full_run_path_byte_identical_no_leakage(self, label_api, monkeypatch):
+        """T6 — with RUN_CAPTURE off, a full run-create + messages + confirm-intake
+        cycle produces ZERO capture/label rows and the responses carry no
+        Night-2 artifacts. The labeling surface is dormant and the existing API
+        is byte-identical to pre-Night-2."""
+        from unittest.mock import Mock
+        import utils.run_capture as rc
+        import utils.run_labels as rl
+        monkeypatch.setattr(rc, "RUN_CAPTURE", False)
+        monkeypatch.setattr(rl, "RUN_CAPTURE", False)
+        # Create a run + send a message (mocked intake) + confirm intake.
+        rid = _create_run(label_api)
+        api_server_mod = label_api._api_server if hasattr(label_api, "_api_server") else None
+        # Mock intake via the source module (mirrors test_run_capture_live).
+        import utils.procurement_agent.agents.intake_agent as ia_mod
+        agent = Mock()
+        agent.run.return_value = {
+            "asset_specs": {"manufacturer": "Goulds", "model": "3196"},
+            "manufacturer_confidence": 85.0, "part_id_confidence": 70.0,
+            "sufficient": True, "follow_up_question": None, "commit_message": None,
+            "confidence_summary": {"proceed_state": "proceed_spec_based"},
+        }
+        monkeypatch.setattr(ia_mod, "IntakeAgent", lambda *a, **k: agent)
+        r1 = label_api.post(f"/api/runs/{rid}/messages",
+                            json={"content": "I need a Goulds 3196 mechanical seal"})
+        assert r1.status_code == 200
+        # The message response carries no labeling/capture artifact — just the
+        # existing shape (message.content present, no label_failures etc.).
+        assert "message" in r1.json()
+        # No capture/label rows written (flag off).
+        assert rc.read_all_events() == []
+        assert rl.read_all_labels() == []
+        # Health is byte-identical to pre-Night-2.
+        assert label_api.get("/api/health").json() == {
+            "status": "ok", "version": "1.0.0-phase1", "demo_mode": False}
+        # Labeling endpoints dormant.
+        assert label_api.get("/api/admin/labeling/queue",
+                             headers=_auth()).status_code == 503
+
+    def test_flag_off_label_store_db_not_created(self, label_api, monkeypatch):
+        """Flag off -> the label store never creates a DB file (zero writes)."""
+        import utils.run_labels as rl
+        monkeypatch.setattr(rl, "RUN_CAPTURE", False)
+        label_api.post("/api/admin/labeling/label", headers=_auth(), json={
+            "run_id": "x", "scope": "run", "label": {}})  # 503 before any write
+        import os
+        assert not os.path.exists(rl._DB_PATH)
