@@ -1225,3 +1225,195 @@ class TestTier1SeedPurgedNoFabricatedVendors:
             assert agent._seeded_tier1_candidates(specs) == [], (
                 f"_seeded_tier1_candidates must be unconditionally [] (DEMO_MODE={mode!r})"
             )
+
+
+# ===========================================================================
+# PN-aware suitability floor — calibration fix (Option B).
+#
+# Evidence (data/run_capture.sqlite, 106 runs / 845 scored + 543 rejected):
+#   - clean-PN candidates are bimodal: junk lobe <=29, real-match lobe >=85.
+#     The 30 floor is correctly calibrated for them — UNCHANGED.
+#   - spec-described candidates (no real PN) are structurally score-capped
+#     (no PN to match -> fit_pts==0 -> 45-cap, then the SCORING_V2 type-gate
+#     x0.7 compresses in-class specialists to ~24.5), so the 30 floor culls
+#     legitimate specialists: 49 real in-class vendors rejected at 24.5
+#     (Goulds Pumps, Petro Valve, Valworx, Butterfly Valves & Controls, ...).
+#   - spec-described junk lobe sits at 0-9 with a clean separating gap at
+#     10-19, so a 20 floor keeps the 24.5 specialists and still cuts the junk.
+#
+# The floor function receives the already-computed suitability_score in the
+# candidate dict (scored upstream by _compute_suitability_score); these tests
+# feed it exactly that shape. The wrong-class test computes the score via the
+# real scorer under SCORING_V2 so the type-gate-crushed value (~2) is
+# live-faithful, proving the floor + type-gate together reject wrong-class
+# results even at the lowered 20 floor.
+# ===========================================================================
+
+
+class TestPnAwareSuitabilityFloor:
+    """Option B — 30 for clean-PN parts, 20 for spec-described parts."""
+
+    def _spec_described_butterfly_valve(self) -> "AssetSpecs":
+        from utils.models import AssetSpecs
+        # Mirrors the live captured run 1f6edc70: "2 inch tri-clamp butterfly
+        # valve" — no PN, detected_type=butterfly valve. _dict_to_specs sets
+        # part_number to the "UNKNOWN-PN" placeholder for PN-less intake.
+        return AssetSpecs(
+            manufacturer="Unknown", model="Unknown", part_number="UNKNOWN-PN",
+            voltage="N/A", category="Part", detected_type="butterfly valve",
+        )
+
+    def _clean_pn_bearing(self) -> "AssetSpecs":
+        from utils.models import AssetSpecs
+        # Mirrors the live captured SKF 6205 runs — real PN, scores 85-100.
+        return AssetSpecs(
+            manufacturer="SKF", model="6205", part_number="6205-2RS1",
+            voltage="N/A", category="Part", detected_type="bearing",
+        )
+
+    def test_spec_described_specialist_kept_at_20_floor(self):
+        """A spec-described in-class specialist at 24.5 (the real captured
+        Petro Valve / Valworx / Butterfly Valves & Controls band) is KEPT
+        under the PN-aware 20 floor."""
+        from utils.procurement_agent.agents.sourcing_agent import (
+            _apply_suitability_floor, _suitability_floor_for,
+        )
+        from utils.sourcing_archieved.constants import (
+            TIER_SURFACE_MIN_SUITABILITY, TIER_SURFACE_MIN_SUITABILITY_SPEC,
+        )
+        specs = self._spec_described_butterfly_valve()
+
+        # The floor for a spec-described part is 20, not 30.
+        assert _suitability_floor_for(specs) == TIER_SURFACE_MIN_SUITABILITY_SPEC
+        assert _suitability_floor_for(specs) < TIER_SURFACE_MIN_SUITABILITY
+
+        opts = [{"vendor_name": "Petro Valve, Inc.", "suitability_score": 24.5}]
+        _apply_suitability_floor(opts, TIER_SURFACE_MIN_SUITABILITY, specs)
+        assert not opts[0].get("rejection_reason"), (
+            f"24.5 specialist on a spec-described part must be KEPT at the 20 "
+            f"floor, got rejected: {opts[0].get('rejection_reason')!r}"
+        )
+
+    def test_spec_described_specialist_rejected_at_old_30_floor(self):
+        """The SAME 24.5 specialist is REJECTED when the legacy 30 floor is
+        applied WITHOUT the specs arg (the pre-fix path) — proving the fix
+        recovers it. This is the regression the calibration fix targets."""
+        from utils.procurement_agent.agents.sourcing_agent import (
+            _apply_suitability_floor,
+        )
+        from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+
+        opts = [{"vendor_name": "Petro Valve, Inc.", "suitability_score": 24.5}]
+        # No specs arg -> legacy behavior: the passed 30 threshold stands.
+        _apply_suitability_floor(opts, TIER_SURFACE_MIN_SUITABILITY)
+        assert opts[0].get("rejection_reason") == "suitability_below_floor", (
+            f"24.5 must be REJECTED by the old 30 floor (pre-fix path), got "
+            f"{opts[0].get('rejection_reason')!r}"
+        )
+
+    def test_spec_described_junk_still_cut_at_20_floor(self):
+        """The 0-9 junk lobe (wrong-class / collection-page results) is still
+        cut by the 20 floor — lowering it does not let spec-part junk through."""
+        from utils.procurement_agent.agents.sourcing_agent import (
+            _apply_suitability_floor,
+        )
+        from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+        specs = self._spec_described_butterfly_valve()
+
+        opts = [{"vendor_name": "Pump Catalog (wrong-class)", "suitability_score": 5.0}]
+        _apply_suitability_floor(opts, TIER_SURFACE_MIN_SUITABILITY, specs)
+        assert opts[0].get("rejection_reason") == "suitability_below_floor"
+
+    def test_clean_pn_junk_still_rejected_at_30_floor(self):
+        """A clean-PN part's junk candidate at 24 is STILL rejected — the
+        clean-PN path is unchanged at 30. Lowering the spec floor must not
+        loosen the PN-part floor (the bimodal junk lobe <=29 stays cut)."""
+        from utils.procurement_agent.agents.sourcing_agent import (
+            _apply_suitability_floor, _suitability_floor_for,
+        )
+        from utils.sourcing_archieved.constants import (
+            TIER_SURFACE_MIN_SUITABILITY, TIER_SURFACE_MIN_SUITABILITY_SPEC,
+        )
+        specs = self._clean_pn_bearing()
+
+        # Clean-PN floor stays 30.
+        assert _suitability_floor_for(specs) == TIER_SURFACE_MIN_SUITABILITY
+        assert _suitability_floor_for(specs) != TIER_SURFACE_MIN_SUITABILITY_SPEC
+
+        opts = [{"vendor_name": "PN-part junk at 24", "suitability_score": 24.0}]
+        _apply_suitability_floor(opts, TIER_SURFACE_MIN_SUITABILITY, specs)
+        assert opts[0].get("rejection_reason") == "suitability_below_floor", (
+            f"clean-PN junk at 24 must still be REJECTED at the 30 floor, got "
+            f"{opts[0].get('rejection_reason')!r}"
+        )
+
+    def test_wrong_class_result_still_rejected_at_20_floor(self, monkeypatch):
+        """SAFETY GUARANTEE: a confirmed-different noun-class result (the
+        shoppumps.com / motor-URL-on-valve contamination signature) is crushed
+        by the SCORING_V2 type-gate (x0.1 -> ~2-4) and stays REJECTED at the
+        lowered 20 floor. The type-gate protection this fix relies on is
+        independent of the floor height. Computes the score via the real
+        scorer under SCORING_V2 so the crushed value is live-faithful."""
+        from utils.sourcing_archieved import scoring as scoring_mod
+        monkeypatch.setattr(scoring_mod, "SCORING_V2", True)
+        monkeypatch.setattr(scoring_mod, "STAGE0_PLACEHOLDER_FIX_UNCONDITIONAL", False)
+        from utils.sourcing_archieved.scoring import _compute_suitability_score
+        from utils.procurement_agent.agents.sourcing_agent import (
+            _apply_suitability_floor,
+        )
+        from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+        specs = self._spec_described_butterfly_valve()
+
+        # A motor page returned on a butterfly-valve request: confirmed-different
+        # noun-class -> the type-gate multiplies the base by 0.1.
+        snippet = "3 phase electric motor 10HP 460V TEFC, in stock. NEMA frame."
+        url = "https://electricmotorwarehouse.com/motors/10hp-tefc"
+        title = "10 HP Electric Motor"
+        wrong_class_score = _compute_suitability_score(
+            specs, snippet, url, found_pn=None, title=title,
+            vendor="Electric Motor Warehouse",
+        )
+        # The type-gate must crush a confirmed-different result well below 20.
+        assert wrong_class_score < 20.0, (
+            f"wrong-class result must be crushed by the type-gate below the 20 "
+            f"floor, got {wrong_class_score}"
+        )
+
+        opts = [{"vendor_name": "Electric Motor Warehouse",
+                 "suitability_score": wrong_class_score}]
+        _apply_suitability_floor(opts, TIER_SURFACE_MIN_SUITABILITY, specs)
+        assert opts[0].get("rejection_reason") == "suitability_below_floor", (
+            f"wrong-class result (score={wrong_class_score}) must STILL be "
+            f"rejected at the 20 floor — the type-gate protects independent of "
+            f"the floor height. Got {opts[0].get('rejection_reason')!r}"
+        )
+
+    def test_no_specs_arg_is_legacy_behavior(self):
+        """Callers that omit ``specs`` get the passed threshold unchanged —
+        the existing call sites (and the apollo-clarify tests that pre-set
+        rejection_reason) are unaffected."""
+        from utils.procurement_agent.agents.sourcing_agent import (
+            _apply_suitability_floor,
+        )
+        from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+
+        # A 24.5 candidate against the 30 floor, no specs -> rejected (legacy).
+        opts = [{"vendor_name": "X", "suitability_score": 24.5}]
+        _apply_suitability_floor(opts, TIER_SURFACE_MIN_SUITABILITY)
+        assert opts[0].get("rejection_reason") == "suitability_below_floor"
+
+    def test_first_set_wins_with_pn_aware_floor(self):
+        """The first-set-wins rule (an option already carrying a
+        rejection_reason is skipped) is preserved under the PN-aware floor."""
+        from utils.procurement_agent.agents.sourcing_agent import (
+            _apply_suitability_floor,
+        )
+        from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+        specs = self._spec_described_butterfly_valve()
+
+        opts = [{"vendor_name": "Already-rejected",
+                 "suitability_score": 5.0,
+                 "rejection_reason": "duplicate_in_higher_tier"}]
+        _apply_suitability_floor(opts, TIER_SURFACE_MIN_SUITABILITY, specs)
+        # The pre-existing rejection_reason is NOT overwritten.
+        assert opts[0].get("rejection_reason") == "duplicate_in_higher_tier"

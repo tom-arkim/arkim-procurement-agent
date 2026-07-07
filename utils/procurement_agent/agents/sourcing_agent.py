@@ -187,12 +187,52 @@ def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
     return deduped
 
 
-def _apply_suitability_floor(options: list[dict], threshold: float) -> None:
+def _suitability_floor_for(specs) -> float:
+    """The effective suitability floor for a request, PN-aware.
+
+    Clean-PN parts (a real part_number per scoring._is_placeholder_pn) get the
+    standard 30 floor — well-calibrated for their bimodal score distribution
+    (junk ≤29, real matches ≥85). Spec-described parts (part_number null /
+    placeholder — UNKNOWN-PN, N/A, etc.) get the lower 20 floor: they are
+    structurally score-capped (no PN to match → fit_pts==0 → the 45-cap, then
+    the type-gate ×0.7 compresses in-class specialists to ~24.5), so the 30
+    floor culls legitimate specialists. See constants.TIER_SURFACE_MIN_SUITABILITY_SPEC
+    for the full calibration evidence. ``specs`` may be None → standard floor.
+    """
+    from utils.sourcing_archieved.constants import (
+        TIER_SURFACE_MIN_SUITABILITY,
+        TIER_SURFACE_MIN_SUITABILITY_SPEC,
+    )
+    from utils.sourcing_archieved.scoring import _is_placeholder_pn
+
+    if specs is not None and _is_placeholder_pn(getattr(specs, "part_number", None)):
+        return TIER_SURFACE_MIN_SUITABILITY_SPEC
+    return TIER_SURFACE_MIN_SUITABILITY
+
+
+def _apply_suitability_floor(options: list[dict], threshold: float,
+                             specs=None) -> None:
     """Annotate options below the suitability floor with rejection_reason.
 
     First-set wins: options already carrying a rejection_reason are skipped.
     Mutates in place; options remain in the list for audit log capture.
+
+    PN-aware floor (calibration fix): when ``specs`` is supplied and the request
+    part is spec-described (part_number null/placeholder per
+    scoring._is_placeholder_pn), ``threshold`` is lowered to
+    TIER_SURFACE_MIN_SUITABILITY_SPEC (20). Spec-described parts are structurally
+    score-capped (no PN to match → fit_pts==0 → 45-cap, then the type-gate ×0.7
+    compresses in-class specialists to ~24.5), so the 30 floor calibrated for
+    clean-PN parts culls legitimate specialists (Goulds Pumps, Petro Valve,
+    Valworx at 24.5 — 49 real vendors in the captured data). The 20 floor keeps
+    them while still cutting the 0–9 junk lobe. This is an UNCONDITIONAL fix —
+    the structural cap and the junk-vs-specialist separation exist independent of
+    SCORING_V2; the floor is applied before the V2 TypeGate and on the flag-off
+    path too. Callers that omit ``specs`` get the legacy behavior (their passed
+    threshold) unchanged.
     """
+    if specs is not None:
+        threshold = _suitability_floor_for(specs)
     for o in options:
         if o.get("rejection_reason"):
             continue
@@ -410,11 +450,14 @@ class SourcingAgent:
         if warranty == "in_warranty":
             filters.append("in_warranty: aftermarket excluded from tier_3")
 
-        # Item 4: suitability gate — first quality filter on the active pipeline path
-        from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+        # Item 4: suitability gate — first quality filter on the active pipeline path.
+        # PN-aware floor: spec-described parts (no real PN) get the lower 20 floor
+        # (see _suitability_floor_for / TIER_SURFACE_MIN_SUITABILITY_SPEC); clean-PN
+        # parts stay at 30. Same threshold applied to all three tiers for one run.
+        floor = _suitability_floor_for(specs)
         for tier in (tier1, tier2, tier3):
-            _apply_suitability_floor(tier.get("results", []), TIER_SURFACE_MIN_SUITABILITY)
-        filters.append(f"suitability_floor:{TIER_SURFACE_MIN_SUITABILITY:.0f}%")
+            _apply_suitability_floor(tier.get("results", []), floor, specs)
+        filters.append(f"suitability_floor:{floor:.0f}%")
 
         # Reconcile Apollo suitability with the floor verdict (Tier 3 only), AFTER
         # both clarifier annotation and the floor have run. Asymmetric, removes

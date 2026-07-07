@@ -125,6 +125,26 @@ TIER_SURFACE_MIN_CONFIDENCE: float = 40.0
 # connected to the active path — Items 4-6 build the first filter layer for production.
 TIER_SURFACE_MIN_SUITABILITY: float = 30.0
 
+# PN-aware floor — the spec-described counterpart to TIER_SURFACE_MIN_SUITABILITY.
+# Applied when the request part has NO real part number (part_number null/placeholder
+# per scoring._is_placeholder_pn). Calibration (data/run_capture.sqlite, 106 runs):
+# clean-PN candidates are bimodal — junk lobe ≤29, real-match lobe ≥85 — so the 30
+# floor is correctly calibrated for them and stays unchanged. Spec-described
+# candidates are structurally score-capped ≤45 (no PN to match → fit_pts==0 → the
+# 45-cap, then the SCORING_V2 type-gate ×0.7 compresses in-class specialists to
+# ~24.5), so the 30 floor culls legitimate specialists indiscriminately: 49 real
+# in-class vendors rejected at 24.5 (Goulds Pumps, Petro Valve, Valworx, Butterfly
+# Valves & Controls, Simple Valves, …). The spec-described junk lobe sits at 0–9
+# (wrong-class / collection-page / broad-line results) with a clean separating gap
+# at 10–19, so a 20 floor keeps the 24.5 specialists and still cuts the 0–9 junk.
+# Wrong-CLASS leakage is caught independently by the cache type-gate + the
+# multiplicative TypeGate (×0.1 → ~2) + the hard-zero guardrails, all of which
+# fire below a 20 floor — so lowering it does not resurface wrong-class results.
+# This is an UNCONDITIONAL calibration/correctness fix (not SCORING_V2-gated):
+# the structural cap + the junk-vs-specialist separation exist on the flag-off
+# path too, and the floor is applied before/independent of the V2 TypeGate.
+TIER_SURFACE_MIN_SUITABILITY_SPEC: float = 20.0
+
 # ---------------------------------------------------------------------------
 # Aftermarket sourcing
 # ---------------------------------------------------------------------------

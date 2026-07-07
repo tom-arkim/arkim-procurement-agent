@@ -281,6 +281,16 @@ Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AW
 | **Risk / impact** | Ranking/gating may be off at the margins until tuned against real results; defaults are informed but not validated at scale. |
 | **Recommended action** | Once live sourcing data accumulates, calibrate the gate threshold + weights against real outcomes (precision/recall on labeled results); lock in with a regression fixture. |
 
+### 7.5a <=5-scored candidates bypass the suitability floor via cache/Apollo paths
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/agents/sourcing_agent.py` (`_apply_suitability_floor`) + `api_server._result_from_cached_edges` |
+| **Kind** | Coverage gap (separate from the PN-aware floor calibration) |
+| **Why it exists** | `_apply_suitability_floor` skips any option already carrying a `rejection_reason`, and cached/Apollo-confirmed candidates bypass the scorer (so they carry no score floor check). 6 captured candidates scored <=5.5 yet passed the 30 floor via these paths. |
+| **Risk / impact** | A near-zero-suitability result can surface because it never re-enters the floor. Not caused by floor height — lowering/raising the floor does not touch it. |
+| **Status** | Open. Out of scope for the PN-aware floor fix (`fix(scoring): PN-aware suitability floor`) — do not bundle. Likely a `_cache_type_gate` coverage gap; investigate separately. |
+
 ### 7.5 Component-of context is seal-only � non-seal components get no parent-context query
 
 | Field | Detail |
