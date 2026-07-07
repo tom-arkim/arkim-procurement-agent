@@ -2752,6 +2752,12 @@ def health():
     # body and stays green untouched.
     if _run_capture.RUN_CAPTURE:
         body["capture_failures"] = _run_capture.capture_failures()
+        # Night 2 — surface the label-write failure counter alongside capture's,
+        # ONLY when the flag is on (same inertness wall: flag-off health stays
+        # byte-identical — test_api_server.test_health pins the flag-off body).
+        from utils import run_labels as _run_labels
+        if _run_labels.RUN_CAPTURE:
+            body["label_failures"] = _run_labels.label_failures()
     return body
 
 
@@ -3043,6 +3049,292 @@ def admin_prices(role: str = Depends(require_admin)):
         for vendor, data in (vendors or {}).items():
             items.append({"key": key, "vendor": vendor, **(data or {})})
     return {"count": len(items), "prices": items, "raw": db}
+
+
+# ---------------------------------------------------------------------------
+# Night 2 — LABELING SURFACE (admin-gated, RUN_CAPTURE-gated, inert when off).
+#
+# Turns captured runs (Night 1 run_capture store) into labeled eval cases in
+# <1 min of human time. Three endpoints, all require_admin (same 401/403/503
+# semantics as the rest of /api/admin/*) AND gated on RUN_CAPTURE — when the
+# flag is off they 503 (dormant), so the flag-off API is byte-identical (T6).
+#
+#   GET  /api/admin/labeling/queue        — failures-first queue via run_outcomes
+#   GET  /api/admin/labeling/runs/{id}    — a run's input/intake/candidates for labeling
+#   POST /api/admin/labeling/label        — append a label (run or candidate scope)
+#   POST /api/admin/labeling/export       — export labeled runs → eval datasets
+#   GET  /api/admin/labeling/provenance   — T5 % real vs synthetic per suite
+# ---------------------------------------------------------------------------
+
+def _require_labeling_enabled():
+    """RUN_CAPTURE must be on for the labeling surface to be live. Mirrors the
+    require_admin fail-closed pattern: flag off -> 503 (dormant), never 404-ish
+    pretend-not-here. Returns None on success, else raises."""
+    from utils import run_labels as _run_labels
+    if not _run_labels.RUN_CAPTURE:
+        raise HTTPException(status_code=503,
+                            detail="Labeling disabled (RUN_CAPTURE off)")
+    return _run_labels
+
+
+# Failures-first ordering of run_outcomes (I4). Outcome statuses from
+# run_capture.py:324-329. We deprioritize completed_with_action; everything else
+# (abandoned / zero_results / all_rejected / incomplete / rephrased) is a
+# labeling candidate (the run is where the model most needs ground truth).
+_OUTCOME_RANK = {
+    "abandoned_after_results": 0,
+    "all_rejected": 1,
+    "zero_results": 2,
+    "incomplete": 3,
+    "rephrased": 4,
+    "completed_with_action": 5,
+}
+
+
+@app.get("/api/admin/labeling/queue")
+def admin_labeling_queue(role: str = Depends(require_admin)):
+    """Failures-first queue of captured runs awaiting labels.
+
+    Joins run_outcomes (run_capture) with the run record (persistence) for a
+    compact queue row: run_id, outcome, part summary, phase, created_at, and
+    whether the run already has a run-scope label. Failures-first: outcomes
+    other than completed_with_action sort first.
+    """
+    _require_labeling_enabled()
+    from utils import run_capture as rc, run_labels as rl
+    from utils.procurement_agent.state import persistence
+    runs = persistence.list_runs(limit=500)
+    out = []
+    for r in runs:
+        rid = r["id"]
+        outcome_row = rc.read_outcome(rid)
+        outcome = outcome_row["outcome"] if outcome_row else rc.compute_outcome(rid)
+        specs = r.get("asset_specs_json") or {}
+        part = " ".join(
+            str(specs.get(k)) for k in ("manufacturer", "model", "part_number") if specs.get(k)
+        ) or None
+        has_intake_label = rl.current_label(rid, rl.SCOPE_RUN) is not None
+        out.append({
+            "id": rid,
+            "outcome": outcome,
+            "part": part,
+            "phase": r.get("current_phase"),
+            "created_at": r.get("created_at"),
+            "labeled": has_intake_label,
+        })
+    # Failures-first: lower rank sorts first; ties break by created_at desc.
+    # created_at is an ISO string — reverse-sort by negating the string only
+    # when present (None sorts last via a sentinel).
+    out.sort(key=lambda x: (_OUTCOME_RANK.get(x["outcome"], 9),
+                            0 if x.get("created_at") else 1,
+                            tuple(-ord(c) for c in (x.get("created_at") or ""))))
+    return {"count": len(out), "queue": out}
+
+
+@app.get("/api/admin/labeling/runs/{run_id}")
+def admin_labeling_run_detail(run_id: str, role: str = Depends(require_admin)):
+    """A run's labeling view: the first user turn (intake input), the intake
+    result, and every captured candidate with its score + verdict + the current
+    label (if any). This is what the labeling UI renders."""
+    _require_labeling_enabled()
+    from utils import run_capture as rc, run_labels as rl
+    from utils.procurement_agent.state import persistence
+    run = persistence.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    events = rc.read_events(run_id)
+    # First user turn = the input the live intake classifier consumed.
+    first_user = None
+    for e in events:
+        if e.get("event_type") == "turn_user":
+            first_user = (e.get("payload") or {}).get("content")
+            break
+    intake_result = None
+    for e in events:
+        if e.get("event_type") == "intake_result":
+            intake_result = e.get("payload")
+            break
+    # Candidates — scored + rejected, with the current per-candidate label.
+    candidates = []
+    for e in events:
+        et = e.get("event_type")
+        if et in ("candidate_scored", "candidate_rejected"):
+            p = e.get("payload") or {}
+            ref = p.get("candidate_id")
+            cur = rl.current_label(run_id, rl.SCOPE_CANDIDATE,
+                                   candidate_ref=ref) if ref else None
+            candidates.append({
+                "candidate_id": ref,
+                "tier": p.get("tier"),
+                "vendor_name": p.get("vendor_name"),
+                "suitability_score": p.get("suitability_score"),
+                "rejection_reason": p.get("rejection_reason"),
+                "pn_match_status": p.get("pn_match_status"),
+                "match_type": p.get("match_type"),
+                "verdict": "rejected" if et == "candidate_rejected" else "scored",
+                "label": (cur or {}).get("label"),
+            })
+    run_label = rl.current_label(run_id, rl.SCOPE_RUN)
+    return {
+        "run_id": run_id,
+        "asset_specs": run.get("asset_specs_json"),
+        "phase": run.get("current_phase"),
+        "first_user_turn": first_user,
+        "intake_result": intake_result,
+        "candidates": candidates,
+        "run_label": (run_label or {}).get("label"),
+        "provenance": f"real:{run_id}",
+    }
+
+
+class LabelRequest(BaseModel):
+    run_id: str
+    scope: str            # "run" | "candidate"
+    candidate_ref: Optional[str] = None
+    label: Dict[str, Any]
+    note: Optional[str] = None
+    labeled_by: Optional[str] = None
+
+
+@app.post("/api/admin/labeling/label")
+def admin_labeling_label(body: LabelRequest, role: str = Depends(require_admin)):
+    """Append a label (run or candidate scope). Append-only — a relabel adds a
+    new row; current_label returns the latest. The role label is the labeler
+    identity (admin token possession IS the admin role — §6)."""
+    _require_labeling_enabled()
+    from utils import run_labels as rl
+    if body.scope not in (rl.SCOPE_RUN, rl.SCOPE_CANDIDATE):
+        raise HTTPException(status_code=422, detail="scope must be 'run' or 'candidate'")
+    if body.scope == rl.SCOPE_CANDIDATE and not body.candidate_ref:
+        raise HTTPException(status_code=422,
+                            detail="candidate_ref required for candidate scope")
+    payload = dict(body.label)
+    if body.note is not None:
+        payload["note"] = body.note
+    rl.write_label(
+        body.run_id, body.scope, payload,
+        candidate_ref=body.candidate_ref,
+        labeled_by=body.labeled_by or role,
+    )
+    cur = rl.current_label(body.run_id, body.scope, candidate_ref=body.candidate_ref)
+    return {"ok": True, "current": (cur or {}).get("label"),
+            "label_id": (cur or {}).get("label_id")}
+
+
+@app.post("/api/admin/labeling/export")
+def admin_labeling_export(role: str = Depends(require_admin)):
+    """Export labeled runs into the eval datasets (intake + scoring). Live-faithful:
+    intake input = first user turn; scoring cases withheld when snippet/title
+    not captured (Night 1 gap — logged). Returns per-suite counts + withholds."""
+    _require_labeling_enabled()
+    from utils import run_capture as rc, run_labels as rl
+    from utils import eval_export as ex
+    from utils.procurement_agent.state import persistence
+
+    run_ids = rl.labeled_run_ids()
+    intake_emitted = 0
+    intake_withheld = 0
+    scoring_emitted = 0
+    scoring_withheld = 0
+    withhold_reasons: list[str] = []
+
+    for rid in run_ids:
+        events = rc.read_events(rid)
+        run = persistence.get_run(rid) or {}
+        specs = run.get("asset_specs_json") or {}
+        # Intake case from the run-scope label.
+        run_label_row = rl.current_label(rid, rl.SCOPE_RUN)
+        if run_label_row:
+            first_user = None
+            for e in events:
+                if e.get("event_type") == "turn_user":
+                    first_user = (e.get("payload") or {}).get("content")
+                    break
+            case = ex.build_intake_case(rid, first_user or "",
+                                        run_label_row["label"])
+            if case:
+                ex.append_intake_case(ex.INTAKE_REAL_DATASET, case)
+                intake_emitted += 1
+            else:
+                intake_withheld += 1
+                withhold_reasons.append(
+                    f"intake:{rid} — missing first user turn or invalid ground-truth label")
+        # Scoring cases from candidate-scope labels.
+        for e in events:
+            if e.get("event_type") != "candidate_scored":
+                continue
+            p = e.get("payload") or {}
+            ref = p.get("candidate_id")
+            if not ref:
+                continue
+            crow = rl.current_label(rid, rl.SCOPE_CANDIDATE, candidate_ref=ref)
+            if not crow:
+                continue
+            # Reconstruct the request (AssetSpecs) from the run's specs.
+            request = {
+                "manufacturer": specs.get("manufacturer") or "",
+                "model": specs.get("model") or "",
+                "part_number": specs.get("part_number") or "UNKNOWN-PN",
+                "voltage": specs.get("voltage") or "N/A",
+                "category": specs.get("category") or "Part",
+                "detected_type": specs.get("detected_type") or "",
+                "hp": specs.get("hp"),
+            }
+            # result: url + found_pn are recoverable from sourcing_results_json;
+            # snippet + title are NOT durable (Night 1 gap) -> build_scoring_case
+            # withholds unless a future capture extension supplies them.
+            cand = _find_candidate_in_results(run.get("sourcing_results_json"), ref)
+            result = {
+                "snippet": (cand or {}).get("snippet"),
+                "url": (cand or {}).get("source_url") or (cand or {}).get("url"),
+                "title": (cand or {}).get("title"),
+                "found_pn": (cand or {}).get("found_part_number")
+                            or (cand or {}).get("found_pn"),
+            }
+            case = ex.build_scoring_case(rid, ref, request, result, crow["label"])
+            if case:
+                ex.append_scoring_case(ex.SCORING_REAL_DATASET, case)
+                scoring_emitted += 1
+            else:
+                scoring_withheld += 1
+                withhold_reasons.append(
+                    f"scoring:{rid}:{ref} — snippet/title not captured (Night 1 gap)")
+
+    return {
+        "ok": True,
+        "runs": len(run_ids),
+        "intake": {"emitted": intake_emitted, "withheld": intake_withheld},
+        "scoring": {"emitted": scoring_emitted, "withheld": scoring_withheld},
+        "withhold_reasons": withhold_reasons,
+        "intake_dataset": ex.INTAKE_REAL_DATASET,
+        "scoring_dataset": ex.SCORING_REAL_DATASET,
+    }
+
+
+def _find_candidate_in_results(sourcing_results_json, candidate_ref: str):
+    """Locate a candidate by its candidate_id in the persisted sourcing_results
+    blob. The candidate_id is '<vendor_name>-t<n>-<idx>' (api_server:1264)."""
+    if not sourcing_results_json:
+        return None
+    try:
+        result = (sourcing_results_json if isinstance(sourcing_results_json, dict)
+                  else json.loads(sourcing_results_json))
+    except Exception:
+        return None
+    for tier_key, tier_n in (("tier_1", 1), ("tier_2", 2), ("tier_3", 3)):
+        for idx, c in enumerate(result.get(tier_key, {}).get("results", []) or []):
+            cid = f"{c.get('vendor_name', '')}-t{tier_n}-{idx}"
+            if cid == candidate_ref:
+                return c
+    return None
+
+
+@app.get("/api/admin/labeling/provenance")
+def admin_labeling_provenance(role: str = Depends(require_admin)):
+    """T5 — % real vs synthetic per eval suite (intake + scoring)."""
+    _require_labeling_enabled()
+    from utils import eval_export as ex
+    return ex.provenance_report()
 
 
 # ---------------------------------------------------------------------------
