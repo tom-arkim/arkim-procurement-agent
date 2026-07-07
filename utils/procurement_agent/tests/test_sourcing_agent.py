@@ -562,7 +562,20 @@ class TestTier3CapabilityPivot:
             seeded_results = [r for r in result if r.get("is_mock")]
             assert pivot_results or seeded_results
 
-    def test_capability_pivot_tags_results(self):
+    def test_capability_pivot_tags_results(self, monkeypatch, tmp_path):
+        # Isolate from on-disk brand_intelligence state. The assertion below
+        # requires _seeded_tier3_candidates to return [] (pure pivot results),
+        # but seeding fires when brand_intelligence has a cached row for the
+        # manufacturer+equipment_type (e.g. a 'grundfos|pump' row written by a
+        # live harness/dev run). conftest does not isolate brand_intelligence,
+        # so a polluted dev DB flips this test red regardless of test order.
+        # Pointing _DB_PATH at an empty tmp file makes get_brand_relationships
+        # return the empty record (no authorized_service_brands) → seeding
+        # short-circuits at `if not auth_brands: return []` → pure pivot.
+        # Production seeding logic is untouched; only the test's store is reset.
+        from utils import brand_intelligence
+        monkeypatch.setattr(brand_intelligence, "_DB_PATH", str(tmp_path / "bi_empty.sqlite"))
+
         agent  = SourcingAgent()
         specs  = agent._dict_to_specs({
             "manufacturer":  "Grundfos",
@@ -718,6 +731,166 @@ class TestTier2CacheSuitability:
         assert vendor is not None
         assert not vendor.get("rejection_reason"), \
             f"rfq cache hit should not be rejected, got: {vendor.get('rejection_reason')}"
+
+
+# ---------------------------------------------------------------------------
+# Cache-hit honest provenance (CLEANUP §7.1 / Phase 1 T3)
+# ---------------------------------------------------------------------------
+# The price_db cache stores a price found for a (manufacturer, PN) key but NOT
+# the PN-match verdict (no found_part_number, no pn_match_status). The
+# SourcingOption model default for match_type is "Exact OEM" — so a cache hit
+# that didn't set match_type would surface as isExactMatch=True with zero PN
+# evidence, an overclaim. T3 sets "Functional Alternative" (the least-dishonest
+# label) explicitly. The known_parts path already defaults honestly via
+# `or "Functional Alternative"`.
+class TestTier2CacheProvenance:
+    """T3 — a price_db cache hit must NOT default to match_type='Exact OEM'."""
+
+    def _run_tier2_with_cache(self, source: str) -> list[dict]:
+        agent = SourcingAgent()
+        run   = _make_run()
+        specs = agent._dict_to_specs(run.asset_specs_json)
+        weights = _URGENCY_WEIGHTS["predictive"]
+        cache = {
+            "CachedVendor": {
+                "price":        250.0,
+                "lead_days":    3,
+                "date_fetched": "2026-05-13T00:00:00",
+                "source":       source,
+                "url":          "https://cachedvendor.com/product/PN-TEST-001",
+            }
+        }
+        with patch("utils.price_db.get_cached_prices", return_value=cache):
+            with patch("utils.sourcing_archieved.tavily_client._search_vendor_prices", return_value=[]):
+                with patch("utils.sourcing_archieved.llm_parsing._llm_parse_results", return_value=[]):
+                    return agent._run_tier2(specs, weights)
+
+    def test_live_cache_hit_not_marked_exact_oem(self):
+        results = self._run_tier2_with_cache("live")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("match_type") != "Exact OEM", \
+            f"Cache hit must not default to 'Exact OEM' (no PN-match evidence), got: {vendor.get('match_type')}"
+        assert vendor.get("match_type") == "Functional Alternative", \
+            f"Expected 'Functional Alternative' (least-dishonest label), got: {vendor.get('match_type')}"
+
+    def test_rfq_cache_hit_not_marked_exact_oem(self):
+        results = self._run_tier2_with_cache("rfq")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("match_type") != "Exact OEM", \
+            f"rfq cache hit must not default to 'Exact OEM' (no PN-match evidence), got: {vendor.get('match_type')}"
+        assert vendor.get("match_type") == "Functional Alternative"
+
+    def test_cache_hit_emits_no_pn_match_status(self):
+        # The frontend's PnMatchLevel derives from pn_match_status; a cache hit
+        # has none (None -> "none"), so the UI shows no part-match claim —
+        # consistent with the "Functional Alternative" match_type.
+        results = self._run_tier2_with_cache("live")
+        vendor = next((r for r in results if r["vendor_name"] == "CachedVendor"), None)
+        assert vendor is not None
+        assert vendor.get("pn_match_status") is None, \
+            f"Cache hit must not synthesize a pn_match_status, got: {vendor.get('pn_match_status')}"
+        assert vendor.get("found_part_number") is None, \
+            f"Cache hit must not synthesize a found_part_number, got: {vendor.get('found_part_number')}"
+
+
+# ---------------------------------------------------------------------------
+# Cache-hit type-gate (CLEANUP §7.1 / Phase 1 T2)
+# ---------------------------------------------------------------------------
+# A price_db cache hit bypasses _compute_suitability_score, so a wrong-PART-TYPE
+# cached entry (a motor URL cached, then served on a valve request) would surface
+# at the hard-coded 50.0 score. T2 drops a confirmed-different-type entry; keeps
+# same-class and undetectable entries. The null-PN guard (T1) already prevents
+# PN-less specs from reading the cache, so these tests use a real identity (PN
+# present) — the gate is belt-and-suspenders for a real key that cached a
+# wrong-type listing (e.g. a category page saved under a real PN).
+class TestTier2CacheTypeGate:
+    """T2 — cache-served candidates are type-gated against the request's noun-class."""
+
+    def _run_tier2_with_cache(self, specs: dict, cache: dict) -> list[dict]:
+        agent = SourcingAgent()
+        run   = _make_run(specs=specs)
+        # _make_run injects voltage/category if absent; _dict_to_specs filters to
+        # AssetSpecs fields so extra keys are tolerated.
+        sp = agent._dict_to_specs(run.asset_specs_json)
+        weights = _URGENCY_WEIGHTS["predictive"]
+        with patch("utils.price_db.get_cached_prices", return_value=cache):
+            with patch("utils.sourcing_archieved.tavily_client._search_vendor_prices", return_value=[]):
+                with patch("utils.sourcing_archieved.llm_parsing._llm_parse_results", return_value=[]):
+                    return agent._run_tier2(sp, weights)
+
+    # The live contamination case: a motor URL cached, then served on a VALVE
+    # request. Confirmed-different (MOTOR != VALVE) -> dropped.
+    def test_motor_url_dropped_on_valve_request(self):
+        valve_specs = {
+            "manufacturer": "Tri-Clover", "model": "X", "part_number": "TV-2IN-TC",
+            "voltage": "N/A", "detected_type": "2 inch stainless ball valve tri-clamp",
+        }
+        cache = {
+            "eMotors Direct": {
+                "price": 500.0, "lead_days": 5,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://us.emotorsdirect.ca/item/baldor-bp5000bk08sp",
+            }
+        }
+        results = self._run_tier2_with_cache(valve_specs, cache)
+        assert not any(r["vendor_name"] == "eMotors Direct" for r in results), \
+            "Motor URL must be dropped on a valve request (confirmed-different noun-class)"
+
+    # Same cached entry, served on a MOTOR request -> same class -> kept.
+    def test_motor_url_kept_on_motor_request(self):
+        motor_specs = {
+            "manufacturer": "Baldor", "model": "EM3546T", "part_number": "EM3546T",
+            "voltage": "460V", "detected_type": "1.5 HP motor 56C frame",
+        }
+        cache = {
+            "eMotors Direct": {
+                "price": 500.0, "lead_days": 5,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://us.emotorsdirect.ca/item/baldor-bp5000bk08sp",
+            }
+        }
+        results = self._run_tier2_with_cache(motor_specs, cache)
+        assert any(r["vendor_name"] == "eMotors Direct" for r in results), \
+            "Motor URL must be kept on a motor request (same noun-class)"
+
+    # Undetectable result class (vendor + url carry no noun signal) -> kept on
+    # any request (the ESCI floor: never drop a possibly-correct result whose
+    # category isn't legible). Mirrors the existing CachedVendor test fixture.
+    def test_undetectable_vendor_survives(self):
+        valve_specs = {
+            "manufacturer": "Tri-Clover", "model": "X", "part_number": "TV-2IN-TC",
+            "voltage": "N/A", "detected_type": "2 inch stainless ball valve tri-clamp",
+        }
+        cache = {
+            "CachedVendor": {
+                "price": 250.0, "lead_days": 3,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://cachedvendor.com/product/PN-TEST-001",
+            }
+        }
+        results = self._run_tier2_with_cache(valve_specs, cache)
+        assert any(r["vendor_name"] == "CachedVendor" for r in results), \
+            "Undetectable-class cached entry must survive (no signal to gate on)"
+
+    # Request class undetectable -> keep everything (neutral; can't gate on a
+    # type we couldn't detect from the request). Mirrors _TYPE_GATE_QUERY_UNDETECTABLE.
+    def test_undetectable_request_keeps_wrong_type(self):
+        unk_specs = {
+            "manufacturer": "Acme", "model": "X", "part_number": "ACME-999",
+            "voltage": "N/A", "detected_type": "industrial spare",
+        }
+        cache = {
+            "eMotors Direct": {
+                "price": 500.0, "lead_days": 5,
+                "date_fetched": "2026-05-13T00:00:00", "source": "live",
+                "url": "https://us.emotorsdirect.ca/item/baldor-bp5000bk08sp",
+            }
+        }
+        results = self._run_tier2_with_cache(unk_specs, cache)
+        assert any(r["vendor_name"] == "eMotors Direct" for r in results), \
+            "Undetectable request class must keep cached entries (neutral gate)"
 
 
 # ---------------------------------------------------------------------------

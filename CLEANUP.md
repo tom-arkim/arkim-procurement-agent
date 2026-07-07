@@ -252,7 +252,8 @@ Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AW
 | **Kind** | Correctness gap â€” the cache-hit path returns cached candidates without re-running the suitability check the live path applies |
 | **Why it exists** | The cache short-circuits the pipeline for speed/cost; suitability re-validation was not threaded onto the cache-hit branch (only the live-search branch validates). |
 | **Risk / impact** | A candidate cached from an earlier (looser or wrong) run can surface again without being re-scored against the current request â€” a wrong result the live path would now reject can still appear via cache. |
-| **Recommended action** | Re-run suitability validation on the cache-hit path before returning, or invalidate/re-score cached edges when the scorer/flag changes. Mirror the live-path validation. |
+| **Status** | âœ… RESOLVED (Phase 1, the cache-revalidation fix). Three unconditional (not flag-gated) fixes landed on `feature/run-capture-overnight`: **T1** `price_db._make_key` returns `""` for null-mfg/PN specs so the shared `unknown\|UNKNOWN-PN` bucket is never read or written (commit `a922458`) â€” phase3 backport candidate. **T2** `_cache_type_gate` (`scoring.py`) drops a confirmed-different noun-class candidate at BOTH cache seams â€” `enterprise_search._call_enterprise_api` (price_db serve) and `api_server._result_from_cached_edges` (known_parts serve, closes the `:987-990` wrong-PART-TYPE gap) â€” commit `b9f18f8`. **T3** the price_db serve path sets `match_type="Functional Alternative"` instead of the `SourcingOption` model default `"Exact OEM"` (no PN was re-verified on a cache hit) â€” commit `27c8913`; phase3 backport candidate. **PURGE** the poisoned `unknown\|UNKNOWN-PN` bucket was deleted from `utils/price_db.json` (backup in `audit/t4-cache-backup/`); T1 prevents re-creation. **T4** regression: a VAGUE-tier harness re-run (12 `vague-*` parts, `INTAKE_TYPE_AWARE=1 SCORING_V2=1 RUN_CAPTURE=1`, caches cleared first) confirmed **zero** motor/pump-URL contamination on valve/solenoid/starter/hose/level/transmitter/gasket/belting/chain/gearbox-oil (the baseline 50-run had 4 motor URLs + 1 pump URL at suit=50.0 on each). See `audit/t4-cache-backup/T4_REPORT.md` for the before/after table. |
+| **Recommended action** | Resolved. Backport T1 + T3 (unconditional correctness) to phase3 once validated; T2 is the same kind but review the gate verdict table first. |
 
 ### 7.2 `SCORING_V2` sub-type gap â€” gate-valve-on-ball-valve (and similar) not distinguished
 
@@ -280,17 +281,27 @@ Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AW
 | **Risk / impact** | Ranking/gating may be off at the margins until tuned against real results; defaults are informed but not validated at scale. |
 | **Recommended action** | Once live sourcing data accumulates, calibrate the gate threshold + weights against real outcomes (precision/recall on labeled results); lock in with a regression fixture. |
 
-### 7.5 Component-of context is seal-only â€” non-seal components get no parent-context query
+### 7.5 Component-of context is seal-only — non-seal components get no parent-context query
 
 | Field | Detail |
 |---|---|
 | **File** | `utils/procurement_agent/part_type_classifier.py` + `part_type_registry.py` (ANCHORED regime is `mechanical_seal` only) |
-| **Kind** | Classifier/registry scope decision â€” not a bug. The ANCHORED regime (which sets `_component_of`) covers just `mechanical_seal`, so non-seal components (impeller, wear ring, shaft sleeve, diaphragm kit, drive chain, etc.) never get `_component_of` set and never reach the component-aware "[component] for [parent]" sourcing query. They stay clean only because Fix A (commit `1363b6f`) makes `_build_search_query` lead with `detected_type` unconditionally â€” so the query is component-led ("impeller ...") but carries no parent-machine context ("... for Goulds 3196"). |
+| **Kind** | Classifier/registry scope decision — not a bug. The ANCHORED regime (which sets `_component_of`) covers just `mechanical_seal`, so non-seal components (impeller, wear ring, shaft sleeve, diaphragm kit, drive chain, etc.) never get `_component_of` set and never reach the component-aware "[component] for [parent]" sourcing query. They stay clean only because Fix A (commit `1363b6f`) makes `_build_search_query` lead with `detected_type` unconditionally — so the query is component-led ("impeller ...") but carries no parent-machine context ("... for Goulds 3196"). |
 | **Why it exists** | The overnight intake redesign scoped the registry to 5 types with `mechanical_seal` as the sole ANCHORED type (the priority pair). Non-seal component-of detection was intentionally out of scope. |
 | **Risk / impact** | A non-seal component's sourcing query lacks the parent-machine anchor that disambiguates the right variant (e.g. an impeller for a Goulds 3196 vs a Goulds 3175). Sourcing still works via the component term, but is less precise than a seal query. |
-| **Recommended action** | Do NOT fix as a bug. Extending ANCHORED-regime component detection to other component types is a classifier/registry scope decision â€” evaluate against real trial demand for non-seal components before investing. If pursued, add the component types to the registry with `REGIME_ANCHORED` and update the classifier's `component_of` rules + the eval dataset's `test_component_of_only_for_anchored` invariant. |
+| **Recommended action** | Do NOT fix as a bug. Extending ANCHORED-regime component detection to other component types is a classifier/registry scope decision — evaluate against real trial demand for non-seal components before investing. If pursued, add the component types to the registry with `REGIME_ANCHORED` and update the classifier's `component_of` rules + the eval dataset's `test_component_of_only_for_anchored` invariant. |
+
+### 7.6 Test conftest does not isolate `brand_intelligence._DB_PATH` — live runs pollute test outcomes
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/tests/conftest.py` (isolates persistence + supplier_registry, but NOT `brand_intelligence`) |
+| **Kind** | Test isolation gap — on-disk store state leaks into tests |
+| **Why it exists** | `conftest.py` was built before `brand_intelligence.sqlite` carried test-relevant state. `_seeded_tier3_candidates` reads `get_brand_relationships`, which reads the real DB; a row written by a live harness/dev run makes seeding fire and prepends non-pivot candidates, flipping `test_capability_pivot_tags_results` red regardless of test order. |
+| **Risk / impact** | A test that asserts on seeding/sourcing behavior is non-deterministic in any working copy that has run live sourcing (harness, dev UI). Masked as "green" only on a pristine DB. |
+| **Recommended action** | Structural: add `brand_intelligence._DB_PATH` (and audit other non-isolated on-disk stores tests may read — `run_capture.sqlite`, `price_db.json`) to the conftest isolation set alongside `supplier_registry`/`known_parts`, so the suite is hermetic regardless of dev working-copy state. The per-test monkeypatch in `test_capability_pivot_tags_results` is a band-aid for one test; the conftest fix covers the class. |
 
 ---
 
-*Items are ordered by section, not by priority. All items are prototype-era technical debt â€”
+*Items are ordered by section, not by priority. All items are prototype-era technical debt —
 none block the current demo or the post-seed milestone.*

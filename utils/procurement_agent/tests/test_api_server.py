@@ -1258,6 +1258,129 @@ class TestKnownPartsCacheFirst:
         assert "Different Vendor" not in vendors  # discovery was skipped
 
 
+class TestKnownPartsCacheTypeGate:
+    """T2 — the known_parts cache-hit path (api_server._result_from_cached_edges)
+    drops a cached edge whose noun-class is confirmed DIFFERENT from the request's.
+    This closes the :987-990 known-gap (a pump edge cached under a seal part-key
+    can still score >=30, so the suitability floor alone never caught it)."""
+
+    def _seed_edge(self, monkeypatch, tmp_path, supplier_id, source_url, suitability=55.0):
+        """Write a single known_parts edge directly so the run hits the cache path
+        (not discovery). Uses the public upsert_edges so the on-disk shape matches
+        what a real run would write."""
+        from utils import known_parts
+        monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
+        pk = known_parts.canonical_part_key("Gusher Pumps", "84004-28-C238CBC")
+        known_parts.upsert_edges(pk, [{
+            "vendor_name": supplier_id, "source_url": source_url,
+            "tier": 2, "price": 250.0,
+            "match_type": "Functional Alternative",
+            "suitability_score": suitability,
+        }])
+        return known_parts.get_edges(pk)
+
+    def test_pump_edge_dropped_on_seal_request(self, api, monkeypatch, tmp_path):
+        # The exact :987-990 case — a pump URL cached under a seal part-key,
+        # scoring above the floor (55 > 30). Without T2 it surfaces; with T2 the
+        # request class (SEAL, from "mechanical seal") != result class (PUMP).
+        self._seed_edge(monkeypatch, tmp_path,
+                        supplier_id="shoppumps.com",
+                        source_url="https://www.shoppumps.com/category-s/355.htm",
+                        suitability=55.0)
+        specs = json.dumps({
+            "manufacturer": "Gusher Pumps", "part_number": "84004-28-C238CBC",
+            "detected_type": "mechanical seal", "model": "3196", "voltage": "N/A",
+        })
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=specs)
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing(), artifact=None)
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        vendors = [c["vendorName"] for c in detail["sourcing_results"]["tier2"]]
+        assert "shoppumps.com" not in vendors, \
+            "Pump edge cached under a seal part-key must be dropped (type-gate, :987-990 closed)"
+
+    def test_same_class_edge_survives(self, api, monkeypatch, tmp_path):
+        # Same part-key, a SEAL-class edge -> kept (the floor clears and the
+        # type matches). The normal cache-hit case is preserved.
+        self._seed_edge(monkeypatch, tmp_path,
+                        supplier_id="sealit123.com",
+                        source_url="https://sealit123.com/mechanical-seals/x",
+                        suitability=75.0)
+        specs = json.dumps({
+            "manufacturer": "Gusher Pumps", "part_number": "84004-28-C238CBC",
+            "detected_type": "mechanical seal", "model": "3196", "voltage": "N/A",
+        })
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=specs)
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing(), artifact=None)
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        vendors = [c["vendorName"] for c in detail["sourcing_results"]["tier2"]]
+        assert "sealit123.com" in vendors, \
+            "Same-class cached edge must survive the type-gate"
+
+    def test_undetectable_edge_survives(self, api, monkeypatch, tmp_path):
+        # An edge whose vendor+url carry no noun-class signal -> kept (ESCI floor:
+        # never drop a possibly-correct result whose category isn't legible).
+        self._seed_edge(monkeypatch, tmp_path,
+                        supplier_id="industrialsupply.com",
+                        source_url="https://industrialsupply.com/p/12345",
+                        suitability=60.0)
+        specs = json.dumps({
+            "manufacturer": "Gusher Pumps", "part_number": "84004-28-C238CBC",
+            "detected_type": "mechanical seal", "model": "3196", "voltage": "N/A",
+        })
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=specs)
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing(), artifact=None)
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        vendors = [c["vendorName"] for c in detail["sourcing_results"]["tier2"]]
+        assert "industrialsupply.com" in vendors, \
+            "Undetectable-class cached edge must survive (no signal to gate on)"
+
+
+class TestKnownPartsCacheProvenance:
+    """T3 — the known_parts cache-hit path already defaults match_type honestly
+    (`or 'Functional Alternative'`); this locks that in so a future change can't
+    silently revert to the 'Exact OEM' overclaim. A cached edge with NO stored
+    match_type must surface as Functional Alternative, never Exact OEM."""
+
+    def test_edge_without_match_type_defaults_honestly(self, api, monkeypatch, tmp_path):
+        from utils import known_parts
+        monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
+        pk = known_parts.canonical_part_key("Gusher Pumps", "84004-28-C238CBC")
+        # No match_type on the candidate -> upsert_edges stores None.
+        known_parts.upsert_edges(pk, [{
+            "vendor_name": "sealit123.com",
+            "source_url": "https://sealit123.com/mechanical-seals/x",
+            "tier": 2, "price": 53.25, "suitability_score": 75.0,
+        }])
+        specs = json.dumps({
+            "manufacturer": "Gusher Pumps", "part_number": "84004-28-C238CBC",
+            "detected_type": "mechanical seal", "model": "3196", "voltage": "N/A",
+        })
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=specs)
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing(), artifact=None)
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+
+        detail = api.get(f"/api/runs/{rid}").json()
+        cand = next((c for c in detail["sourcing_results"]["tier2"]
+                     if c["vendorName"] == "sealit123.com"), None)
+        assert cand is not None
+        # isExactMatch is mapped from match_type == "Exact OEM"; a cached edge
+        # with no stored match_type must NOT claim exact.
+        assert cand["isExactMatch"] is False, \
+            "Cached edge with no stored match_type must not surface as Exact OEM"
+        assert cand["isAftermarket"] is False, \
+            "Cached edge with no stored match_type is Functional Alternative, not Aftermarket"
+
+
 class TestRejectSubmission:
     def test_happy_transitions_to_cancelled(self, api):
         rid = _create_pending(api, submission_id="sub-rej")

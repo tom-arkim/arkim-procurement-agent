@@ -70,6 +70,7 @@ if DEMO_MODE:
 from utils.procurement_agent.agents.intake_agent import IntakeAgent
 from utils.models import SourcingRun
 from utils.marketplace_registry import is_marketplace
+from utils import run_capture as _run_capture  # Night 1 — RUN_CAPTURE flag-gated, inert when off
 
 import secrets
 
@@ -740,6 +741,30 @@ def _vendor_type(merchant_type: str) -> str:
     }.get(merchant_type, "NationalDistributor")
 
 
+def _specs_from_dict(specs_dict: dict):
+    """Build an AssetSpecs from the run's asset_specs_json dict for the cache path.
+
+    Minimal, mock-independent field-filter (mirrors SourcingAgent._dict_to_specs'
+    filtering without coupling the cache path to the SourcingAgent class — which
+    tests mock, and which the discovery path below replaces wholesale). Used only
+    to detect the request noun-class for the T2 cache type-gate; on any failure
+    the caller treats the class as undetectable (None) and keeps cached edges.
+    """
+    import dataclasses
+    from utils.models import AssetSpecs
+    fields = {f.name for f in dataclasses.fields(AssetSpecs)}
+    filtered = {k: v for k, v in (specs_dict or {}).items() if k in fields}
+    required = {"manufacturer", "model", "part_number", "voltage"}
+    kwargs = {k: v for k, v in filtered.items() if k not in required}
+    return AssetSpecs(
+        manufacturer=filtered.get("manufacturer") or "Unknown",
+        model=filtered.get("model") or "Unknown",
+        part_number=filtered.get("part_number") or "UNKNOWN-PN",
+        voltage=filtered.get("voltage") or "N/A",
+        **kwargs,
+    )
+
+
 def _pn_match_level(opt: dict, tier: int) -> str:
     if tier == 1:
         return "exact" if opt.get("found_part_number") else "none"
@@ -967,7 +992,7 @@ def _transform_sourcing_results(raw: dict, quote_index: Optional[dict] = None) -
 # Background sourcing task
 # ---------------------------------------------------------------------------
 
-def _result_from_cached_edges(edges: list) -> dict:
+def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = None) -> dict:
     """Reconstruct the SourcingAgent result shape from cached known_parts edges, so a
     cache hit flows through the same transform/persist path without re-discovery.
 
@@ -988,8 +1013,21 @@ def _result_from_cached_edges(edges: list) -> dict:
     score >=30) — clearing those requires the query fix (Fix A) + clearing the
     poisoned cache key (Fix B2), not this floor. Re-uses the same
     TIER_SURFACE_MIN_SUITABILITY constant and the annotate-then-skip discipline
-    the SourcingAgent + _transform_sourcing_results use."""
+    the SourcingAgent + _transform_sourcing_results use.
+
+    T2 — cache type-gate (CLEANUP §7.1 / Phase 1): in addition to the floor, a
+    cached edge is DROPPED when its noun-class (classified from vendor + url) is
+    confirmed DIFFERENT from the request's noun-class. This catches the
+    wrong-PART-TYPE case the floor misses (the :987-990 comment above): a pump
+    edge cached under a seal part-key can still score >=30, but it is NOT a
+    seal, so on a seal request it is now dropped. ``request_noun_class`` is the
+    request's detected noun-class (from ``scoring._query_noun_class``), threaded
+    in from the call site; None (request undetectable) → keep everything
+    (neutral, mirrors the TypeGate's query-undetectable floor). Undetectable
+    result class → keep (ESCI floor). Same class → keep. Confirmed-different
+    → drop."""
     from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+    from utils.sourcing_archieved.scoring import classify_result_noun_class_dominant
     tiers: dict = {1: [], 2: [], 3: []}
     for e in edges:
         price = e.get("price")
@@ -1025,6 +1063,19 @@ def _result_from_cached_edges(edges: list) -> dict:
                 f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
             )
             continue
+        # T2 — cache type-gate: drop a confirmed-different-type cached edge. The
+        # floor above catches below-score edges; this catches wrong-PART-TYPE
+        # edges that score well (the :987-990 known-gap, now closed).
+        if request_noun_class is not None:
+            r_cls = classify_result_noun_class_dominant(
+                cand["vendor_name"], None, "", cand.get("source_url") or "")
+            if r_cls is not None and r_cls != request_noun_class:
+                print(
+                    f"[Sourcing] Rejected cached edge (type_gate): "
+                    f"{cand['vendor_name']} result_class={r_cls} "
+                    f"!= request_class={request_noun_class}"
+                )
+                continue
         t = e.get("tier") if e.get("tier") in (1, 2, 3) else (3 if price is None else 2)
         tiers[t].append(cand)
 
@@ -1069,12 +1120,25 @@ def _run_sourcing_background(
     part_key = ""
     try:
         from utils import known_parts
+        from utils.sourcing_archieved.scoring import _query_noun_class
         part_key = known_parts.canonical_part_key(
             specs_dict.get("manufacturer"), specs_dict.get("part_number"))
         if part_key and not specs_dict.get("exact_only"):
             edges = known_parts.get_edges(part_key)
             if edges:
-                result = _result_from_cached_edges(edges)
+                # T2 — detect the request's noun-class once, thread it into the
+                # cache reconstruction so wrong-PART-TYPE cached edges are dropped
+                # (a pump edge cached under a seal part-key, etc.). None on
+                # undetectable → _result_from_cached_edges keeps everything.
+                # Built directly off AssetSpecs fields (not SourcingAgent._dict_to_specs)
+                # so the cache path doesn't depend on the SourcingAgent class — which
+                # tests mock, and which the discovery path below replaces wholesale.
+                req_cls = None
+                try:
+                    req_cls = _query_noun_class(_specs_from_dict(specs_dict))
+                except Exception:
+                    req_cls = None
+                result = _result_from_cached_edges(edges, request_noun_class=req_cls)
                 log.info("[%s] known_parts cache HIT (%d suppliers) — skipping discovery", run_id, len(edges))
     except Exception as exc:
         log.warning("[%s] known_parts cache read failed: %s", run_id, exc)
@@ -1183,6 +1247,35 @@ def _run_sourcing_background(
             orm.current_phase = Phase.COMPARISON.value
             orm.updated_at = datetime.now(timezone.utc)
             session.commit()
+    # Night 1 — capture the sourcing result set (RUN_CAPTURE-gated, fail-soft).
+    # Captured HERE (not at the deep `[Sourcing]` print sites in
+    # enterprise_search.py) because run_id is in scope only at this boundary —
+    # the per-tier query builders have no run_id (I2 EXPECTED, confirmed).
+    # query_issued captures the per-tier INTENT derived from specs (the literal
+    # provider query string is built deeper and is a flagged not-captured gap).
+    try:
+        _mfr = specs_dict.get("manufacturer") or ""
+        _model = specs_dict.get("model") or ""
+        _pn = specs_dict.get("part_number") or ""
+        _query_intent = " ".join(p for p in (_mfr, _model, _pn) if p).strip() or "(spec-based)"
+        for _tier_key, _tier_n in (("tier_1", 1), ("tier_2", 2), ("tier_3", 3)):
+            _run_capture.capture_query(run_id, _tier_n, _query_intent, part_key=part_key or None)
+            for _idx, _cand in enumerate(result.get(_tier_key, {}).get("results", [])):
+                _cand_id = f"{_cand.get('vendor_name', '')}-t{_tier_n}-{_idx}"
+                # Capture EVERY candidate — scored OR rejected — so the flywheel
+                # sees the full verdict set (the rejected ones carry the gate's
+                # rejection_reason: the "why this was cut" signal).
+                _run_capture.capture_candidate(run_id, _tier_n, {**_cand, "candidate_id": _cand_id, "tier": _tier_n})
+        _displayed = [
+            {**_c, "candidate_id": f"{_c.get('vendor_name', '')}-t{_n}-{_i}", "tier": _n}
+            for _tk, _n in (("tier_1", 1), ("tier_2", 2), ("tier_3", 3))
+            for _i, _c in enumerate(result.get(_tk, {}).get("results", []))
+            if not _c.get("rejection_reason")
+        ]
+        _run_capture.capture_results_displayed(run_id, _displayed)
+    except Exception:
+        # Capture must never break sourcing write-back; run_capture counts its own failures.
+        pass
     log.info("[%s] Sourcing complete → comparison", run_id)
 
 
@@ -1657,6 +1750,11 @@ def send_message(run_id: str, body: SendMessageRequest, request: Request):
     thread = _messages.setdefault(run_id, [])
     thread.append({"id": str(uuid.uuid4()), "role": "user",
                    "content": body.content, "created_at": now})
+    # Night 1 — capture the user turn (RUN_CAPTURE-gated, fail-soft, no-op when off).
+    # The user/agent turn is NOT durably persisted anywhere today (in-memory
+    # `_messages`); this is the first durable home (I1 gap). Stores text as-is
+    # (no redaction pipeline exists — I3 default; flagged PII surface).
+    _run_capture.capture_turn(run_id, "user", body.content)
 
     # Find the last agent clarification question for context
     prior_question: Optional[str] = None
@@ -1757,6 +1855,17 @@ def send_message(run_id: str, body: SendMessageRequest, request: Request):
         "created_at": now,
     }
     thread.append(agent_reply)
+    # Night 1 — capture the agent reply + the intake result for this turn.
+    _run_capture.capture_turn(run_id, "agent", reply_text)
+    _run_capture.capture_intake_result(
+        run_id,
+        sufficient=bool(result.get("sufficient")),
+        proceed_state=proceed_state or None,
+        manufacturer_confidence=result.get("manufacturer_confidence"),
+        part_id_confidence=result.get("part_id_confidence"),
+        asset_specs=result.get("asset_specs"),
+        follow_up_question=result.get("follow_up_question"),
+    )
 
     return SendMessageResponse(
         run_id=run_id,
@@ -1927,6 +2036,18 @@ async def upload_nameplate(
         "created_at": now,
     }
     thread.append(agent_reply)
+    # Night 1 — capture the nameplate upload turn + intake result (RUN_CAPTURE-gated).
+    _run_capture.capture_turn(run_id, "agent", reply_text)
+    if result is not None:
+        _run_capture.capture_intake_result(
+            run_id,
+            sufficient=bool(result.get("sufficient")),
+            proceed_state=proceed_state or None,
+            manufacturer_confidence=result.get("manufacturer_confidence"),
+            part_id_confidence=result.get("part_id_confidence"),
+            asset_specs=result.get("asset_specs"),
+            follow_up_question=result.get("follow_up_question"),
+        )
 
     return {
         "run_id":   run_id,
@@ -2086,6 +2207,9 @@ def select_candidate(run_id: str, body: SelectCandidateRequest):
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the select-candidate user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "select_candidate",
+                                     detail={"candidate_id": body.candidate_id, "tier": body.tier})
     return {"run_id": run_id, "phase": Phase.PENDING_FIRST_APPROVAL.value}
 
 
@@ -2234,6 +2358,11 @@ def create_order_now(run_id: str, body: OrderNowRequest):
             run.updated_at = now
             phase = run.current_phase
             session.commit()
+            # Night 1 — capture the order-now user action (at/above-threshold path).
+            _run_capture.capture_user_action(run_id, "order_now",
+                                             detail={"candidate_id": body.candidate_id, "tier": body.tier,
+                                                     "quantity": qty, "channel": channel,
+                                                     "pending_approval": True})
             return {"pending_approval": True, "order": None, "phase": phase}
 
         # Sub-threshold (auto-approved, 0 approvers): advance the run THROUGH approval so
@@ -2265,6 +2394,11 @@ def create_order_now(run_id: str, body: OrderNowRequest):
     if not order:
         raise HTTPException(status_code=500, detail="Order capture failed")
     _persist_order_on_run(run_id, order)
+    # Night 1 — capture the order-now user action (sub-threshold path; the
+    # at/above-threshold path returns earlier and is captured below).
+    _run_capture.capture_user_action(run_id, "order_now",
+                                     detail={"candidate_id": body.candidate_id, "tier": body.tier,
+                                             "quantity": qty, "channel": channel})
     return {"pending_approval": False, "order": order, "phase": phase}
 
 
@@ -2340,6 +2474,9 @@ def approve_run(run_id: str, body: ApproveRequest, caller: Optional[Caller] = De
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the approve user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "approve",
+                                     detail={"approver_role": body.approver_role, "next_phase": next_phase.value})
     return {"run_id": run_id, "phase": next_phase.value}
 
 
@@ -2373,6 +2510,8 @@ def reject_run(run_id: str, body: RejectRequest):
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the reject user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "reject", detail={"approver_role": body.approver_role})
     return {"run_id": run_id, "phase": Phase.COMPARISON.value}
 
 
@@ -2439,6 +2578,8 @@ def confirm_intake(
     background_tasks.add_task(
         _run_sourcing_background, run_id, specs_dict, urgency_factor, warranty_status
     )
+    # Night 1 — capture the confirm-intake user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "confirm_intake", detail={"exact_only": exact_only})
     return {"run_id": run_id, "phase": Phase.SOURCING.value}
 
 
@@ -2464,6 +2605,8 @@ def initiate_outreach(run_id: str, body: OutreachRequest):
         run.updated_at = datetime.now(timezone.utc)
         session.commit()
 
+    # Night 1 — capture the outreach user action (RUN_CAPTURE-gated, fail-soft).
+    _run_capture.capture_user_action(run_id, "outreach", detail={"candidate_ids": body.candidate_ids})
     return {
         "run_id": run_id,
         "candidates_contacted": len(body.candidate_ids),
@@ -2602,7 +2745,14 @@ def health():
     # demo_mode lets the frontend derive the demo state from the backend it's actually talking
     # to (single source of truth) — used to gate transparency copy (e.g. drop the gated-off
     # Tier-1 "Arkim network" mention from the sourcing loader) so the UI matches what runs.
-    return {"status": "ok", "version": "1.0.0-phase1", "demo_mode": DEMO_MODE}
+    body = {"status": "ok", "version": "1.0.0-phase1", "demo_mode": DEMO_MODE}
+    # Night 1 — surface the capture-write failure counter ONLY when RUN_CAPTURE
+    # is on, so the flag-off health response stays byte-identical (T5 inertness).
+    # The existing test_health assertion (test_api_server.py) pins the flag-off
+    # body and stays green untouched.
+    if _run_capture.RUN_CAPTURE:
+        body["capture_failures"] = _run_capture.capture_failures()
+    return body
 
 
 @app.get("/api/debug/llm")

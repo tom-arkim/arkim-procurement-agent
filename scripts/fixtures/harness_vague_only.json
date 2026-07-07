@@ -1,0 +1,62 @@
+[
+  {
+    "id": "vague-motor",
+    "desc": "1.5 HP motor 56C frame",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-gearbox-oil",
+    "desc": "food-grade gearbox oil",
+    "expect": "vague (category only)"
+  },
+  {
+    "id": "vague-valve",
+    "desc": "2 inch stainless ball valve tri-clamp",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-solenoid",
+    "desc": "3/4 inch NPT stainless solenoid valve 24VDC",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-transmitter",
+    "desc": "sanitary pressure transmitter 4-20mA 0-100 psi",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-starter",
+    "desc": "10 HP 460V motor starter NEMA 4X washdown",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-hose",
+    "desc": "1 inch stainless braided flexible hose 24 inch long",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-belting",
+    "desc": "FDA food grade conveyor belt 12 inch wide",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-gasket",
+    "desc": "high temperature steam gasket 150 lb flange",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-washdown-motor",
+    "desc": "washdown duty motor 2 HP 145TC",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-chain",
+    "desc": "number 60 roller chain 10 feet",
+    "expect": "vague (specs, no PN)"
+  },
+  {
+    "id": "vague-level",
+    "desc": "level sensor for a stainless mixing tank",
+    "expect": "vague (component-of, no PN)"
+  }
+]

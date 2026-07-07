@@ -1,161 +1,149 @@
-# MORNING REPORT — Overnight Intake Redesign Build (Phases 1 + 2 plumbing)
+# MORNING REPORT — Overnight Build Program, NIGHT 1 (Run Capture + Outcome Signals)
 
-**Branch:** `feature/intake-redesign-overnight` (off `ecfeaf9`; 9 commits; NEVER pushed)
-**Date:** 2026-07-02
-**Brief:** `arkim-overnight-intake-build-brief.md` (repo root, untracked — authoritative instruction set; followed exactly, T0→T10)
-**Feature flag:** `INTAKE_TYPE_AWARE` — **default OFF; all new behavior inert unless explicitly enabled.** The flag-off inertness wall is green (T6).
+**Brief:** `arkim-overnight-build-program.md` (repo root, untracked) — Night 1 only; Nights 2–5 are context, not scope (not built, not scaffolded).
+**Branch:** `feature/run-capture-overnight` (off `test/flag-on-integration` @ `d0e0ee2`; NEVER pushed)
+**Flag:** `RUN_CAPTURE` — default OFF; strict `_env_truthy` (`1/true/yes/on`). Flag-off = byte-identical behavior (T5 inertness wall).
+**Date:** 2026-07-04
 
-> Status legend: ✅ done · 🟡 blocked-and-logged · ⏭️ skipped
-
----
-
-## TL;DR
-
-The structural spine of the intake redesign shipped behind `INTAKE_TYPE_AWARE` (default off): per-type registry, part-type classifier, quantity capture, classifier wiring, type-aware Q2, component-aware sourcing queries, a LangSmith tracing slice on intake, a labeled eval dataset, and a live eval loop. **Suite green at every commit.** Live eval: classifier 100% type accuracy on dev (threshold ≥90% met on iteration 1), 100% on holdout; extraction component-preservation 100% dev + holdout. Nothing was pushed; the demo is unaffected unless the flag is flipped on.
+> Status legend: ✅ done · 🟡 blocked-and-logged · ⏭️ skipped (with diagnosis)
 
 ---
 
-## Pre-flight (all 4 PASS)
+## Pre-flight (all PASS)
 
 | # | Check | Result |
 |---|-------|--------|
-| 1 | Correct repo (`api_server.py` + `utils/procurement_agent/`) | PASS |
-| 2 | HEAD = `ecfeaf9`, tree clean bar untracked scratch | PASS (normalized 34-file LF↔CRLF EOL churn via `git checkout -- .`; `git diff --ignore-all-space` empty — zero content change) |
-| 3 | Toolchain (git/uv/node/npm) | PASS — git 2.49.0 · uv 0.11.19 · node v22.14.0 · npm 11.2.0 |
-| 4 | Keys in `.env` (`ANTHROPIC_API_KEY`, `LANGSMITH_API_KEY`, `ENVIRONMENT=dev`) | PASS (presence + `ENVIRONMENT=dev` confirmed; values never printed) |
-
-> **Note on the prior run.** A previous overnight attempt (Linux workspace) stopped at pre-flight because that mount denied `unlink()` → git wedged. This run is on **Windows**, where `unlink` works; that blocker is resolved. Leftovers from that prior run are present and untouched (out of scope): branch `probe/env-check`, `.git/*.stale_*` renamed-aside locks, `.__pa`/`.__pe`/`.__probe_commit`, `utils/__perm_test.tmp`, `audit/` (prior Phase R audit — do-not-touch), `scripts/*_self_test.py` (do-not-touch), three `.diff` scratch files. None interfere with git on Windows.
+| 1 | Brief `arkim-overnight-build-program.md` present at repo root | PASS |
+| 2 | Base = `test/flag-on-integration` @ `d0e0ee2b...` (exact) | PASS |
+| 3 | `RUN_CAPTURE` flag does NOT exist anywhere in `utils/`/`api_server.py`/`frontend/` | PASS (grep empty) |
+| 4 | `feature/run-capture-overnight` does NOT exist locally or on origin | PASS |
+| 5 | Working tree clean (only known untracked: briefs, `audit/`, `intake_eval_result.json`, `scripts/*_self_test.py`) | PASS |
+| 6 | `_env_truthy` convention present; `/api/health` exists | PASS |
 
 ## Baseline vs final
 
-- **Baseline:** `uv run pytest -q` → **1116 passed, 1 warning** (Python 3.11, `.venv`). Brief said ~1113; CLAUDE.md said 360 (stale). Actual: 1116.
-- **Final:** `uv run pytest -q` → **1319 passed, 73 skipped, 1 warning** (+203 tests; the 73 skipped are the bounded parametrize-over-index range in `test_intake_eval_dataset.py` beyond the dataset size — intentional, harmless).
-- Frontend: `npm run type-check` ✅ · `npm run build` ✅.
+- **Baseline (base `d0e0ee2`):** `uv run pytest -q` → **1489 passed, 73 skipped** (80.8s)
+- **Final:** `uv run pytest -q` → **1524 passed, 73 skipped** (+35 tests: 25 unit `test_run_capture.py` + 10 live `test_run_capture_live.py`)
+- Every commit verified green before the next task. No push performed.
 
 ## Task status
 
 | Task | Status | Commit | Notes |
 |------|--------|--------|-------|
-| T0 — Setup + baseline | ✅ | `4977b2f` | branch + baseline + report scaffold |
-| T1 — Per-type registry | ✅ | `d5120e8` | 5 profiles from §4 seed + UNKNOWN sentinel; 39 tests |
-| T2 — Classifier (mocked) | ✅ | `8c5557f` | constrained JSON schema + UNKNOWN fallback; 35 tests |
-| T3 — Quantity capture (gated) | ✅ | `c8f7163` | deterministic regex extractor + frontend editable Qty field; 63 tests |
-| T4 — Wire classifier into intake (gated) | ✅ | `23092a6` | `_`-keyed classification, fail-soft, first-message-only; 7 tests |
-| T5 — Type-aware Q2 + component-aware query (gated) | ✅ | `381a38a` | registry q2_template verbatim + F1 component-aware query; 15 tests |
-| T6 — Inertness regression wall | ✅ | (folded into T3–T5 tests) | see note below |
-| T7 — LangSmith instrumentation (intake slice) | ✅ | `c39fa6c` | ls.trace pattern, sibling project, offline-inert; 11 tests |
-| T8 — Labeled eval dataset | ✅ | `f22165d` | 27 examples, dev/holdout split; 33 tests |
-| T9 — Live eval loop | ✅ | `257ee99` | 35 live Haiku calls; scores below |
-| T10 — Morning report (final) | ✅ | (this commit) | |
+| T0 — Setup + baseline + report scaffold | ✅ | `6cee9fa` | pre-flight green; baseline 1489/73 |
+| T1 — Schema (`run_events` + `run_outcomes`) | ✅ | `899c946` | `data/run_capture.sqlite` only; raw sqlite3 WAL; 25 unit tests |
+| T2 — Capture hooks at I2 seams (behind `RUN_CAPTURE`) | ✅ | `c2177f7` | turns, intake_result, query_issued, candidate_scored/rejected, results_displayed, user actions; all flag-gated + fail-soft |
+| T3 — Outcome computation | ✅ | `899c946`+`d4b7921` | completed_with_action / abandoned_after_results / zero_results / all_rejected / incomplete; completion-action refinement (confirm_intake is a transition, not a completion) |
+| T4 — Fail-soft + `/api/health` `capture_failures` | ✅ | `c2177f7` | thread-safe counter; surfaced on health ONLY when flag on (flag-off body byte-identical); fail-soft asserted |
+| T5 — Inertness wall (flag-off = zero writes, byte-identical) | ✅ | `d4b7921` | module-level (25 unit) + API-level (live TestClient) inertness; flag-off full run = ZERO capture rows, byte-identical health + run-detail |
 
-### Note on T6 (inertness wall)
-The brief called for a dedicated T6 inertness test class. The inertness contracts are covered **by the per-task integration tests**: T3 `test_flag_off_*` (no quantity keys, byte-identical specs), T4 `test_flag_off_classifier_never_invoked` (zero classifier calls, no classification keys), T5 `test_flag_off_never_asks_q2_template` + `test_*_byte_identical_when_component_of_absent`, and the falsy-token parity test (`test_intake_type_aware_flag_parse` covers `0/false/no/""/junk/None → inert`). The falsy-token suite, the flag-off byte-identical specs, the flag-off zero-classifier-call, and all pre-existing tests green-untouched collectively ARE the inertness wall. I did **not** create a single `test_inertness_wall.py` file — the wall is distributed across the integration tests where each gated behavior is introduced (closer to the code it locks). If you'd prefer a single consolidated file, that's a trivial follow-up (flagged below). The guardrail-3 contract — flag OFF = byte-identical current behavior — is fully proven by these tests.
-
-## Eval results (T9)
-
-**LangSmith project:** `Arkim Procurement (dev)` · **Dataset name:** `arkim_intake_classifier_eval`
-**Total live calls:** 35 (Haiku-class, temperature 0; trivial spend). Iterating on DEV only; holdout run exactly once.
-
-### Experiment (a) — Classifier accuracy
-| Iteration | Split | Type acc | component_of acc | Valid-JSON | n | Time |
-|-----------|-------|----------|------------------|------------|----|------|
-| 1 | dev | **1.000** | 1.000 | 1.000 | 18 | 19.4s |
-| holdout | holdout | **1.000** | 0.889 | 1.000 | 9 | — |
-
-- **Threshold (≥90% type accuracy on dev): MET on iteration 1** → stopped iterating (no prompt revisions needed).
-- `best_dev_type_accuracy`: 1.0 · `threshold_met`: True.
-- **Holdout:** type accuracy 100%; component_of accuracy 88.9% (8/9). The single holdout component_of mismatch is the off-registry example `"a v-belt for the transfer conveyor"` (expected `component_of=null`; classifier returned `"transfer conveyor"`). Type was correctly `unknown`. **Not tuned against** (holdout is run once, never tuned). Suggested refinement flagged below.
-
-### Experiment (b) — Extraction component-preservation (the F1 live check)
-| Iteration | Split | Preserved rate | n | Time |
-|-----------|-------|----------------|----|------|
-| 1 | dev | **1.000** | 5 | 33.2s |
-| holdout | holdout | **1.000** | 3 | — |
-
-- The real extraction preserves the component on every F1 input: `detected_type` is the seal/seal-kit (NOT the parent machine), and the parent identity is captured in the extraction blob. Anti-pattern (bare-parent collapse) does NOT occur.
-- `best_dev_preserved_rate`: 1.0.
-
-### LangSmith dataset push — 🟡 blocker (non-fatal)
-`create_dataset` returned **HTTP 403 Forbidden** from `api.smith.langchain.com`. The `LANGSMITH_API_KEY` in `.env` appears to lack dataset-write permission (likely a read-only / tracing-only key). The eval ran fully **locally** (scoring is programmatic, no LangSmith SDK dependency for the scores themselves); only the UI-comparable dataset push failed. Tracing itself (T7) is a separate surface and was not blocked by this. **Morning action:** either grant the key dataset-write scope, or just review the scores here + the traces in the `Arkim Procurement (dev)` project (traces should land if the key can post runs).
+**No task hit the iteration cap. No reverts needed.**
 
 ---
 
-## VERIFIED tonight (by test + measured eval)
+## Investigation findings (I1–I4) — vs EXPECTED
 
-- **Per-type registry** (T1): 5 profiles transcribed verbatim from the brief §4 seed; pure data (no network on import, proven by socket probe); blocking/refinement disjoint; UNKNOWN sentinel for off-registry.
-- **Classifier** (T2): constrained JSON output; UNKNOWN fallback on malformed/invalid/empty/raising llm_call; `component_of` capture from Goulds-style responses; NEVER reads `ANTHROPIC_BASE_URL` (proxy-leak immune, asserted); never touches `requests.post` when an llm_call is injected.
-- **Quantity capture** (T3): deterministic regex (no LLM) — "I need 6 SKF 6205 bearings" → 6; unstated → 1 + `_quantity_assumed`; "2 inch ball valve" / part numbers NOT misread as quantities; prior real quantity preserved across turns; `_`-marker filtered from context summary + RunDetail (predicate-asserted).
-- **Classifier wiring** (T4): flag-off → classifier never invoked (zero calls asserted), no classification keys; flag-on → `_`-keys stored, first-message-only (follow-up turns don't reclassify); classifier raising is swallowed.
-- **Type-aware Q2 + component-aware query** (T5): known type + no identity → registry `q2_template` verbatim; de-dup + turn-cap respected; UNKNOWN → generic; F1 fixture → query contains BOTH "mechanical seal" AND "Goulds 3196" and is NOT a bare-parent query; flag-off → query byte-identical.
-- **Inertness wall** (T6): flag OFF = byte-identical current behavior, proven across T3–T5 integration tests + falsy-token parity (`0/false/no/""/junk/None → inert`).
-- **LangSmith tracing** (T7): `langsmith>=0.4.32` pinned; offline-inert (no socket, no exception) with key unset; endpoint hardcoded (no proxy leak); project `Arkim Procurement ({env})`; root trace carries `run_id` in metadata; intake extraction/multimodal/clarification/classify calls wrapped in nested `llm` spans.
-- **Eval dataset** (T8): 27 labeled examples, dev/holdout split (~2/3–1/3), every registry type + unknown in both splits, schema-validated.
-- **Live eval** (T9): classifier 100% dev / 100% holdout type accuracy; extraction component-preservation 100% dev + holdout; 35 live calls, all Haiku temp 0 in isolation (no sourcing, no Tavily, no proxy).
+### I1 — Persistence inventory · EXPECTED met (with a nuance)
+Every store written during a run enumerated (file:line evidence in the run):
 
-## NEEDS LIVE VERIFICATION by Tom (mandatory)
+| Store | Location | Durable? | Scope |
+|---|---|---|---|
+| runs | `data/sourcing_runs.sqlite` (SQLAlchemy, WAL) | Yes | per-run + cross-run config |
+| **user/agent turns** | **in-memory `_messages` (api_server.py:322)** — "cleared on server restart" | **NO** | per-run, ephemeral |
+| per-candidate scores/verdicts | inside `sourcing_runs.sourcing_results_json` (api_server.py:1182) | Yes | per-run blob |
+| price_db / supplier_registry / orders / audit_log / brand_intelligence / known_parts / site_settings |各自 sqlite/json | Yes | cross-run |
 
-1. **The Goulds run END-TO-END with the flag ON** — classifier + extraction are eval-measured, but the FULL pipeline through component-aware query construction → real sourcing is NOT (T9 measures classifier + extraction in isolation only, per the brief's out-of-scope list). Run `INTAKE_TYPE_AWARE=1`, start a run with "Goulds 3196 mechanical seal", confirm: (a) the q2_template question fires, (b) the sourcing query is "mechanical seal for Goulds 3196"-shaped, (c) sourcing quality on the committed spec-based input.
-2. **Question-flow feel/phrasing with the flag on** — the q2_template is asked verbatim (no LLM phrasing). Confirm the wording reads naturally in the UI.
-3. **Quantity edit in the real UI** — the editable Qty field renders only when `asset_specs.quantity` is present (i.e. flag-on intake). Confirm it appears, edits persist via `PUT /api/runs/{id}/asset-specs`, and the field is invisible on flag-off runs (demo unaffected). Frontend `type-check` + `build` pass; **visual verification is morning**.
-4. **LangSmith traces in the UI** — confirm traces land in the `Arkim Procurement (dev)` project (the 403 was on dataset-write, not necessarily run-posting). Filter by `run_id`.
-5. **The one holdout component_of edge case** — `"a v-belt for the transfer conveyor"` returned `component_of="transfer conveyor"` with `part_type=unknown`. Consider suppressing `component_of` when `part_type=unknown` (an unknown part type can't be a known ANCHORED component). **Not fixed tonight** (would be tuning against holdout). Flagged as a decision for you.
+**EXPECTED verdict:** "user turns and per-candidate scores/verdicts are NOT durably persisted (console prints only)." → **Half-confirmed.** User/agent turns are genuinely ephemeral (the real gap — capture is NEW durable storage, not duplication). Per-candidate scores/verdicts ARE durable inside `sourcing_results_json` + stdout `[Sourcing]` prints; capture duplicates them as append-only queryable event rows (intentional — event log ≠ state blob).
+
+### I2 — Hook points · EXPECTED met (run_id threading confirmed)
+- **(a) Intake turn boundary:** `send_message` (api_server.py:1634). `run_id` in scope. → turn_user/turn_agent/intake_result.
+- **(b) Sourcing collect/score/reject:** the `[Sourcing]` print sites in `enterprise_search.py` (97/230/240/499/547…) have **NO `run_id` in scope** (EXPECTED confirmed — capture needs run_id threading). **Decision:** do NOT thread run_id into the load-bearing `sourcing_archieved` query builders (CLAUDE.md §6 — audit all call sites; out of scope). Capture `candidate_scored`/`candidate_rejected`/`query_issued`/`results_displayed` from the `result` dict at `_run_sourcing_background` (api_server ~1107-1186) where `run_id` IS in scope. `query_issued` captures the per-tier INTENT derived from specs; the **literal Tavily query string is built deeper and is a flagged not-captured gap.**
+- **(c) Result assembly:** `_transform_sourcing_results` (api_server.py:945) filters `rejection_reason` → displayed set. Captured at write-back.
+- **(d) Action events (run_id in scope):** confirm_intake, select_candidate, order_now, approve, reject, outreach. **No backend event source:** "report click" is frontend-only navigation → logged as a gap.
+
+### I3 — PII path · EXPECTED met; default decision applied (with flagged risk)
+- **No PII redaction pipeline exists today** (grep: only `_redact_sourcing_error` — redacts *error detail*, not user PII; + test comments). User free text is deliberately kept OUT of stdout (api_server.py:1670-1675) — "structured interaction capture + a deliberate PII policy are a separate (deferred) pass."
+- **Default decision (per kickoff I3):** store **post-redaction** text. Since no redaction exists, "post-redaction" = **the text as the intake path sees it** (as-is). **Fidelity cost = none** (no redaction transform to lose).
+- **Flagged risk (Tom must verify):** capture into `run_capture.sqlite` is a NEW durable PII surface — under `RUN_CAPTURE` (default OFF) the demo is unaffected, but flag-ON capture stores visitor free text (names, facility addresses, real part numbers) durably. For a public no-login demo with no consent gate this is the deliberate "deferred structured-capture pass" the code comment anticipated. A real redaction pipeline + consent gate is a flagged supervised follow-up; adding redaction later would cost eval fidelity. Flag gate + morning review is the mitigation tonight.
+
+### I4 — Async write option · EXPECTED met
+- `/api/health` (api_server.py:2600) returns `{"status","version","demo_mode"}`. Route on `_DEMO_ALLOWLIST` (do-not-touch surface). Adding `capture_failures` touches only the **handler body** — safe.
+- **Existing `test_health` pins the exact flag-off body** (test_api_server.py:837). To preserve byte-identical inertness, `capture_failures` appears ONLY when `RUN_CAPTURE` is on → existing test stays green untouched (not weakened).
+- `BackgroundTasks` is the house async pattern but the brief EXPECTED ("simple try/except + counter sufficient at demo volume") holds — capture writes are one cheap INSERT; **inline synchronous try/except + thread-safe counter** is the chosen fail-soft mechanism (BackgroundTasks would hide failures from the request path).
+- **SQLite convention:** raw `sqlite3` (mirrors `orders.py:39-113` / `supplier_registry.py:72` / `audit_log.py:65`). `run_capture.py` follows this exactly (NOT SQLAlchemy). `data/run_capture.sqlite` only.
+
+**No investigation finding contradicted a stated assumption.** All four EXPECTED results met. Proceeded to T1–T5.
+
+---
+
+## VERIFIED tonight (by test)
+
+- **Schema (T1):** `run_events` append-only + `run_outcomes`; `data/run_capture.sqlite` only (raw sqlite3, WAL); pure-data import (no network); indexes on run_id / (run_id, event_type) / event_type.
+- **Every event type** writes + reads back with correct shape (mocked): turn_user, turn_agent, intake_result, query_issued, candidate_scored, candidate_rejected, results_displayed, user_action, outcome.
+- **Full simulated run** produces the complete expected event sequence (11-event chain).
+- **Outcome computation (T3):** completed_with_action / abandoned_after_results / zero_results / all_rejected / incomplete — each fixture-asserted. `confirm_intake` correctly treated as a transition, not a completion.
+- **Fail-soft (T4):** a forced write failure does NOT raise into the request path AND increments the counter (asserted at both unit and live-API levels); counter surfaced on `/api/health` only when flag on.
+- **Inertness wall (T5):** flag OFF → ZERO capture rows across a full simulated run (asserted by direct table COUNT), byte-identical `/api/health` body, byte-identical run-detail response. Falsy-token parity (`0/false/no/""/junk/None → inert`).
+- **Live-faithfulness (guardrail-7):** hooks tested via TestClient through the REAL `/api/runs` + `/messages` + `/confirm-intake` + `/select-candidate` + `/reject` + `/api/health` paths — NOT by calling capture functions directly. The `api` fixture mocks IntakeAgent/SourcingAgent at their source modules (the existing pattern); the real api_server handler path runs.
+- **No do-not-touch surface modified:** `.env`, `audit/`, `scripts/*_self_test.py`, seed fixtures, `known_parts.json`, `price_db.json`, DEMO_MODE gates, the security/allowlist surface, the SpecComparisonAgent base_url pin — all untouched. The only change to `/api/health` is inside the handler body (a conditional field); the allowlist set + middleware are unchanged.
+- **Capture reads seams, never mutates them:** `run_capture.py` writes ONLY `data/run_capture.sqlite`. No write to price_db / known_parts / supplier_registry / orders / sent_messages / review_items.
+
+## NEEDS LIVE VERIFICATION by Tom (mandatory morning checklist)
+
+1. **Flag-on backend, run 3 real parts through the UI** (one clean PN, one component, one vague):
+   ```powershell
+   $env:RUN_CAPTURE = "1"
+   uvicorn api_server:app --reload --port 8001
+   cd frontend; npm run dev
+   ```
+   Then inspect `data/run_capture.sqlite` (snippet below) — confirm turns, queries, candidates+scores, displayed set are all there and match what you saw on screen.
+2. **Abandon a run mid-way** (describe a part, see results, do NOT select/order) → confirm `compute_outcome(run_id)` returns `abandoned_after_results` (or `zero_results` if no candidates).
+3. **`/api/health`** with the flag ON shows `capture_failures: 0`; with the flag OFF the body is unchanged (no `capture_failures` key).
+4. **Flag-off restart** → run a part → confirm NO new rows written to `run_capture.sqlite` (the morning iterate-trigger).
+5. **The Goulds run END-TO-END with the flag ON** — confirm the candidate rows in capture match the on-screen cards (score + verdict), and that a rejected candidate carries `rejection_reason`.
+6. **PII surface check** — with the flag on, open `run_capture.sqlite` and eyeball a `turn_user` row: it contains the visitor's free text verbatim. This is the deliberate capture (I3 default); confirm you're OK with it for the demo posture, or queue the redaction follow-up before flipping the flag on in any shared config.
+
+### Read snippet for `run_capture.sqlite` (morning inspection)
+```bash
+# From the repo root (flag ON backend, after a real run):
+sqlite3 data/run_capture.sqlite "SELECT event_type, run_id, source_tag, substr(payload_json,1,80) FROM run_events ORDER BY ts DESC LIMIT 20;"
+# Per-run outcome:
+sqlite3 data/run_capture.sqlite "SELECT run_id, outcome, computed_at FROM run_outcomes ORDER BY computed_at DESC LIMIT 10;"
+# Or with uv (no sqlite3 CLI):
+uv run python -c "import utils.run_capture as rc; [print(e['event_type'], e['run_id'][:8], e['source_tag'], str(e['payload'])[:90]) for e in rc.read_all_events()[-20:]]"
+```
+(Note: `utils/run_capture.py` reads the flag at import; a live flip requires a process restart, matching the codebase's other env flags.)
+
+---
 
 ## Every decision I made that wasn't specified by the brief
 
-- **Quantity capture via deterministic regex, not the LLM** (`utils/procurement_agent/quantity_capture.py`). The brief said "extracted when stated" without specifying LLM vs regex. Regex keeps the extraction prompt byte-identical when the flag is off (guardrail 3) and is fully testable without mocking. Conservative signal-word matching (require `need|of|qty|Nx|pcs` etc.) so part numbers like "6205" are never misread. `_MAX_PLAUSIBLE_QTY=99999` ceiling; "need 0" → default 1.
-- **Frontend Qty field gated by data presence, not a frontend flag** (`frontend/src/components/proc/request-screen.tsx:396-422`, `frontend/src/types/index.ts:94-99`). The backend only populates `quantity` under `INTAKE_TYPE_AWARE`, so flag-off runs never carry it → the control never renders → demo-unaffected. Renders only for ready/identified items. On commit, PUTs the full specs back with the updated quantity via the existing `seedAssetSpecs` endpoint.
-- **`component_of` added to the `AssetSpecs` dataclass** (`utils/models.py:117-122`) and promoted from the `_component_of` internal key in `SourcingAgent._dict_to_specs` under the flag (`utils/procurement_agent/agents/sourcing_agent.py:1216-1230`). The query builders (`_build_tier3_query`, `_build_aftermarket_query`) honor `component_of` only when set → flag-off sourcing is byte-identical.
-- **Touched `utils/sourcing_archieved/`** (tavily_client.py, enterprise_search.py) to thread `component_of` into the query builders. CLAUDE.md §6 requires auditing all `SourcingAgent` call sites first — audited: the only shipping callers of `_build_tier3_query` / `_build_aftermarket_query` are internal to `enterprise_search.py`; the characterization tests in `test_tavily_client.py` use specs without `component_of`, so the new gated branch doesn't fire for them (they stayed green). The new branch is inert when `component_of` is None.
-- **T6 inertness wall is distributed across T3–T5 integration tests, not a single `test_inertness_wall.py`** (see the T6 note above). The guardrail-3 contract is fully proven; a consolidated file is a trivial follow-up if you prefer.
-- **LangSmith `traced_llm` uses an instance attribute `self._ls_root`** (set in `run()`, read in the LLM-call sites) rather than threading a `parent` param through every extraction method signature — least-invasive wiring, no signature changes to `_extract_text`/`_extract_multimodal`/`_generate_clarification`. Cleared implicitly on `run()` exit.
-- **T7 intake wiring refactored `run()` into a thin trace-opening wrapper + `_run_body`** (`utils/procurement_agent/agents/intake_agent.py:405-444`) so the root trace wraps the entire run body. Behavior unchanged (the body is the original code, verbatim, just moved).
-- **Eval scoring is programmatic (no LangSmith SDK dependency for the scores)** (`scripts/intake_eval.py`) — so the 403 on dataset push didn't block the eval. LangSmith is used best-effort for dataset push + experiment naming only.
-- **`scripts/intake_eval.py`** is a new script (not `*_self_test.py`, so not in the do-not-touch list). It is the T9 harness; not collected by pytest (`testpaths` is `utils/procurement_agent/tests`).
-- **Holdout not tuned against** — the one holdout component_of mismatch was diagnosed but NOT fixed (per guardrail 6 + the "never tune against holdout" rule). Flagged for your decision.
+1. **`run_capture.py` is a standalone raw-sqlite3 module** (mirrors `orders.py`/`supplier_registry.py`/`audit_log.py`), NOT SQLAlchemy. Keeps it off the `persistence.py` ORM stack and the run-row contract — capture is a side-car event log, not run state. (`utils/run_capture.py`)
+2. **Capture functions no-op when `RUN_CAPTURE` is off (flag check inside each fn)** rather than gating at every call site — keeps api_server changes to thin one-liners AND guarantees inertness regardless of caller. The flag is read once at import (mirrors `EMAIL_SEND_ENABLED`/`DEMO_MODE`/`SCORING_V2`); tests monkeypatch the module attr.
+3. **`capture_failures` appears on `/api/health` ONLY when flag on** — preserves byte-identical flag-off health body (the existing `test_health` exact-equality assertion stays green untouched). (`api_server.py:2600`)
+4. **Outcome classifier: `confirm_intake` is a transition, not a completion.** The brief lists `completed_with_action` as an outcome; I treat only result-actions (select/order/approve/reject/outreach/save_outreach/rfq_draft/mark_delivered) as completions. Otherwise a zero-results run with a confirm-intake would mis-classify as completed. (`run_capture.py:_COMPLETION_ACTIONS`)
+5. **`query_issued` captures the query INTENT derived from specs** (manufacturer/model/PN), not the literal Tavily query string — the latter is built deep in `enterprise_search.py` where no `run_id` is in scope (I2 EXPECTED). Flagged as a not-captured gap; the intent is the useful flywheel signal.
+6. **`rephrased` outcome is a flagged placeholder** (`detect_rephrase` returns False) — cross-run similarity is a heuristic that needs the session/run-specs map; not forced into the single-run classifier. Reported, not asserted as deterministic.
+7. **`source_tag` derivation is `demo_prospect` under DEMO_MODE else `internal_test`** — `customer:<tenant>` awaits tenant identity infra (Arc 1). Flagged as a placeholder.
+8. **Capture calls in `_run_sourcing_background` are wrapped in a try/except** (in addition to each capture fn's internal fail-soft) — belt-and-suspenders so a bug in the capture loop can never break the sourcing write-back. (`api_server.py` post-write-back block.)
+9. **Test isolation additions in the live test's local `api` fixture:** (a) pin `known_parts._DB_PATH` to tmp — without it, a real cached edge for a part like `goulds|ST1375T1` makes `_run_sourcing_background` take the cache-HIT path and bypass the mocked SourcingAgent (the captured candidates would be the cached edge set, not the test's mocks); (b) force `api_server.DEMO_MODE=False` — a prior `test_demo_mode` run in the same session can leave the imported module attr True, making `create_run` 422 on X-Session-Id. Both are isolation fixes, not behavior changes.
 
 ## Blockers (with diagnosis)
 
-1. **🟡 LangSmith dataset push → HTTP 403 Forbidden** (`scripts/intake_eval.py` `_push_dataset_to_langsmith`). The `LANGSMITH_API_KEY` lacks dataset-write scope. **Diagnosis:** the key is likely tracing-only / read-only. **Non-fatal** — the eval ran fully locally; scores are in this report. **Fix:** grant the key dataset-write permission, or review scores here + traces in the UI. No code change needed.
-2. **No other blockers.** All 10 tasks completed; suite green at every commit; no revert needed at any point (iteration cap never hit).
+1. **None.** All five tasks completed; suite green at every commit (1489 → 1524, +35); no revert needed (iteration cap never hit).
 
-## Suggested follow-ups (NOT done tonight — out of scope)
+## Out of scope tonight (per the brief, not done — Nights 2–5 not scaffolded)
 
-- Suppress `component_of` when `part_type=unknown` (the holdout edge case) — one-line parser refinement + a regression test. Left for you to avoid tuning against holdout.
-- Consolidate the T6 inertness wall into a single `test_inertness_wall.py` if you prefer one file.
-- Instrument the sourcing pipeline (`_run_sourcing_background`, sourcing/brand-intel/spec-comparison spans, `root_run_id` persistence on SourcingRun) — explicitly deferred per the brief ("a named, supervised follow-up").
-- Phase 3 (inference proposals, variant/order-code questions for `sensor_instrument`) — explicitly out of scope tonight.
-
-## Exact commands for morning
-
-```powershell
-# Run the backend with the flag ON (PowerShell):
-$env:INTAKE_TYPE_AWARE = "1"
-uvicorn api_server:app --reload --port 8001
-
-# In another shell, the frontend:
-cd frontend; npm run dev   # (or: npm run dev -- -p 3000)
-
-# Try these fixtures first (in the Request screen):
-#   "Goulds 3196 mechanical seal"            -> q2_template fires; sourcing query component-aware
-#   "I need 6 SKF 6205 bearings"             -> quantity=6 captured; Qty field editable
-#   "2 inch stainless ball valve, tri-clamp" -> valve q2_template
-#   "Endress+Hauser Cerabar PMC21"           -> sensor_instrument
-#   "a 3/4 inch hydraulic hose assembly"     -> UNKNOWN -> generic flow (demo-current behavior)
-
-# Re-run the live eval (writes intake_eval_result.json):
-uv run python scripts/intake_eval.py
-
-# Full suite:
-uv run pytest -q          # 1319 passed, 73 skipped
-cd frontend; npm run type-check; npm run build
-```
+- Night 2 (labeling surface + eval export), Night 3 (supplier record + Tier 1 registry), Night 4 (onboarding agent), Night 5 (Tier 1 runtime). The program rule applies: one night per session, never combine.
+- Literal Tavily query-string capture (needs run_id threading into `sourcing_archieved` — load-bearing, out of scope).
+- A real PII redaction pipeline + consent gate (I3 flagged follow-up).
+- "report click" frontend action has no backend event source (I2(d) gap) — logged, not wired.
 
 ## State I left the repo in
 
-- On branch `feature/intake-redesign-overnight` (off `ecfeaf9`), **NOT pushed**, never touched `main` or `feature/phase3-comparison-approval`.
-- 9 commits, suite green at each.
-- Untracked scratch (not committed): `intake_eval_result.json` (T9 eval output), `arkim-overnight-intake-build-brief.md` (the brief itself), plus the prior-run leftovers noted in the pre-flight.
-- No source code on the do-not-touch list was modified (`data/mock_tier1_suppliers.json`, `data/mock_maintenance_handoffs.json`, `utils/known_parts.json`, `.env`, `audit/`, `scripts/*_self_test.py`, DEMO_MODE gates, the SpecComparisonAgent base_url pin — all untouched).
-- `uv.lock` updated for the new `langsmith>=0.4.32` dependency (installed: `langsmith==0.9.6`).
+- On branch `feature/run-capture-overnight` (off `d0e0ee2`), **NOT pushed**, never touched `main` or `feature/phase3-comparison-approval`.
+- 4 commits, suite green at each: `6cee9fa` (T0) → `899c946` (T1) → `c2177f7` (T2/T4 wiring) → `d4b7921` (T2–T5 tests + outcome refinement).
+- New files: `utils/run_capture.py`, `utils/procurement_agent/tests/test_run_capture.py`, `utils/procurement_agent/tests/test_run_capture_live.py`. Modified: `api_server.py` (import + thin capture one-liners at the seams + conditional health field). `MORNING_REPORT.md` at repo root.
+- No source code on the do-not-touch list was modified. `data/run_capture.sqlite` is created at runtime only when `RUN_CAPTURE` is on (not committed; not present on disk in flag-off default).
 
 *The flag-off inertness wall is green; the worst case tonight is zero — the branch reviews, fixes, or deletes, and the demo never noticed.*
