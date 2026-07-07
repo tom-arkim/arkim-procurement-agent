@@ -76,6 +76,16 @@ class PartTypeProfile:
         (no LLM phrasing call) when identity is absent and the type is known.
       - blocking_attrs: the attributes that must be captured before sourcing.
       - refinement_attrs: nice-to-haves that refine but do not block.
+      - variant_selecting_attrs: the subset of blocking_attrs that selects a
+        VARIANT within an identified family (e.g. a motor/drive's hp +
+        voltage_phase pick the exact catalog number inside "PowerFlex 40";
+        a seal's shaft_size; a pump's hydraulic_duty). Empty when the class
+        isn't a family-with-variants. The family-disambiguation gate keys on
+        this: a model present + no part_number does NOT satisfy these — the
+        intake must ask for them (see intake_agent._first_missing_required_field
+        + the confirm_intake guard). Distinct from `configurable` (which marks
+        order-code families for the Phase 3 variant-resolution work) — this is
+        the near-term detect-and-ask marker, buildable without a catalog.
       - inference_rules: {context_token: {attr: proposed_value}} — lightweight
         defaults inferred from context (e.g. sanitary/CIP -> 316L + Tri-Clamp).
       - nameplate_guidance: where on the physical asset to read the identity.
@@ -88,6 +98,7 @@ class PartTypeProfile:
     q2_template: str
     blocking_attrs: List[str] = field(default_factory=list)
     refinement_attrs: List[str] = field(default_factory=list)
+    variant_selecting_attrs: List[str] = field(default_factory=list)
     inference_rules: Dict[str, Dict[str, str]] = field(default_factory=dict)
     nameplate_guidance: str = ""
 
@@ -157,6 +168,9 @@ _PROFILES: Dict[str, PartTypeProfile] = {
             "seal_brand",
             "premium_face_upgrades",
         ],
+        variant_selecting_attrs=[
+            "shaft_size",
+        ],
         inference_rules=_SANITARY_INFERENCE,
         nameplate_guidance=(
             "pump casing tag near the shaft; old seal's cartridge tag"
@@ -185,6 +199,9 @@ _PROFILES: Dict[str, PartTypeProfile] = {
         refinement_attrs=[
             "brand_equivalence",
             "impeller_trim_exactness",
+        ],
+        variant_selecting_attrs=[
+            "hydraulic_duty",
         ],
         inference_rules=_SANITARY_INFERENCE,
         nameplate_guidance="pump casing plate",
@@ -287,6 +304,10 @@ _PROFILES: Dict[str, PartTypeProfile] = {
             "brand",
             "efficiency_tier_above_minimum",
             "paint",
+        ],
+        variant_selecting_attrs=[
+            "hp",
+            "voltage_phase",
         ],
         inference_rules=_WASHDOWN_INFERENCE,
         nameplate_guidance="motor nameplate on the frame",
