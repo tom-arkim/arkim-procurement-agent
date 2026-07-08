@@ -31,6 +31,26 @@ const QUICK = [
 const NULLS = new Set(["", "n/a", "null", "none", "unknown-pn", "unknown", "tbd"]);
 const val = (v?: string | null) => (v && !NULLS.has(String(v).toLowerCase().trim()) ? String(v) : undefined);
 
+// Variant-selecting attr -> real AssetSpecs fields (mirrors the backend
+// part_type_registry.VARIANT_ATTR_TO_SPEC_FIELDS). Used to derive whether a
+// family-variant 422 block is GENUINELY satisfied from the refetched specs —
+// the `_variant_disambig_pending` flag the backend guard also reads is STRIPPED
+// from frontend asset_specs (api_server._orm_to_detail drops `_`-prefixed keys),
+// so satisfaction is derived from the real spec fields the 422's missing_attrs
+// map to. Keep in sync with the backend mapping when a variant-selecting attr is
+// added (the suite asserts a mapping row exists for every variant_selecting_attr).
+const VARIANT_ATTR_FIELDS: Record<string, readonly string[]> = {
+  hp: ["hp"],
+  voltage_phase: ["voltage", "phase"],
+  shaft_size: ["shaft_size"],
+  bore_diameter: ["bore_diameter"],
+  hydraulic_duty: ["gpm", "psi", "head", "hp"],
+};
+// Null/placeholder values the backend treats as unanswered (part_type_registry.
+// variant_attr_answered). Case-sensitive, no "n/a" — mirrors the backend set
+// exactly so the derived check matches the guard's notion of "answered".
+const BACKEND_NULL = new Set(["", "null", "N/A", "Unknown", "UNKNOWN-PN", "none", "unknown"]);
+
 // Part-type acronyms that must stay fully upper-cased in a display title (VFD, PLC…).
 // Sentence-case would render these wrong ("Vfd"), and they ARE real part classes.
 const TYPE_ACRONYMS = new Set(["vfd", "plc", "hmi", "vsd", "ups", "scr", "ac", "dc"]);
@@ -493,6 +513,46 @@ function ItemCard({
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // T5b — the family-variant block is parent state set on the 422; nothing re-
+  // evaluated it once a chat answer refilled the specs, so a SATISFIED block
+  // lingered on the card (the user answered, the backend cleared
+  // _variant_disambig_pending and filled the variant attrs, but the card kept
+  // rendering the stale question). Derive visibility from the LIVE specs: once
+  // the user has ENGAGED with the ask (sent a chat answer — the same event that
+  // clears the backend's _variant_disambig_pending), the block is satisfied when
+  // every attr the 422 named is now answered in the refetched specs. Before
+  // engagement the block stays, so the anti-hallucination case (attrs filled by
+  // extraction but the user never confirmed the rating — still 422) renders
+  // until they engage. The `_variant_disambig_pending` flag itself is stripped
+  // from frontend asset_specs (api_server._orm_to_detail drops `_`-prefixed
+  // keys), so satisfaction is derived from the real spec fields the missing
+  // attrs map to (VARIANT_ATTR_FIELDS above), not the flag.
+  const [engagedAfterBlock, setEngagedAfterBlock] = useState(false);
+  const blockRef = useRef(variantBlock);
+  useEffect(() => {
+    if (variantBlock !== blockRef.current) {
+      blockRef.current = variantBlock;
+      setEngagedAfterBlock(false);   // a fresh 422 block -> not yet engaged
+    }
+  }, [variantBlock]);
+  const attrAnswered = (attr: string): boolean => {
+    const fields = VARIANT_ATTR_FIELDS[attr];
+    if (!fields) return false;
+    const s = specs as Record<string, unknown> | undefined;
+    return fields.some((f) => {
+      const v = s?.[f];
+      return v != null && !BACKEND_NULL.has(String(v));
+    });
+  };
+  const blockSatisfied =
+    Boolean(variantBlock) &&
+    engagedAfterBlock &&
+    (variantBlock?.missing_attrs.length ?? 0) > 0 &&
+    Boolean(variantBlock?.missing_attrs.every(attrAnswered));
+  // Whether the variant block should RENDER. Replaces bare `variantBlock`
+  // truthy-gates below so a satisfied block self-heals instead of lingering.
+  const blockVisible = Boolean(variantBlock) && !blockSatisfied;
+
   const submit = async () => {
     const more = moreText.trim();
     if (!more || pending) return;
@@ -504,6 +564,11 @@ function ItemCard({
       setMoreText("");
       qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
       qc.invalidateQueries({ queryKey: queryKeys.runs.all() });
+      // T5b: a chat answer sent from this card is the engagement event that
+      // clears the backend's _variant_disambig_pending — record it so the
+      // variant block is re-evaluated against the refetched specs (the run
+      // query invalidation above refetches, then blockSatisfied derives hide).
+      setEngagedAfterBlock(true);
     } catch (e) {
       // Real reason on THIS card: server detail (HTTP error) or null -> the connectivity line.
       setErr(apiErrorMessage(e) ?? "Couldn't reach the backend — is it running?");
@@ -572,8 +637,10 @@ function ItemCard({
               reusing the id-kick/id-meta question styling. The input below (re-shown via the
               !ready || variantBlock gate) is the primary path: it submits through the EXISTING
               /messages flow so the answer persists into asset_specs before the next confirm
-              (the guard reads persisted specs — a local-only answer wouldn't clear it). */}
-          {variantBlock && (
+              (the guard reads persisted specs — a local-only answer wouldn't clear it).
+              Gated on blockVisible (T5b) so a satisfied block stops rendering
+              once the refetched specs answer every named variant attr. */}
+          {blockVisible && variantBlock && (
             <>
               <div className="id-kick" style={{ marginTop: 6 }}>
                 {variantBlock.pending
@@ -597,7 +664,7 @@ function ItemCard({
         )}
       </div>
 
-      {(!ready || variantBlock) && (
+      {(!ready || blockVisible) && (
         <div className="id-actions" style={{ marginTop: 10 }}>
           <input
             className="proc-idinput"
@@ -616,7 +683,7 @@ function ItemCard({
       {/* Honest escape (T5): a link-style secondary action, NOT a primary button — the
           primary path is answering the rating in chat. Re-calls confirm-intake with
           open_family=true and proceeds; failure falls back to the existing toast. */}
-      {variantBlock && (
+      {blockVisible && (
         <button
           className="proc-btn"
           data-kind="quiet"

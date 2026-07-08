@@ -226,6 +226,18 @@ tracked elsewhere, and frontend UI polish / design iteration items.
 
 ---
 
+### 5.6 Family-variant block: `VARIANT_ATTR_FIELDS` duplicated frontendâ†”backend (no parity assertion)
+
+| Field | Detail |
+|---|---|
+| **File** | `frontend/src/components/proc/request-screen.tsx` (`VARIANT_ATTR_FIELDS` + `BACKEND_NULL`, T5b); mirrors `utils/procurement_agent/part_type_registry.py` (`VARIANT_ATTR_TO_SPEC_FIELDS` + the null-set in `variant_attr_answered`) |
+| **Kind** | Frontend/backend duplication with no parity test â€” the T5b card-clears-when-satisfied derivation re-encodes the backend mapping client-side. |
+| **Why it exists** | `api_server._orm_to_detail` strips `_`-prefixed keys from `asset_specs` before returning it, so `_variant_disambig_pending` is NOT available to the frontend (T5b investigation). The card therefore derives block-satisfaction from the **real** spec fields the 422's `missing_attrs` map to, which requires re-encoding the registry's attrâ†’field mapping + answered-null-set on the client. |
+| **Risk / impact** | The suite asserts a `VARIANT_ATTR_TO_SPEC_FIELDS` row exists for every `variant_selecting_attr` (backend completeness) â€” but **nothing asserts frontend parity**. If a variant-selecting attr is added/renamed in the registry without updating `VARIANT_ATTR_FIELDS`, the T5b `blockSatisfied` check silently treats that attr as unanswered (`attrAnswered` returns false for an unmapped attr) â†’ a satisfied block lingers on the card â†’ **the card-lies bug class T5b fixed recurs for that attr**. `head` in `hydraulic_duty` is already not in the TS `AssetSpecs` type (read via dict access). |
+| **Recommended action** | Expose the mapping (or a derived `variant_block_satisfied` flag) from the backend so the frontend doesn't re-derive it â€” e.g. add a non-`_` `variant_attrs_answered` / `variant_block_active` field to the run-detail `asset_specs` (or the 422 detail), computed by the same `variant_attr_answered` the guard uses. Then the card derives from one backend-provided boolean and the duplication (and the drift risk) goes away. |
+
+---
+
 ## 6. Documentation
 
 ### 6.0a Stale `test_health` assertion â€” /api/health legitimately gained flywheel fields
@@ -313,27 +325,27 @@ Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AW
 | **Risk / impact** | A near-zero-suitability result can surface because it never re-enters the floor. Not caused by floor height â€” lowering/raising the floor does not touch it. |
 | **Status** | Open. Out of scope for the PN-aware floor fix (`fix(scoring): PN-aware suitability floor`) â€” do not bundle. Likely a `_cache_type_gate` coverage gap; investigate separately. |
 
-### 7.5 Component-of context is seal-only — non-seal components get no parent-context query
+### 7.5 Component-of context is seal-only ï¿½ non-seal components get no parent-context query
 
 | Field | Detail |
 |---|---|
 | **File** | `utils/procurement_agent/part_type_classifier.py` + `part_type_registry.py` (ANCHORED regime is `mechanical_seal` only) |
-| **Kind** | Classifier/registry scope decision — not a bug. The ANCHORED regime (which sets `_component_of`) covers just `mechanical_seal`, so non-seal components (impeller, wear ring, shaft sleeve, diaphragm kit, drive chain, etc.) never get `_component_of` set and never reach the component-aware "[component] for [parent]" sourcing query. They stay clean only because Fix A (commit `1363b6f`) makes `_build_search_query` lead with `detected_type` unconditionally — so the query is component-led ("impeller ...") but carries no parent-machine context ("... for Goulds 3196"). |
+| **Kind** | Classifier/registry scope decision ï¿½ not a bug. The ANCHORED regime (which sets `_component_of`) covers just `mechanical_seal`, so non-seal components (impeller, wear ring, shaft sleeve, diaphragm kit, drive chain, etc.) never get `_component_of` set and never reach the component-aware "[component] for [parent]" sourcing query. They stay clean only because Fix A (commit `1363b6f`) makes `_build_search_query` lead with `detected_type` unconditionally ï¿½ so the query is component-led ("impeller ...") but carries no parent-machine context ("... for Goulds 3196"). |
 | **Why it exists** | The overnight intake redesign scoped the registry to 5 types with `mechanical_seal` as the sole ANCHORED type (the priority pair). Non-seal component-of detection was intentionally out of scope. |
 | **Risk / impact** | A non-seal component's sourcing query lacks the parent-machine anchor that disambiguates the right variant (e.g. an impeller for a Goulds 3196 vs a Goulds 3175). Sourcing still works via the component term, but is less precise than a seal query. |
-| **Recommended action** | Do NOT fix as a bug. Extending ANCHORED-regime component detection to other component types is a classifier/registry scope decision — evaluate against real trial demand for non-seal components before investing. If pursued, add the component types to the registry with `REGIME_ANCHORED` and update the classifier's `component_of` rules + the eval dataset's `test_component_of_only_for_anchored` invariant. |
+| **Recommended action** | Do NOT fix as a bug. Extending ANCHORED-regime component detection to other component types is a classifier/registry scope decision ï¿½ evaluate against real trial demand for non-seal components before investing. If pursued, add the component types to the registry with `REGIME_ANCHORED` and update the classifier's `component_of` rules + the eval dataset's `test_component_of_only_for_anchored` invariant. |
 
-### 7.6 Test conftest does not isolate `brand_intelligence._DB_PATH` — live runs pollute test outcomes
+### 7.6 Test conftest does not isolate `brand_intelligence._DB_PATH` ï¿½ live runs pollute test outcomes
 
 | Field | Detail |
 |---|---|
 | **File** | `utils/procurement_agent/tests/conftest.py` (isolates persistence + supplier_registry, but NOT `brand_intelligence`) |
-| **Kind** | Test isolation gap — on-disk store state leaks into tests |
+| **Kind** | Test isolation gap ï¿½ on-disk store state leaks into tests |
 | **Why it exists** | `conftest.py` was built before `brand_intelligence.sqlite` carried test-relevant state. `_seeded_tier3_candidates` reads `get_brand_relationships`, which reads the real DB; a row written by a live harness/dev run makes seeding fire and prepends non-pivot candidates, flipping `test_capability_pivot_tags_results` red regardless of test order. |
 | **Risk / impact** | A test that asserts on seeding/sourcing behavior is non-deterministic in any working copy that has run live sourcing (harness, dev UI). Masked as "green" only on a pristine DB. |
-| **Recommended action** | Structural: add `brand_intelligence._DB_PATH` (and audit other non-isolated on-disk stores tests may read — `run_capture.sqlite`, `price_db.json`) to the conftest isolation set alongside `supplier_registry`/`known_parts`, so the suite is hermetic regardless of dev working-copy state. The per-test monkeypatch in `test_capability_pivot_tags_results` is a band-aid for one test; the conftest fix covers the class. |
+| **Recommended action** | Structural: add `brand_intelligence._DB_PATH` (and audit other non-isolated on-disk stores tests may read ï¿½ `run_capture.sqlite`, `price_db.json`) to the conftest isolation set alongside `supplier_registry`/`known_parts`, so the suite is hermetic regardless of dev working-copy state. The per-test monkeypatch in `test_capability_pivot_tags_results` is a band-aid for one test; the conftest fix covers the class. |
 
 ---
 
-*Items are ordered by section, not by priority. All items are prototype-era technical debt —
+*Items are ordered by section, not by priority. All items are prototype-era technical debt ï¿½
 none block the current demo or the post-seed milestone.*
