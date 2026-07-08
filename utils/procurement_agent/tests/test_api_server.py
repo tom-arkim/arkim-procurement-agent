@@ -114,6 +114,16 @@ def _read_sourcing_results_raw(client, run_id) -> dict:
         return _json.loads(run.sourcing_results_json) if run.sourcing_results_json else {}
 
 
+def _read_asset_specs(client, run_id) -> dict:
+    """Read the raw asset_specs_json column straight from the temp DB."""
+    SF = client._api_server._SessionFactory
+    ORM = client._api_server.SourcingRunORM
+    import json as _json
+    with SF() as session:
+        run = session.get(ORM, run_id)
+        return _json.loads(run.asset_specs_json) if run.asset_specs_json else {}
+
+
 def _read_selected(client, run_id) -> dict:
     """Read the raw selected_candidate_json (incl. _approval_path) straight from the
     temp DB — RunDetail re-serializes it, so read the column to assert what was stored."""
@@ -1076,6 +1086,145 @@ class TestConfirmIntake:
         # debugging / the admin surface (which reads the raw row, not _orm_to_detail).
         raw = _read_sourcing_results_raw(api, rid)
         assert "tavily boom" in raw["error"]
+
+
+# ---------------------------------------------------------------------------
+# Family-variant binding guard (T3b) — confirm_intake blocks a family-level
+# request (model present, no PN) for a variant-selecting class until a
+# variant-selecting attr is answered OR the user explicitly opts into an
+# open-family source (open_family=true). The 422 detail is a stable,
+# frontend-consumable shape. Verified live-faithful: the guard runs on the
+# real confirm_intake endpoint against a real persisted asset_specs_json.
+# ---------------------------------------------------------------------------
+
+class TestConfirmIntakeFamilyVariantGuard:
+    _PF40 = {
+        "manufacturer": "Allen-Bradley", "model": "PowerFlex 40",
+        "part_number": None,  # family-level (no PN)
+        "detected_type": "Variable Frequency Drive (VFD)",
+        "_classified_type": "motor_drive",
+        "hp": None, "voltage": None,
+        # _variant_disambig_pending set per-case below
+    }
+
+    def _pf40(self, **over):
+        s = dict(self._PF40); s.update(over); return s
+
+    def test_resolved_but_unanswered_blocks_typing_bypass(self, api):
+        """The required T3b condition: user asked -> replied a NON-answer ->
+        T2 soft-resolve cleared pending -> attrs still empty -> confirm with no
+        open_family MUST 422 (closes the bypass-by-typing hole)."""
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(
+            self._pf40(_variant_disambig_pending=False)))  # resolved, attrs empty
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert detail["reason"] == "family_variant_unconfirmed"
+        assert detail["model"] == "PowerFlex 40"
+        assert "hp" in detail["missing_attrs"]
+        assert "voltage_phase" in detail["missing_attrs"]
+        assert detail["pending"] is False
+        # Run stays in intake (the guard is before the phase mutate).
+        assert api.get(f"/api/runs/{rid}").json()["phase"] == "intake"
+
+    def test_pending_unanswered_blocks(self, api):
+        """Ask issued, user never engaged -> pending + empty attrs -> 422
+        (the base family-variant block)."""
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(
+            self._pf40(_variant_disambig_pending=True)))
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["reason"] == "family_variant_unconfirmed"
+
+    def test_pending_with_filled_attr_still_blocks_anti_hallucination(self, api):
+        """The anti-hallucination property: an extractor that filled a rating
+        without the user engaging (pending still True) -> STILL 422. The guard
+        does not trust an extracted value the user never confirmed."""
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(
+            self._pf40(_variant_disambig_pending=True, hp="5", voltage="480V")))
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["pending"] is True
+
+    def test_resolved_and_answered_proceeds(self, api, monkeypatch):
+        """User answered the rating -> pending cleared + attrs filled -> confirm
+        proceeds (200). '480V' satisfies voltage_phase via the attr->field
+        mapping (voltage_phase -> voltage OR phase)."""
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(
+            self._pf40(_variant_disambig_pending=False, hp="5", voltage="480V")))
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing())
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 200
+        assert resp.json()["phase"] == "sourcing"
+
+    def test_open_family_opt_in_proceeds_honestly(self, api, monkeypatch):
+        """open_family=true bypasses the guard and commits as an honest
+        open-family source (the choice is recorded, not silent)."""
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(
+            self._pf40(_variant_disambig_pending=True)))  # would block otherwise
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing())
+        resp = api.post(f"/api/runs/{rid}/confirm-intake?open_family=true")
+        assert resp.status_code == 200
+        # The honest open-family commit is recorded on the specs.
+        raw = api.get(f"/api/runs/{rid}").json()
+        assert raw["phase"] == "comparison"  # background ran (TestClient sync)
+        # specs carry the open-family markers (read raw from the DB)
+        specs = _read_asset_specs(api, rid)
+        assert specs.get("family_open_commit") is True
+        assert specs.get("spec_based_sourcing") is True
+
+    def test_clean_pn_proceeds_escape_hatch_intact(self, api, monkeypatch):
+        """A PN present is the escape hatch — the guard never fires, byte-
+        identical to the pre-guard confirm path."""
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({
+            "manufacturer": "Allen-Bradley", "model": "PowerFlex 40",
+            "part_number": "22B-D010N104",  # real PN -> not family-level
+            "detected_type": "Variable Frequency Drive (VFD)",
+            "_classified_type": "motor_drive",
+            "_variant_disambig_pending": True,  # even pending must not block a PN
+        }))
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing())
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 200
+
+    def test_spec_described_no_model_unaffected(self, api, monkeypatch):
+        """A spec-described request with no model is NOT family-level — the
+        guard never fires (the existing spec-based path is byte-identical)."""
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps({
+            "manufacturer": None, "model": None, "part_number": None,
+            "detected_type": "ball valve", "connection_size": "2 inch",
+            "_variant_disambig_pending": True,
+        }))
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=_empty_sourcing())
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 200
+
+
+def test_variant_selecting_attrs_all_have_field_mappings():
+    """Registry invariant (T3b): every variant_selecting_attr across all
+    profiles MUST have a row in VARIANT_ATTR_TO_SPEC_FIELDS. A missing row
+    would make family-level confirms for that class permanently unconfirmable
+    except via open_family (the ask-then-brick failure). Guards the
+    invariant the mapping-table comment asserts."""
+    from utils.procurement_agent.part_type_registry import (
+        all_profiles, VARIANT_ATTR_TO_SPEC_FIELDS,
+    )
+    missing = []
+    for part_type, profile in all_profiles().items():
+        for attr in profile.variant_selecting_attrs:
+            if attr not in VARIANT_ATTR_TO_SPEC_FIELDS:
+                missing.append((part_type, attr))
+    assert missing == [], (
+        f"every variant_selecting_attr must map to real AssetSpecs fields; "
+        f"missing mappings: {missing}"
+    )
 
 
 # ---------------------------------------------------------------------------

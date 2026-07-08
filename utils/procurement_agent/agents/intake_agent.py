@@ -321,46 +321,61 @@ def family_disambig_block(specs: dict) -> Optional[dict]:
         {"reason": "family_variant_unconfirmed",
          "model": <model>,
          "missing_attrs": [<registry attr>, ...],
-         "missing_labels": [<human label>, ...]}
+         "missing_labels": [<human label>, ...],
+         "pending": <bool>}
 
-    Fires ONLY when ALL hold: family-level (`_is_family_level` — model present,
-    no PN), a variant-selecting class (`_variant_selecting_attrs_for` non-empty),
-    the variant ask is in flight (`_variant_disambig_pending` — set when the
-    chat issued the ask, cleared when the user engaged with it), AND at least
-    one variant-selecting attr is still unanswered (resolved through
+    Fires when: family-level (`_is_family_level` — model present, no PN), a
+    variant-selecting class (`_variant_selecting_attrs_for` non-empty), AND
+    EITHER the variant ask is still in flight (`_variant_disambig_pending`) OR
+    a variant-selecting attr is still unanswered (resolved through
     `part_type_registry.variant_attr_answered`, which maps registry attr names
     to real AssetSpecs fields — e.g. voltage_phase is answered when `voltage`
-    OR `phase` is filled). The pending gate is what makes this
-    hallucination-robust: an extractor that filled a rating without the user
-    engaging keeps `_variant_disambig_pending=True`, so the guard still blocks
-    even though the attr is "filled". Once the user sends a chat turn after the
-    ask, the intake clears pending (resolved) and the guard falls back to the
-    answered-attr check alone. Clean-PN, spec-described-no-model, and
-    non-variant classes return None (byte-identical confirm path). Pure; no
-    flag dependence; never raises. The `open_family` opt-in bypasses this guard
-    at the call site (an honest open-family commit, not a silent one)."""
+    OR `phase` is filled).
+
+    The two clauses each close a distinct bypass:
+      - pending: the anti-hallucination guard. An extractor that filled a
+        rating without the user engaging keeps pending=True, so the guard
+        blocks even though the attr is "filled".
+      - missing: the typing-bypass guard. A NON-answer reply ("just source
+        it") after the ask clears pending (T2 soft-resolve) but leaves attrs
+        empty -> still block unless open_family.
+
+    Honest residual (unclosable without field provenance, which does not
+    exist): a turn-1 HALLUCINATED attr + a non-answer reply clears pending AND
+    leaves the attr "filled" -> both clauses miss -> the guard passes a
+    hallucinated rating. Narrow, accepted, logged in CLEANUP.md §7.5b. Closing
+    it requires provenance (user-supplied vs extractor-inferred), a flagged
+    follow-up.
+
+    Clean-PN, spec-described-no-model, and non-variant classes return None
+    (byte-identical confirm path). Pure; no flag dependence; never raises. The
+    `open_family` opt-in bypasses this guard at the call site (an honest
+    open-family commit, not a silent one)."""
     if not _is_family_level(specs):
         return None
     vs_attrs = _variant_selecting_attrs_for(specs)
     if not vs_attrs:
         return None
-    # If the variant ask was never issued (no pending flag, never set), the
-    # family-level gate either already proceeded on its own dims or this is a
-    # pre-fix run shape — do not brick a confirm the chat never gated. The guard
-    # only binds once the chat has actually asked.
-    if not specs.get("_variant_disambig_pending"):
-        return None
     from utils.procurement_agent.part_type_registry import variant_attr_answered
     missing = [a for a in vs_attrs if not variant_attr_answered(specs, a)]
-    if not missing:
+    pending = bool(specs.get("_variant_disambig_pending"))
+    # Block when the ask is in flight (pending — anti-hallucination) OR a
+    # variant-selecting attr is unanswered (missing — typing-bypass guard).
+    # open_family is checked at the call site.
+    if not missing and not pending:
         return None
+    # Surface the unanswered attrs; when blocking purely on pending (attrs
+    # filled but unconfirmed), surface ALL variant-selecting attrs — they need
+    # confirmation, not filling.
+    surface = missing if missing else list(vs_attrs)
     return {
         "reason": "family_variant_unconfirmed",
         "model": specs.get("model"),
-        "missing_attrs": missing,
+        "missing_attrs": surface,
         "missing_labels": [
-            _VARIANT_ATTR_LABELS.get(a, a.replace("_", " ")) for a in missing
+            _VARIANT_ATTR_LABELS.get(a, a.replace("_", " ")) for a in surface
         ],
+        "pending": pending,
     }
 
 

@@ -2609,6 +2609,7 @@ def confirm_intake(
                         "model": block["model"],
                         "missing_attrs": block["missing_attrs"],
                         "missing_labels": block["missing_labels"],
+                        "pending": block.get("pending", False),
                     },
                 )
 

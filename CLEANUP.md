@@ -292,6 +292,17 @@ Recorded after the intake/scoring redesigns landed behind flags (`INTAKE_TYPE_AW
 | **Risk / impact** | Ranking/gating may be off at the margins until tuned against real results; defaults are informed but not validated at scale. |
 | **Recommended action** | Once live sourcing data accumulates, calibrate the gate threshold + weights against real outcomes (precision/recall on labeled results); lock in with a regression fixture. |
 
+### 7.5b Family-variant confirm guard: turn-1 hallucinated attr + non-answer reply bypasses (no provenance)
+
+| Field | Detail |
+|---|---|
+| **File** | `utils/procurement_agent/agents/intake_agent.py` (`family_disambig_block`) + `api_server.confirm_intake` (T3 guard) |
+| **Kind** | Honest residual (unclosable without field provenance, which does not exist) |
+| **Why it exists** | The guard blocks a family-level confirm when the variant ask is pending (anti-hallucination: blocks even an extractor-filled rating the user never confirmed) OR a variant-selecting attr is unanswered (typing-bypass guard). But: a turn-1 HALLUCINATED attr (extractor invents hp/voltage for a "well-known" family) + a non-answer reply ("just source it") clears pending (T2 soft-resolve) AND leaves the attr "filled" -> both clauses miss -> the guard passes a hallucinated rating. |
+| **Risk / impact** | Narrow: requires a hallucination on the ask turn AND a non-answer reply. Sourcing then runs on the hallucinated variant. Acceptable vs the pre-fix silent-bypass for every family-level request; logged so it is not forgotten. |
+| **Recommended action** | Closing it requires per-field provenance (user-supplied vs extractor-inferred) so the guard can ignore an unconfirmed extractor-filled value even after pending clears. No provenance layer exists today (T2 investigation confirmed). Flagged follow-up: add a `_user_supplied` provenance marker on spec fields set from a user chat turn, then have the guard treat an extractor-only-filled variant attr as unanswered. Do NOT bundle with the family-variant fix. |
+| **Status** | Open. Accepted residual of the T3 family-variant binding guard. The `pending` clause catches the no-reply hallucination; the `missing` clause catches the honest-extractor typing bypass; this specific overlap is the gap. |
+
 ### 7.5a <=5-scored candidates bypass the suitability floor via cache/Apollo paths
 
 | Field | Detail |
