@@ -1,0 +1,39 @@
+{
+  "slug": "lesman",
+  "home_url": "https://www.lesman.com/",
+  "site_kind": "instruments_distributor",
+  "description": "Lesman / Kele Industrial Automation — process & factory automation instrumentation distributor. Bensenville, IL. Real site. Rich brands page.",
+  "pages": {
+    "https://www.lesman.com/": "home.html",
+    "https://www.lesman.com/brands": "pages/brands.html"
+  },
+  "expected": {
+    "vertical": "process / factory automation instrumentation distribution",
+    "locations": [
+      {"locality": "Bensenville", "region": "IL", "country": "US"}
+    ],
+    "ship_area_guess": "US (national distributor; in-stock ships within one business day)",
+    "brands": [
+      "ABB", "ASCO", "Ametek", "Anderson Greenwood", "APC", "Aquametrix",
+      "Azbil", "Marsh Bellofram", "Bestobell", "Clark-Reliance", "CVS Controls",
+      "DelVal", "DeZurik", "Dungs", "DwyerOmega", "Equilibar", "Eurotherm",
+      "Fireye", "Functional Devices", "Gasmet", "Gefran", "Gems Sensors",
+      "Graphic Controls", "GPI Flomec", "Hoffman Enclosures", "Honeywell",
+      "IBOCO", "Idec", "Ion Science", "Jacoby-Tarbox", "Jerguson",
+      "Jordan Valve", "K-Patents", "Kele", "Kestrel", "KROHNE",
+      "LowFlow Valve", "Marwin Valve", "Maxon", "Meriam", "Mettler Toledo",
+      "Mid-West Instruments", "Minebea Intec", "NOSHOK", "Omron",
+      "Panametrics", "Parker", "Pepperl+Fuchs", "Perma Pure", "PIE Cal",
+      "Precision Digital", "ProComSol", "PULS Power", "Red Lion Controls",
+      "Richards Industrials", "SICK", "Siemens", "Turck",
+      "United Electric Controls", "WAGO", "WIKA"
+    ],
+    "classes": [
+      "instruments", "pressure instruments", "level instrumentation",
+      "flow", "temperature", "gas detection", "valves", "regulators",
+      "sensors", "controls", "programmers", "industrial networking",
+      "power products", "calibration", "machine safety"
+    ],
+    "notes": "Brands derived from alt attrs on /brands page. Instruments distributor — class precision is the key metric here."
+  }
+}

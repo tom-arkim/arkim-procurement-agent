@@ -1,0 +1,25 @@
+{
+  "slug": "smallshop",
+  "home_url": "https://www.magnaloy.com/",
+  "site_kind": "messy_small_shop",
+  "description": "Magnaloy Coupling Company — small fluid-power/couplings manufacturer. Alpena, MI. Real site. Classic older small-shop layout; sells via distributors (Motion Industries, Applied Industrial Technologies). 'Connecting Fluid Power For Over 60 Years'.",
+  "pages": {
+    "https://www.magnaloy.com/": "home.html"
+  },
+  "expected": {
+    "vertical": "fluid power / couplings manufacturing (small shop)",
+    "locations": [
+      {"locality": "Alpena", "region": "MI", "country": "US"}
+    ],
+    "ship_area_guess": "US + international (via distributor network: Motion Industries, Applied Industrial Technologies)",
+    "brands": [
+      "Magnaloy"
+    ],
+    "brands_note": "Single-house small manufacturer. The only brand is its own. Distributors (Motion Industries, Applied Industrial Technologies) are CHANNEL partners, NOT brands carried — a key false-positive stress test: the extractor must not list Motion/Applied as carried brands.",
+    "classes": [
+      "couplings", "pump/motor mounts", "manifolds", "reservoirs",
+      "fluid power accessories", "rod end couplers"
+    ],
+    "notes": "The 'messy small shop' fixture. Edge cases: (1) distributor names must not be mistaken for carried brands; (2) the home page doubles as a product catalog nav."
+  }
+}

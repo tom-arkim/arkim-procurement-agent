@@ -1,0 +1,25 @@
+{
+  "slug": "seal",
+  "home_url": "https://www.sealingdevices.com/",
+  "site_kind": "aftermarket_seal_shop",
+  "description": "Sealing Devices Inc — manufacturer & distributor of O-rings, seals, gaskets, EMI shielding. Lancaster, NY. Real site.",
+  "pages": {
+    "https://www.sealingdevices.com/": "home.html"
+  },
+  "expected": {
+    "vertical": "sealing solutions / aftermarket seals & gaskets",
+    "locations": [
+      {"locality": "Lancaster", "region": "NY", "country": "US"}
+    ],
+    "ship_area_guess": "US (serves industrial/telecom/defense/aerospace)",
+    "brands": [
+      "GORE", "Sealing Devices"
+    ],
+    "brands_note": "Home page leads with product lines (O-Rings, Gaskets, Molded Rubber, EMI Shielding, Thermal Management, GORE Vents, Sponge & Foams, Seals, Adhesives & Sealants) rather than a brand line-card. GORE is the prominent carried brand on the home page. A brands/line-card sub-page was not fetched (fetch budget). Brand-recall on this fixture is expected to be LOW by construction — this tests that the extractor doesn't hallucinate brands when only product lines are visible.",
+    "classes": [
+      "seals", "o-rings", "gaskets", "molded rubber", "EMI shielding",
+      "thermal management", "adhesives & sealants", "sponge & foams"
+    ],
+    "notes": "The 'messy' aspect here is brand-as-product-line ambiguity — a key false-positive stress test for brand extraction."
+  }
+}

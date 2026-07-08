@@ -1,0 +1,28 @@
+{
+  "slug": "bearing",
+  "home_url": "https://www.rbcbearings.com/",
+  "site_kind": "bearing_house",
+  "description": "RBC Bearings Incorporated — precision roller bearings manufacturer (industrial + aerospace/defense). Oxford, CT. Real site. Manufacturer, not a multi-brand distributor — 'brands' are its own business groups/sub-brands.",
+  "pages": {
+    "https://www.rbcbearings.com/": "home.html"
+  },
+  "expected": {
+    "vertical": "bearings manufacturing (industrial + aerospace/defense)",
+    "locations": [
+      {"locality": "Oxford", "region": "CT", "country": "US"}
+    ],
+    "ship_area_guess": "US + international (manufacturer with domestic locations)",
+    "brands": [
+      "RBC Bearings", "RBC AeroComponents", "RBC AeroStructures",
+      "RBC Aircraft Products", "Airtomic", "All Power Manufacturing",
+      "Climax Metal Products", "Dodge Industrial", "HEIM Bearings",
+      "RBC Industrial", "Industrial Tectonics Bearings", "Kahr"
+    ],
+    "brands_note": "RBC is a manufacturer; its 'brands' are internal business groups/product lines, not third-party line-card brands. Tests extractor handling of single-house multi-division structure.",
+    "classes": [
+      "bearings", "roller bearings", "precision bearings", "aircraft bearings",
+      "fasteners", "couplings", "mounts", "sealing solutions"
+    ],
+    "notes": "Bearing house. Class precision should be high (bearings obvious). Brand structure is the edge case."
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "slug": "ibt",
+  "home_url": "https://ibtinc.com/",
+  "site_kind": "line_card_distributor",
+  "description": "IBT Industrial Solutions — industrial power-transmission/bearings distributor with a brands/line-card page. Merriam, KS. Real site.",
+  "pages": {
+    "https://ibtinc.com/": "home.html",
+    "https://ibtinc.com/brands/": "pages/brands.html",
+    "https://ibtinc.com/about-us/": "pages/about.html"
+  },
+  "expected": {
+    "vertical": "industrial power transmission distribution",
+    "locations": [
+      {"locality": "Merriam", "region": "KS", "country": "US"}
+    ],
+    "ship_area_guess": "US (regional/national distributor)",
+    "brands": [
+      "3M", "4B Components", "ABB", "AIE", "AAF", "Belt Concepts", "Bio-Circle",
+      "Bondhus", "Brady", "CGW", "Chicago Latrobe", "Cleveland Twist Drill",
+      "Climax", "Cooper", "CribMaster", "DeWalt", "Dixon", "Fabco-Air",
+      "Fenner Dunlop", "Flexco", "Gates", "Hub City", "Hytrol", "Ingersoll Rand",
+      "Invertek", "Isostatic", "JTEKT", "Lovejoy", "Lubriplate",
+      "Motorola Solutions", "Motovario", "NORD", "Nachi", "National Safety Apparel",
+      "Noshok", "Power Blanket", "Putnam Tools", "Radians", "Rhino Hyde",
+      "Safari Belting", "Schaefer", "Schaeffler", "Schmersal", "Sealmaster",
+      "Siemens", "Solve Industrial Motion Group", "Stanley", "SureWerx",
+      "Supplyforce", "Timken", "Vostermans Ventilation", "Warner Electric",
+      "Wix Filters", "YASKAWA", "Yates"
+    ],
+    "classes": [
+      "bearings", "power transmission", "belts", "couplings", "hydraulics",
+      "pneumatics", "motors", "industrial supplies", "seals", "fasteners",
+      "conveying", "sensors/controls"
+    ],
+    "notes": "Brands derived from logo image filenames + alt attrs on the /brands/ page. This is the primary line-card eval fixture."
+  }
+}
