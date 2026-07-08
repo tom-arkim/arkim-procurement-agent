@@ -67,7 +67,22 @@ import sqlite3
 import uuid
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# TIER1_V2 feature flag (Night 3) — the supplier-scope redesign gate
+# ---------------------------------------------------------------------------
+# Mirrors SCORING_V2 / INTAKE_TYPE_AWARE: strict truthy parse (only
+# "1/true/yes/on" enables; everything else -> OFF, fails safe). Default OFF ->
+# the registry extensions (supplier scope schema, enforced lifecycle state
+# machine, graduation from Apollo refresh, scope lookups) are DORMANT and the
+# Apollo-cache clarifier path is byte-identical to pre-Night-3 behavior (T5).
+def _env_truthy(value: Optional[str]) -> bool:
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+TIER1_V2: bool = _env_truthy(os.environ.get("TIER1_V2"))
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _DB_PATH  = os.path.join(_DATA_DIR, "supplier_registry.sqlite")
@@ -208,6 +223,138 @@ _PRIMARY_COLUMNS: dict[str, str] = {
 }
 _PRIMARY_WRITABLE = set(_PRIMARY_COLUMNS)
 
+# ---------------------------------------------------------------------------
+# Night 3 — TIER1_V2 supplier-scope schema (research model)
+# ---------------------------------------------------------------------------
+# The supplier entity per the settled research record: brands x classes x
+# territory, tri-state authorization, enforced lifecycle. This extends the
+# Apollo-cache `suppliers` row with scope data carried in child tables + a few
+# nullable JSON columns, ALL populated only under TIER1_V2 (flag-off = dormant,
+# the Apollo clarifier byte-identical — T5). Existing Apollo-cache rows remain
+# valid discovered/contacted-stage records (T4); the new lifecycle is a SEPARATE
+# column (`tier1_lifecycle`) so the existing `onboarding_status` semantics the
+# clarifier depends on are untouched.
+#
+# Lifecycle (enforced state machine — see TIER1_TRANSITIONS):
+#   discovered -> contacted -> quoted -> onboarding -> onboarded
+#   suspended is the off-ramp from any pre-onboarded state; onboarded/suspended
+#   are terminal-ish (onboarded can still be suspended). This MIRRORS the orders
+#   state machine (utils/orders.py): a transition is legal only if the target is
+#   in TIER1_TRANSITIONS[current]; illegal transitions (skip-ahead, backward,
+#   un-suspend) are REJECTED, not merely recorded.
+TIER1_DISCOVERED = "discovered"
+TIER1_CONTACTED = "contacted"
+TIER1_QUOTED = "quoted"
+TIER1_ONBOARDING = "onboarding"
+TIER1_ONBOARDED = "onboarded"
+TIER1_SUSPENDED = "suspended"
+
+TIER1_LIFECYCLE_STATUSES: tuple[str, ...] = (
+    TIER1_DISCOVERED, TIER1_CONTACTED, TIER1_QUOTED,
+    TIER1_ONBOARDING, TIER1_ONBOARDED, TIER1_SUSPENDED,
+)
+
+# Allowed forward lifecycle + suspend off-ramp. onboarded -> suspended (a
+# supplier can be suspended after onboarding); suspended -> onboarded is the
+# only re-activation (NOT suspended -> contacted: no backward skip). discovered
+# -> contacted -> quoted -> onboarding -> onboarded is the happy path.
+TIER1_TRANSITIONS: dict[str, set[str]] = {
+    TIER1_DISCOVERED:  {TIER1_CONTACTED, TIER1_SUSPENDED},
+    TIER1_CONTACTED:   {TIER1_QUOTED, TIER1_SUSPENDED},
+    TIER1_QUOTED:      {TIER1_ONBOARDING, TIER1_SUSPENDED},
+    TIER1_ONBOARDING:  {TIER1_ONBOARDED, TIER1_SUSPENDED},
+    TIER1_ONBOARDED:   {TIER1_SUSPENDED},
+    TIER1_SUSPENDED:   {TIER1_ONBOARDED},   # re-activate only (no backward skip)
+}
+
+# Relationship vocabulary for a brand a supplier carries (tri-state filter).
+#   AUTHORIZED            — the supplier is an authorized distributor/dealer for
+#                           the brand (the OEM-sanctioned channel).
+#   CARRIES               — the supplier stocks/sells the brand but is NOT a
+#                           sanctioned channel (broad-line distributor).
+#   AFTERMARKET_COMPATIBLE — the supplier sells an aftermarket/cross-reference
+#                           part COMPATIBLE with the brand (not the brand itself).
+BRAND_AUTHORIZED = "AUTHORIZED"
+BRAND_CARRIES = "CARRIES"
+BRAND_AFTERMARKET_COMPATIBLE = "AFTERMARKET_COMPATIBLE"
+BRAND_RELATIONSHIPS: tuple[str, ...] = (
+    BRAND_AUTHORIZED, BRAND_CARRIES, BRAND_AFTERMARKET_COMPATIBLE,
+)
+
+# Ship-area sentinel for nationwide US coverage (vs an explicit states[] list).
+SHIP_AREA_NATIONWIDE_US = "NATIONWIDE_US"
+
+# TIER1_V2 supplier-scope columns added by _migrate to the base `suppliers` table
+# (all nullable, ADD COLUMN — safe on existing rows, no backfill). The scope
+# child rows live in their own tables (supplier_classes / supplier_brands /
+# supplier_local_service) keyed by supplier_id, so the lookups (by class, by
+# brand+relationship, by territory) are queryable rather than JSON-scans.
+_TIER1_SUPPLIER_COLUMNS: dict[str, str] = {
+    "tier1_lifecycle":   "TEXT",   # discovered|contacted|quoted|onboarding|onboarded|suspended
+    "ship_area_json":    "TEXT",   # {"kind":"NATIONWIDE_US"} | {"kind":"STATES","states":["NY",...]}
+    "verticals_json":    "TEXT",   # JSON list[str] of industry verticals
+    "performance_json":  "TEXT",   # JSON dict (placeholder — {} until perf data lands)
+    "scope_source":      "TEXT",   # provenance: where the scope was asserted from
+    "scope_set_by":      "TEXT",   # provenance: who set it (user id / system)
+    "scope_set_at":      "TEXT",   # provenance: ISO 8601 UTC of last scope write
+}
+_TIER1_SUPPLIER_WRITABLE = set(_TIER1_SUPPLIER_COLUMNS)
+
+# Source vocabulary for a supplier-class row (where the class coverage came from).
+SCOPE_SOURCE_MANUAL = "manual"
+SCOPE_SOURCE_APOLLO = "apollo"
+SCOPE_SOURCE_INFERRED = "inferred"
+SCOPE_SOURCES: tuple[str, ...] = (SCOPE_SOURCE_MANUAL, SCOPE_SOURCE_APOLLO, SCOPE_SOURCE_INFERRED)
+
+# JSON-valued TIER1 columns decoded on read.
+_TIER1_JSON_FIELDS = {"ship_area_json", "verticals_json", "performance_json"}
+
+# Child-table DDL for the scope (created in _get_conn, IF NOT EXISTS — harmless
+# empty tables even flag-off; only populated under TIER1_V2).
+_SUPPLIER_CLASSES_DDL = """
+CREATE TABLE IF NOT EXISTS supplier_classes (
+    id              TEXT PRIMARY KEY,
+    supplier_id     TEXT NOT NULL,
+    class_id        TEXT NOT NULL,        -- NounClass.canonical (e.g. 'SEAL')
+    subtype         TEXT,                 -- free-text sub-type within the class
+    unspsc          TEXT,                 -- commodity code (crosswalk from the class)
+    is_core         INTEGER NOT NULL DEFAULT 0,  -- 0|1 — core competency vs incidental
+    confidence      REAL,                 -- 0..1 — how confident the coverage claim is
+    source          TEXT,                 -- manual|apollo|inferred
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    UNIQUE(supplier_id, class_id, subtype)
+);
+"""
+
+_SUPPLIER_BRANDS_DDL = """
+CREATE TABLE IF NOT EXISTS supplier_brands (
+    id                       TEXT PRIMARY KEY,
+    supplier_id              TEXT NOT NULL,
+    brand_id                 TEXT NOT NULL,          -- manufacturer/brand canonical id
+    relationship             TEXT NOT NULL,          -- AUTHORIZED|CARRIES|AFTERMARKET_COMPATIBLE
+    authorized_territory     TEXT,                   -- territory where authorized (nullable)
+    classes_for_brand_json   TEXT,                   -- JSON list[str] of class_ids the brand coverage spans
+    evidence                 TEXT,                   -- free-text provenance / source link
+    confidence               REAL,                   -- 0..1
+    created_at               TEXT NOT NULL,
+    updated_at               TEXT NOT NULL,
+    UNIQUE(supplier_id, brand_id, relationship)
+);
+"""
+
+_SUPPLIER_LOCAL_SERVICE_DDL = """
+CREATE TABLE IF NOT EXISTS supplier_local_service (
+    id              TEXT PRIMARY KEY,
+    supplier_id     TEXT NOT NULL,
+    branch_zip      TEXT NOT NULL,          -- branch ZIP/postal code
+    radius_miles    REAL,                   -- service radius around the branch
+    services_json   TEXT,                   -- JSON list[str] of service capabilities
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+"""
+
 # Seed data — Tier 1 and Tier 1.5 known vendors, all discovery_only until onboarded
 _SEED_VENDORS = [
     ("grainger.com",          "Grainger"),
@@ -237,6 +384,18 @@ def _normalize_domain(raw: str) -> str:
     return host.strip()
 
 
+def _tier1_can_transition(current: Optional[str], new: str) -> bool:
+    """True iff `current -> new` is a legal tier1 lifecycle transition (pure; no I/O).
+
+    A NULL/missing current (a legacy Apollo-cache row with no tier1_lifecycle yet)
+    may transition to `discovered` or `suspended` only — i.e. entering the
+    machine at its start state, not skipping into a later stage.
+    """
+    if current is None or current == "":
+        return new in (TIER1_DISCOVERED, TIER1_SUSPENDED)
+    return new in TIER1_TRANSITIONS.get(current, set())
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     """Idempotently add the Apollo + contact-resolution columns if missing.
 
@@ -246,7 +405,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(suppliers)").fetchall()}
     added = []
-    for col, coltype in {**_APOLLO_COLUMNS, **_CONTACT_COLUMNS, **_PRIMARY_COLUMNS}.items():
+    for col, coltype in {**_APOLLO_COLUMNS, **_CONTACT_COLUMNS,
+                         **_PRIMARY_COLUMNS, **_TIER1_SUPPLIER_COLUMNS}.items():
         if col not in existing:
             conn.execute(f"ALTER TABLE suppliers ADD COLUMN {col} {coltype}")
             added.append(col)
@@ -269,6 +429,12 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute(_DDL)
     conn.execute(_SENT_MESSAGES_DDL)
     conn.execute(_REVIEW_ITEMS_DDL)
+    # Night 3 TIER1_V2 scope child tables. CREATE TABLE IF NOT EXISTS is
+    # idempotent + harmless: empty tables even when TIER1_V2 is off (the
+    # extensions are dormant because no code populates them flag-off — T5).
+    conn.execute(_SUPPLIER_CLASSES_DDL)
+    conn.execute(_SUPPLIER_BRANDS_DDL)
+    conn.execute(_SUPPLIER_LOCAL_SERVICE_DDL)
     conn.commit()
     _migrate(conn)
     _maybe_seed(conn)
@@ -796,6 +962,10 @@ def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_D
     Rules (CLAUDE.md §9 / rollout plan §5):
       - Onboarded / Tier 1 suppliers are EXEMPT — onboarding is their source of
         truth — so they return False regardless of enrich date.
+      - Under TIER1_V2 (Night 3): a supplier whose tier1 lifecycle is `onboarded`
+        is ALSO exempt — the graduation rule (onboarded => exits Apollo staleness
+        refresh), wired here at the refresh site the clarifier calls (I3). This
+        branch is dormant when TIER1_V2 is off, so flag-off is byte-identical.
       - Otherwise, True if `apollo_enriched_at` is older than `ttl_days` (180 by
         default). Never-enriched (missing/blank/unparseable date) on a
         non-onboarded supplier counts as stale -> True.
@@ -804,6 +974,11 @@ def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_D
     if not supplier:
         return False
     if supplier.get("onboarding_status") in _ONBOARDED_STATUSES:
+        return False
+    # Night 3 graduation (I3): tier1-onboarded suppliers exit the Apollo refresh.
+    # Gated by TIER1_V2 so flag-off behavior is byte-identical (the column is NULL
+    # on legacy rows, so this never fires on the pre-existing clarifier tests).
+    if TIER1_V2 and supplier.get("tier1_lifecycle") == TIER1_ONBOARDED:
         return False
     enriched_at = supplier.get("apollo_enriched_at")
     if not enriched_at:
@@ -942,3 +1117,556 @@ def all_entries() -> list[dict]:
             return [dict(r) for r in conn.execute("SELECT * FROM suppliers ORDER BY name").fetchall()]
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# Night 3 TIER1_V2 — supplier-scope API (internal, no HTTP endpoints)
+# ---------------------------------------------------------------------------
+# Every function below is gated by TIER1_V2: when the flag is OFF it no-ops
+# (writes return False, reads return empty/None), so the registry extensions are
+# DORMANT and the Apollo clarifier path is byte-identical to pre-Night-3 (T5).
+# There are NO HTTP endpoints here — this is the internal read/write API the
+# future onboarding UI / sourcing-scope layer will call.
+# ---------------------------------------------------------------------------
+
+def _tier1_dormant() -> bool:
+    """True when the TIER1_V2 redesign is off (extensions must no-op)."""
+    return not TIER1_V2
+
+
+def _supplier_id_for(domain: str) -> Optional[str]:
+    """Resolve the suppliers.id for a domain (normalized), or None if absent."""
+    norm = _normalize_domain(domain)
+    if not norm:
+        return None
+    try:
+        with closing(_get_conn()) as conn:
+            row = conn.execute(
+                "SELECT id FROM suppliers WHERE domain = ?", (norm,)
+            ).fetchone()
+            return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _ensure_supplier_row(domain: str, name: Optional[str] = None) -> Optional[str]:
+    """Return the supplier_id for `domain`, creating a discovery_only stub if
+    absent (mirrors upsert_apollo_data's create-on-miss). Used by the scope
+    writers so a scope write can land against a newly-seen domain. None on failure.
+    """
+    norm = _normalize_domain(domain)
+    if not norm:
+        return None
+    sid = _supplier_id_for(norm)
+    if sid:
+        return sid
+    # Create a minimal discovery_only stub (reuse the existing path).
+    create_stub(name or norm, domain=norm)
+    return _supplier_id_for(norm)
+
+
+def _serialize_json_fields(payload: dict, fields: set[str]) -> dict:
+    """Return a copy of `payload` with the named JSON fields serialized to text
+    when given as list/dict (SQLite stores them as TEXT). String/None pass through."""
+    out = dict(payload)
+    for jf in fields:
+        if jf in out and not isinstance(out[jf], (str, type(None))):
+            out[jf] = json.dumps(out[jf])
+    return out
+
+
+def _decode_json_field(raw: Any, default: Any) -> Any:
+    """Decode a JSON TEXT column to its value, returning `default` on null/parse error."""
+    if raw is None or raw == "":
+        return default
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return default
+
+
+# --- scope: classes ----------------------------------------------------------
+
+def set_supplier_classes(domain: str, classes: list[dict],
+                         *, source: str = SCOPE_SOURCE_MANUAL,
+                         set_by: Optional[str] = None) -> bool:
+    """Replace a supplier's class coverage with the given list (idempotent full
+    replace). Each class dict: {class_id, subtype?, unspsc?, is_core?, confidence?,
+    source?}. `class_id` is a NounClass canonical (e.g. 'SEAL'). Returns True on a
+    write. No-ops (returns False) when TIER1_V2 is off.
+    """
+    if _tier1_dormant():
+        return False
+    sid = _ensure_supplier_row(domain)
+    if not sid:
+        return False
+    now = datetime.utcnow().isoformat()
+    try:
+        with closing(_get_conn()) as conn:
+            conn.execute("DELETE FROM supplier_classes WHERE supplier_id = ?", (sid,))
+            for c in classes or []:
+                cid = (c.get("class_id") or "").upper().strip()
+                if not cid:
+                    continue
+                conn.execute(
+                    """INSERT OR IGNORE INTO supplier_classes
+                       (id, supplier_id, class_id, subtype, unspsc, is_core,
+                        confidence, source, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (str(uuid.uuid4()), sid, cid, c.get("subtype"),
+                     c.get("unspsc"), int(bool(c.get("is_core"))),
+                     c.get("confidence"), c.get("source") or source, now, now),
+                )
+            # Provenance stamp on the supplier row.
+            conn.execute(
+                "UPDATE suppliers SET scope_source = ?, scope_set_by = ?, scope_set_at = ? "
+                "WHERE id = ?",
+                (source, set_by, now, sid),
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        print(f"[SupplierRegistry] set_supplier_classes failed: {exc}")
+        return False
+
+
+def get_supplier_classes(domain: str) -> list[dict]:
+    """Return the supplier's class coverage rows. Empty list when TIER1_V2 is off
+    or no coverage is set."""
+    if _tier1_dormant():
+        return []
+    sid = _supplier_id_for(domain)
+    if not sid:
+        return []
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT class_id, subtype, unspsc, is_core, confidence, source "
+                "FROM supplier_classes WHERE supplier_id = ? ORDER BY class_id",
+                (sid,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+# --- scope: brands -----------------------------------------------------------
+
+def set_supplier_brands(domain: str, brands: list[dict],
+                        *, source: str = SCOPE_SOURCE_MANUAL,
+                        set_by: Optional[str] = None) -> bool:
+    """Replace a supplier's brand coverage. Each brand dict:
+    {brand_id, relationship, authorized_territory?, classes_for_brand?, evidence?,
+    confidence?}. `relationship` must be one of BRAND_RELATIONSHIPS. Returns True
+    on a write. No-ops (False) when TIER1_V2 is off.
+    """
+    if _tier1_dormant():
+        return False
+    sid = _ensure_supplier_row(domain)
+    if not sid:
+        return False
+    now = datetime.utcnow().isoformat()
+    try:
+        with closing(_get_conn()) as conn:
+            conn.execute("DELETE FROM supplier_brands WHERE supplier_id = ?", (sid,))
+            for b in brands or []:
+                bid = (b.get("brand_id") or "").strip()
+                rel = (b.get("relationship") or "").upper().strip()
+                if not bid or rel not in BRAND_RELATIONSHIPS:
+                    continue  # skip malformed
+                cfb = b.get("classes_for_brand")
+                cfb_json = json.dumps(cfb) if isinstance(cfb, (list, tuple)) else cfb
+                conn.execute(
+                    """INSERT OR IGNORE INTO supplier_brands
+                       (id, supplier_id, brand_id, relationship, authorized_territory,
+                        classes_for_brand_json, evidence, confidence, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (str(uuid.uuid4()), sid, bid, rel, b.get("authorized_territory"),
+                     cfb_json, b.get("evidence"), b.get("confidence"), now, now),
+                )
+            conn.execute(
+                "UPDATE suppliers SET scope_source = ?, scope_set_by = ?, scope_set_at = ? "
+                "WHERE id = ?",
+                (source, set_by, now, sid),
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        print(f"[SupplierRegistry] set_supplier_brands failed: {exc}")
+        return False
+
+
+def get_supplier_brands(domain: str) -> list[dict]:
+    """Return the supplier's brand coverage rows (classes_for_brand decoded). Empty
+    when TIER1_V2 is off or none set."""
+    if _tier1_dormant():
+        return []
+    sid = _supplier_id_for(domain)
+    if not sid:
+        return []
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT brand_id, relationship, authorized_territory, "
+                "classes_for_brand_json, evidence, confidence "
+                "FROM supplier_brands WHERE supplier_id = ? ORDER BY brand_id",
+                (sid,),
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["classes_for_brand"] = _decode_json_field(d.pop("classes_for_brand_json"), [])
+                out.append(d)
+            return out
+    except Exception:
+        return []
+
+
+# --- scope: territory / verticals / performance ------------------------------
+
+def set_supplier_territory(domain: str, ship_area: dict,
+                           local_service: Optional[list[dict]] = None,
+                           *, source: str = SCOPE_SOURCE_MANUAL,
+                           set_by: Optional[str] = None) -> bool:
+    """Set the supplier's ship_area + local_service_area[].
+
+    ship_area is either {"kind": "NATIONWIDE_US"} or {"kind": "STATES",
+    "states": ["NY", ...]}. local_service is a list of
+    {branch_zip, radius?, services?}. Returns True on a write; no-ops (False)
+    when TIER1_V2 is off.
+    """
+    if _tier1_dormant():
+        return False
+    sid = _ensure_supplier_row(domain)
+    if not sid:
+        return False
+    if not isinstance(ship_area, dict) or ship_area.get("kind") not in (
+        SHIP_AREA_NATIONWIDE_US, "STATES"
+    ):
+        return False
+    now = datetime.utcnow().isoformat()
+    try:
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                "UPDATE suppliers SET ship_area_json = ?, scope_source = ?, "
+                "scope_set_by = ?, scope_set_at = ? WHERE id = ?",
+                (json.dumps(ship_area), source, set_by, now, sid),
+            )
+            conn.execute(
+                "DELETE FROM supplier_local_service WHERE supplier_id = ?", (sid,)
+            )
+            for ls in local_service or []:
+                bz = (ls.get("branch_zip") or "").strip()
+                if not bz:
+                    continue
+                svcs = ls.get("services")
+                svcs_json = json.dumps(svcs) if isinstance(svcs, (list, tuple)) else svcs
+                conn.execute(
+                    """INSERT INTO supplier_local_service
+                       (id, supplier_id, branch_zip, radius_miles, services_json,
+                        created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?)""",
+                    (str(uuid.uuid4()), sid, bz, ls.get("radius"), svcs_json, now, now),
+                )
+            conn.commit()
+        return True
+    except Exception as exc:
+        print(f"[SupplierRegistry] set_supplier_territory failed: {exc}")
+        return False
+
+
+def get_supplier_territory(domain: str) -> dict:
+    """Return {"ship_area": dict|None, "local_service": list[dict]}. Empty when
+    TIER1_V2 is off or none set."""
+    if _tier1_dormant():
+        return {"ship_area": None, "local_service": []}
+    sid = _supplier_id_for(domain)
+    if not sid:
+        return {"ship_area": None, "local_service": []}
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            r = conn.execute(
+                "SELECT ship_area_json FROM suppliers WHERE id = ?", (sid,)
+            ).fetchone()
+            ship = _decode_json_field(r[0] if r else None, None)
+            rows = conn.execute(
+                "SELECT branch_zip, radius_miles, services_json "
+                "FROM supplier_local_service WHERE supplier_id = ?", (sid,),
+            ).fetchall()
+            local = []
+            for row in rows:
+                d = dict(row)
+                d["services"] = _decode_json_field(d.pop("services_json"), [])
+                d["radius"] = d.pop("radius_miles")
+                local.append(d)
+            return {"ship_area": ship, "local_service": local}
+    except Exception:
+        return {"ship_area": None, "local_service": []}
+
+
+def set_supplier_verticals(domain: str, verticals: list[str],
+                           *, source: str = SCOPE_SOURCE_MANUAL,
+                           set_by: Optional[str] = None) -> bool:
+    """Set the supplier's industry verticals (a simple list stored as JSON). No-ops
+    (False) when TIER1_V2 is off."""
+    if _tier1_dormant():
+        return False
+    sid = _ensure_supplier_row(domain)
+    if not sid:
+        return False
+    now = datetime.utcnow().isoformat()
+    try:
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                "UPDATE suppliers SET verticals_json = ?, scope_source = ?, "
+                "scope_set_by = ?, scope_set_at = ? WHERE id = ?",
+                (json.dumps(list(verticals or [])), source, set_by, now, sid),
+            )
+            conn.commit()
+        return True
+    except Exception as exc:
+        print(f"[SupplierRegistry] set_supplier_verticals failed: {exc}")
+        return False
+
+
+def get_supplier_verticals(domain: str) -> list[str]:
+    """Return the supplier's verticals, or [] when TIER1_V2 is off / none set."""
+    if _tier1_dormant():
+        return []
+    sid = _supplier_id_for(domain)
+    if not sid:
+        return []
+    try:
+        with closing(_get_conn()) as conn:
+            r = conn.execute(
+                "SELECT verticals_json FROM suppliers WHERE id = ?", (sid,)
+            ).fetchone()
+            return _decode_json_field(r[0] if r else None, [])
+    except Exception:
+        return []
+
+
+# --- lifecycle (enforced state machine) --------------------------------------
+
+def get_tier1_lifecycle(domain: str) -> Optional[str]:
+    """Return the supplier's tier1 lifecycle status, or None when TIER1_V2 is off
+    or no lifecycle is set (a legacy Apollo-cache row)."""
+    if _tier1_dormant():
+        return None
+    rec = lookup_by_domain(domain)
+    if not rec:
+        return None
+    return rec.get("tier1_lifecycle")
+
+
+def tier1_transition(domain: str, new_status: str,
+                     *, set_by: Optional[str] = None) -> Optional[dict]:
+    """Drive the tier1 lifecycle forward, ENFORCING the state machine (mirrors
+    utils/orders.update_order_status). Rejects illegal transitions (skip-ahead,
+    backward, un-suspend) by returning None. A supplier with no current
+    tier1_lifecycle may enter at `discovered` or `suspended` only. Returns the
+    updated supplier record on success, or None on rejection / flag-off / missing
+    supplier. Stamps updated_at.
+    """
+    if _tier1_dormant():
+        return None
+    if new_status not in TIER1_LIFECYCLE_STATUSES:
+        print(f"[SupplierRegistry] tier1_transition: unknown status {new_status!r}")
+        return None
+    rec = lookup_by_domain(domain)
+    if not rec:
+        return None
+    current = rec.get("tier1_lifecycle")
+    if not _tier1_can_transition(current, new_status):
+        print(f"[SupplierRegistry] tier1 illegal transition rejected: "
+              f"{current!r} -> {new_status!r}")
+        return None
+    now = datetime.utcnow().isoformat()
+    try:
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                "UPDATE suppliers SET tier1_lifecycle = ?, updated_at = ?, "
+                "scope_set_by = COALESCE(?, scope_set_by), scope_set_at = ? "
+                "WHERE id = ?",
+                (new_status, now, set_by, now, rec["id"]),
+            )
+            conn.commit()
+        return lookup_by_domain(domain)
+    except Exception as exc:
+        print(f"[SupplierRegistry] tier1_transition failed: {exc}")
+        return None
+
+
+# --- lookup primitives -------------------------------------------------------
+
+def find_suppliers_by_class(class_id: str, *, core_only: bool = False) -> list[dict]:
+    """Return supplier records carrying the given class. When core_only, restrict
+    to is_core=1 rows (the supplier's core competencies, not incidental coverage).
+    Empty when TIER1_V2 is off. Joins supplier_classes -> suppliers on supplier_id.
+    """
+    if _tier1_dormant():
+        return []
+    cid = (class_id or "").upper().strip()
+    if not cid:
+        return []
+    sql = (
+        "SELECT s.* FROM suppliers s "
+        "JOIN supplier_classes c ON c.supplier_id = s.id "
+        "WHERE c.class_id = ?"
+    )
+    params: list = [cid]
+    if core_only:
+        sql += " AND c.is_core = 1"
+    sql += " GROUP BY s.id ORDER BY s.name"
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    except Exception:
+        return []
+
+
+def find_suppliers_by_brand(brand_id: str,
+                            relationship: Optional[str] = None) -> list[dict]:
+    """Return supplier records carrying the given brand, optionally filtered by
+    the tri-state relationship (AUTHORIZED | CARRIES | AFTERMARKET_COMPATIBLE).
+    None relationship = all. Empty when TIER1_V2 is off."""
+    if _tier1_dormant():
+        return []
+    bid = (brand_id or "").strip()
+    if not bid:
+        return []
+    sql = (
+        "SELECT s.*, b.relationship FROM suppliers s "
+        "JOIN supplier_brands b ON b.supplier_id = s.id "
+        "WHERE b.brand_id = ?"
+    )
+    params: list = [bid]
+    if relationship:
+        rel = relationship.upper().strip()
+        if rel not in BRAND_RELATIONSHIPS:
+            return []
+        sql += " AND b.relationship = ?"
+        params.append(rel)
+    sql += " GROUP BY s.id ORDER BY s.name"
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute(sql, params).fetchall()]
+    except Exception:
+        return []
+
+
+# Territory-fit RANK tiers (higher = broader coverage). NOT a hard exclusion —
+# the caller decides; find_suppliers_by_territory returns EVERY supplier with
+# scope data, annotated with a rank (except local_service which IS a hard
+# inclusion via find_suppliers_with_local_service).
+TERRITORY_RANK_NONE = 0       # no ship_area set
+TERRITORY_RANK_STATE = 1      # states[] set but does not cover the query state
+TERRITORY_RANK_STATE_MATCH = 2  # states[] covers the query state
+TERRITORY_RANK_NATIONWIDE = 3   # NATIONWIDE_US covers any state
+
+
+def find_suppliers_by_territory(state: Optional[str] = None) -> list[dict]:
+    """Return suppliers that have ANY scope territory data, annotated with a
+    `territory_rank` (NATIONWIDE > state-match > state-no-match > none). This is
+    RANK data, NOT a hard exclusion — a non-matching supplier is still returned
+    (rank TERRITORY_RANK_STATE / TERRITORY_RANK_NONE) so the caller can decide.
+    Empty when TIER1_V2 is off. `state` is a 2-letter US state code (uppercased).
+    """
+    if _tier1_dormant():
+        return []
+    st = (state or "").upper().strip()
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT id, name, domain, ship_area_json FROM suppliers "
+                "WHERE ship_area_json IS NOT NULL AND ship_area_json != '' "
+                "ORDER BY name"
+            ).fetchall()
+            out = []
+            for r in rows:
+                ship = _decode_json_field(r["ship_area_json"], None)
+                if not isinstance(ship, dict):
+                    rank = TERRITORY_RANK_NONE
+                elif ship.get("kind") == SHIP_AREA_NATIONWIDE_US:
+                    rank = TERRITORY_RANK_NATIONWIDE
+                elif ship.get("kind") == "STATES" and isinstance(ship.get("states"), list):
+                    states = [s.upper().strip() for s in ship["states"]]
+                    rank = (TERRITORY_RANK_STATE_MATCH if st and st in states
+                            else TERRITORY_RANK_STATE)
+                else:
+                    rank = TERRITORY_RANK_NONE
+                out.append({
+                    "id": r["id"], "name": r["name"], "domain": r["domain"],
+                    "territory_rank": rank,
+                })
+            return out
+    except Exception:
+        return []
+
+
+def find_suppliers_with_local_service(zip_code: Optional[str] = None) -> list[dict]:
+    """Return suppliers that have a local service branch. This IS a hard inclusion
+    (the local_service_area exception per the brief): only suppliers with a row
+    in supplier_local_service are returned. When `zip_code` is given, the result
+    is annotated with the branch_zip/radius (the caller applies the radius test);
+    without a zip, all suppliers with any local-service row are returned. Empty
+    when TIER1_V2 is off.
+    """
+    if _tier1_dormant():
+        return []
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT s.id, s.name, s.domain, ls.branch_zip, ls.radius_miles "
+                "FROM suppliers s "
+                "JOIN supplier_local_service ls ON ls.supplier_id = s.id "
+                "ORDER BY s.name"
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = {"id": r["id"], "name": r["name"], "domain": r["domain"],
+                     "branch_zip": r["branch_zip"], "radius_miles": r["radius_miles"]}
+                out.append(d)
+            return out
+    except Exception:
+        return []
+
+
+# --- full scope read (for diagnostics / the future onboarding UI) ------------
+
+def get_supplier_scope(domain: str) -> dict:
+    """Return the full supplier scope: lifecycle, classes, brands, territory,
+    verticals, performance, provenance. Empty/null fields when TIER1_V2 is off or
+    nothing is set (a legacy Apollo-cache row returns an all-empty scope)."""
+    if _tier1_dormant():
+        return {"tier1_lifecycle": None, "classes": [], "brands": [],
+                "ship_area": None, "local_service": [], "verticals": [],
+                "performance": {}, "scope_source": None,
+                "scope_set_by": None, "scope_set_at": None}
+    rec = lookup_by_domain(domain)
+    if not rec:
+        return {"tier1_lifecycle": None, "classes": [], "brands": [],
+                "ship_area": None, "local_service": [], "verticals": [],
+                "performance": {}, "scope_source": None,
+                "scope_set_by": None, "scope_set_at": None}
+    terr = get_supplier_territory(domain)
+    return {
+        "tier1_lifecycle": rec.get("tier1_lifecycle"),
+        "classes": get_supplier_classes(domain),
+        "brands": get_supplier_brands(domain),
+        "ship_area": terr["ship_area"],
+        "local_service": terr["local_service"],
+        "verticals": _decode_json_field(rec.get("verticals_json"), []),
+        "performance": _decode_json_field(rec.get("performance_json"), {}),
+        "scope_source": rec.get("scope_source"),
+        "scope_set_by": rec.get("scope_set_by"),
+        "scope_set_at": rec.get("scope_set_at"),
+    }
+
