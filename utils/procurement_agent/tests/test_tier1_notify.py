@@ -276,33 +276,25 @@ class TestNotificationEventsAndDoubleGate:
         assert events[0]["send_status"] == "sent"
         assert events[0]["message_id"] == "mid-9"
 
-    def test_no_recipient_recorded_as_stubbed(self, reg):
+    def test_no_recipient_recorded_as_stubbed(self, reg, monkeypatch):
         """A supplier with no resolvable contact → the notify is recorded as stubbed
         (the FYI is queued, not sent) — the event is NOT silently dropped."""
         _onboard(reg, "nocontact.com", "NoContact",
                  classes=[{"class_id": "SEAL", "is_core": True}],
                  ship_area={"kind": "NATIONWIDE_US"})
-        # Wipe any auto-seeded generic contact so assemble_recipient_set finds none.
-        # (assemble_recipient_set constructs sales@{domain} on a miss, so to exercise
-        # the no-recipient branch we point the recipient resolver at an empty record.)
-        # Simulate by monkeypatching assemble_recipient_set to return no recipients.
-        import utils.procurement_agent.tier1_notify as tn_mod
-        orig = sr.assemble_recipient_set
-        monkeypatch_target = sr.assemble_recipient_set
-        # Patch via the module the notify layer reads.
-        import types
+        # assemble_recipient_set constructs sales@{domain} on a miss, so to exercise
+        # the no-recipient branch we monkeypatch it on the registry module (the notify
+        # layer calls sr.assemble_recipient_set). Using monkeypatch.setattr (not a
+        # manual setattr/del) guarantees the restore and avoids leaking the deletion
+        # to other tests in the session.
         def _no_recipients(domain_or_url):
             return {"to": [], "cc": [], "status": "needs_human"}
-        # The notify layer calls sr.assemble_recipient_set — patch it on the registry.
-        reg.assemble_recipient_set = _no_recipients  # type: ignore[attr-defined]
-        try:
-            matches = tm.match_tier1(detected_type="mechanical seal",
-                                     manufacturer="Goulds")
-            res = tn.notify_tier1(matches, run_id="r1", sender=_FakeSender())
-            assert res[0].notified is True
-            assert res[0].send_status == "stubbed"  # no recipient → queued, not sent
-        finally:
-            del reg.assemble_recipient_set  # restore (monkeypatch fixture reverts)
+        monkeypatch.setattr(sr, "assemble_recipient_set", _no_recipients)
+        matches = tm.match_tier1(detected_type="mechanical seal",
+                                 manufacturer="Goulds")
+        res = tn.notify_tier1(matches, run_id="r1", sender=_FakeSender())
+        assert res[0].notified is True
+        assert res[0].send_status == "stubbed"  # no recipient → queued, not sent
 
 
 # ---------------------------------------------------------------------------
