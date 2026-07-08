@@ -584,3 +584,108 @@ class TestInertnessFlagOff:
         # tier1_lifecycle does NOT exempt the supplier flag-off. (Only the legacy
         # onboarding_status branch would, and that's not set here.)
         assert s.needs_reenrichment(rec2) is True
+
+
+# ---------------------------------------------------------------------------
+# T4 — coexistence with the Tier 3 clarifier path (byte-identical flag-off,
+# graduation interoperates flag-on). The clarifier source is UNCHANGED; these
+# prove the registry extension + the clarifier interoperate cleanly.
+# ---------------------------------------------------------------------------
+
+class TestClarifierCoexistence:
+    """Mirror the test_apollo_clarify fixtures: a real SourcingAgent with a
+    MOCKED Apollo, against the isolated registry. Proves the clarifier's
+    store-check-first + annotate-don't-remove behavior is byte-identical with
+    TIER1_V2 off (the existing guarantee) AND that the tier1 graduation
+    interoperates with the clarifier when TIER1_V2 is on."""
+
+    def _agent(self, apollo):
+        from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+        a = SourcingAgent(apollo_api_key=None)  # disabled unless replaced
+        a._apollo = apollo
+        # requirement_match is an LLM call in the live path; stub it so the
+        # verdict is deterministic and no real Anthropic call fires (mirrors
+        # test_apollo_clarify._agent's `requirement=` injection).
+        a._requirement_match = lambda specs, org, is_us: "confirmed"
+        return a
+
+    def _specs(self):
+        from utils.models import AssetSpecs
+        return AssetSpecs(
+            manufacturer="Gusher Pumps", model="Type 21", part_number="TYPE21",
+            voltage="N/A", category="Part", detected_type="mechanical seal",
+        )
+
+    def _enabled_apollo(self, org_return=None):
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.enabled = True
+        m.org_enrich.return_value = org_return
+        return m
+
+    def _org(self):
+        return {"name": "Mesco Corporation", "industry": "wholesale",
+                "country": "United States", "state": "Texas",
+                "raw_address": "5226 Manor Glen Dr, Houston, TX 77345, US",
+                "description": "industrial and commercial pump repair products",
+                "keywords": ["pump rebuild kits", "mechanical seals"]}
+
+    def test_clarifier_byte_identical_flag_off(self, isolated_db_off):
+        """Flag-off: the clarifier path is byte-identical to pre-Night-3. A stale
+        supplier re-enriches; the annotation lands; Apollo is called exactly once.
+        This re-proves the existing test_apollo_clarify guarantee through the
+        Night-3 registry code (the extension is dormant, so behavior is unchanged)."""
+        s = isolated_db_off
+        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        s.upsert_apollo_data("mescocorp.com", {"suitability_status": "confirmed",
+                                               "apollo_enriched_at": old})
+        apollo = self._enabled_apollo(org_return=self._org())
+        agent = self._agent(apollo)
+        cands = [{"vendor_name": "Mesco", "source_url": "https://www.mescocorp.com/x"}]
+        out = agent._apollo_clarify(cands, self._specs())
+        apollo.org_enrich.assert_called_once()  # stale -> re-enriched
+        assert len(out) == 1  # annotate-don't-remove (count unchanged)
+        assert cands[0]["suitability_status"] == "confirmed"  # verdict reused/written
+
+    def test_clarifier_graduation_via_tier1_onboarded_flag_on(self, isolated_db):
+        """Flag-on: a tier1-onboarded supplier is exempt from refresh (the I3
+        graduation wired into needs_reenrichment), so the clarifier reuses the
+        cached verdict WITHOUT calling Apollo — even with an ancient enrich
+        date. Proves the new graduation interoperates with the UNCHANGED
+        clarifier (the clarifier just calls needs_reenrichment; the flag-on
+        branch makes it exempt)."""
+        s = isolated_db
+        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        s.upsert_apollo_data("mescocorp.com", {"suitability_status": "confirmed",
+                                               "apollo_industry": "wholesale",
+                                               "apollo_enriched_at": old})
+        # Drive the tier1 lifecycle to onboarded.
+        for nxt in ("discovered", "contacted", "quoted", "onboarding", "onboarded"):
+            assert s.tier1_transition("mescocorp.com", nxt) is not None
+        apollo = self._enabled_apollo(org_return=self._org())
+        agent = self._agent(apollo)
+        cands = [{"vendor_name": "Mesco", "source_url": "https://www.mescocorp.com/x"}]
+        agent._apollo_clarify(cands, self._specs())
+        # Graduation: Apollo NOT called despite the ancient enrich date.
+        apollo.org_enrich.assert_not_called()
+        # The cached verdict is reused (annotate-don't-remove; count unchanged).
+        assert cands[0]["suitability_status"] == "confirmed"
+
+    def test_clarifier_stale_non_onboarded_reenriches_flag_on(self, isolated_db):
+        """Flag-on: a stale NON-onboarded supplier still re-enriches — the tier1
+        graduation only exempts 'onboarded', so a quoted-stage supplier refreshes
+        exactly as the clarifier always has. Proves no over-exclusion."""
+        s = isolated_db
+        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        s.upsert_apollo_data("mescocorp.com", {"suitability_status": "confirmed",
+                                               "apollo_enriched_at": old})
+        # Drive only to quoted (NOT onboarded).
+        for nxt in ("discovered", "contacted", "quoted"):
+            s.tier1_transition("mescocorp.com", nxt)
+        apollo = self._enabled_apollo(org_return=self._org())
+        agent = self._agent(apollo)
+        cands = [{"vendor_name": "Mesco", "source_url": "https://www.mescocorp.com/x"}]
+        agent._apollo_clarify(cands, self._specs())
+        apollo.org_enrich.assert_called_once()  # stale + not onboarded -> refresh
+
+
