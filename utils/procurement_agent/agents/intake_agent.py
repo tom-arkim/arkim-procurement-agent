@@ -285,9 +285,13 @@ def _variant_disambiguation_question(specs: dict, vs_attrs: list) -> str:
     """Build the family-disambiguation question: names the model + the
     variant-selecting attrs, phrased as confirmation (block-regardless-of-
     extracted — the user may be confirming an extracted value or correcting a
-    hallucinated one). Uses the registry's q2_template verbatim when available
-    (INTAKE_TYPE_AWARE + known profile with a template); otherwise constructs
-    a focused question off the vs_attrs (works flag-off / profile-less)."""
+    hallucinated one). When INTAKE_TYPE_AWARE + a known profile with a
+    q2_template is available, prepends the family fact to that template (the
+    template names the variant-selecting attrs; the prepend names the model and
+    explains why the ask exists — see T4); otherwise constructs a focused
+    question off the vs_attrs (works flag-off / profile-less). The BARE template
+    is still returned verbatim by the no-identity q2 flow (_next_clarification's
+    `_q2_asked` branch) — only this variant-disambiguation usage prepends."""
     model = specs.get("model") or "this model"
     try:
         if _intake_type_aware():
@@ -298,7 +302,23 @@ def _variant_disambiguation_question(specs: dict, vs_attrs: list) -> str:
             if is_known_type(classified):
                 tpl = get_profile(classified).q2_template
                 if tpl:
-                    return tpl
+                    # Prepend the family fact: the template alone names the
+                    # variant-selecting attrs but NOT the model the user named,
+                    # so without this the ask reads as arbitrary form-filling
+                    # rather than "the thing you identified is a FAMILY — tell
+                    # us which variant." The same confirm-or-correct framing as
+                    # the constructed path below (the user may be confirming an
+                    # extracted value, correcting a hallucinated one, or opting
+                    # into open-family sourcing). The BARE template is still
+                    # returned verbatim by the no-identity q2 flow
+                    # (_next_clarification's `_q2_asked` branch) — only THIS
+                    # variant-disambiguation usage prepends the family fact.
+                    return (
+                        f"{model} is a product family, not a specific variant — "
+                        f"for your unit: {tpl} "
+                        f"(Confirm or correct the rating so we source the right unit, "
+                        f"or say you don't know and we'll source the family as-is.)"
+                    )
     except Exception:
         pass
     labels = [_VARIANT_ATTR_LABELS.get(a, a.replace("_", " ")) for a in vs_attrs]
