@@ -678,3 +678,51 @@ A real notification feed over `GET /api/events`, replacing the placeholder bell 
 - **Per-user targeting + server-side read-state** → gated on auth (a later increment). Until then the feed is untargeted and "seen" is per-device.
 - **Email / push delivery** → a later increment. V1 surfaces in-app only.
 - **A notifications store** → not built; the feed stays derived from existing rows.
+
+## 16. Supplier Onboarding (concierge v1 — Night 4)
+
+URL → harvest → extract → prepopulate a supplier profile → concierge
+review/approve → an onboarded supplier in the Night 3 TIER1_V2 registry.
+**Deterministic core is live (admin-gated); UI polish is morning.**
+
+### Where it lives
+- **Admin surface only.** `/admin` → "Onboarding" tab. Every endpoint is under
+  `/api/admin/onboarding/*` and gated by `require_admin` (401/403/503 — same
+  bearer-token gate as the rest of the admin surface) AND by `TIER1_V2` (503
+  dormant when the flag is off). The routes are NOT on the `DEMO_MODE`
+  allowlist — a public demo 403s them fail-closed (the harvester fetches
+  arbitrary URLs server-side; it must not be reachable unauthenticated).
+- **v1 is concierge-only.** An admin (operator) drives review/approve. There
+  is NO supplier-facing magic-link/token review flow yet — that is a flagged
+  follow-on. The approve action is the admin's explicit confirm.
+
+### The must-confirm trio (always flagged, regardless of confidence)
+- **Brand relationship** (AUTHORIZED / CARRIES / AFTERMARKET_COMPATIBLE), the
+  **class core-competency** (is_core), and the **ship-area** are marked
+  `must_confirm=True` on EVERY draft, no matter how confident the extractor
+  is. These three drive sourcing routing and carry channel/territory risk;
+  v1 never auto-applies them.
+- The UI shows the `must_confirm` flags per section so the concierge knows
+  exactly which fields need their eyes.
+
+### Approve-gated write (the single writer)
+- **Nothing writes to the supplier registry without approve.** Harvest/extract
+  only creates a PENDING review item (the existing `review_items` "extraction
+  lands as pending, a human confirms" pattern) — the scope tables are
+  untouched until approve.
+- **Approve** writes classes/brands/territory/verticals via the Night 3
+  `set_supplier_*` API and drives the lifecycle
+  `discovered→contacted→quoted→onboarding→onboarded`. **Double-approve is
+  idempotent** (the registry setters are full-replace; a second approve is a
+  no-op write that returns the same record). **Reject** discards (nothing
+  applied).
+- The concierge can edit name / vertical / ship-area / brands / classes on the
+  draft before approving (revisions override the stored draft; approve is still
+  the only registry-write point — the editor never writes directly).
+
+### What the concierge sees (inspector)
+- The draft's brands (name + relationship + confidence + evidence), classes
+  (canonical noun-class + is_core star), locations, and ship-area, each with
+  its `must_confirm` flag, plus overall confidence and the extraction method
+  (LLM vs heuristic fallback). A raw per-field provenance (evidence quote +
+  source_url) rides on each field for review.
