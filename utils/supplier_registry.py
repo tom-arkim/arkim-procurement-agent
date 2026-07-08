@@ -355,6 +355,33 @@ CREATE TABLE IF NOT EXISTS supplier_local_service (
 );
 """
 
+# Night 5 — supplier notification EVENTS (T3). One row per matched-request→notify
+# event recorded for an onboarded Tier 1 supplier. The notify layer is the
+# research's conservative notify≫display asymmetry: a candidate is DISPLAYED at a
+# lower threshold than it is NOTIFIED on (notify requires brand-match-or-core-class
+# + a per-RFQ cap). The send itself goes through the existing stubbed/flagged
+# EmailSender (utils/email_sender.py) — NOTHING sends live (EMAIL_SEND_ENABLED
+# defaults OFF + the conftest safety net + TIER1_V2 gate = the double-gate).
+# `send_status` mirrors SendResult.status: "stubbed" (gated, the repo/test default),
+# "sent" (live, unreachable in tests), "error" (fail-soft). Empty table even when
+# TIER1_V2 is off (no code populates it flag-off — the notify layer no-ops, T5).
+_SUPPLIER_NOTIFICATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS supplier_notifications (
+    id                TEXT PRIMARY KEY,
+    run_id            TEXT,
+    supplier_domain   TEXT NOT NULL,
+    vendor_name       TEXT,
+    noun_class        TEXT,                -- the matched request class (the class-gate)
+    notify_reason     TEXT,                -- "brand_match" | "core_class" | "brand_match_or_core_class"
+    notified_at       TEXT NOT NULL,       -- ISO 8601 UTC
+    send_status       TEXT NOT NULL,       -- "stubbed" | "sent" | "error" (mirrors SendResult)
+    message_id        TEXT,                -- provider placeholder until live send
+    threshold         TEXT,                -- "notify" (the higher threshold that admitted it)
+    metadata_json     TEXT,                -- JSON: match-explanation snapshot
+    created_at        TEXT NOT NULL
+);
+"""
+
 # Seed data — Tier 1 and Tier 1.5 known vendors, all discovery_only until onboarded
 _SEED_VENDORS = [
     ("grainger.com",          "Grainger"),
@@ -435,6 +462,10 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute(_SUPPLIER_CLASSES_DDL)
     conn.execute(_SUPPLIER_BRANDS_DDL)
     conn.execute(_SUPPLIER_LOCAL_SERVICE_DDL)
+    # Night 5 — supplier notification events table (T3). IF NOT EXISTS is idempotent
+    # + harmless: an empty table even when TIER1_V2 is off (the notify layer no-ops
+    # flag-off — no code populates it — so flag-off is byte-identical, T5).
+    conn.execute(_SUPPLIER_NOTIFICATIONS_DDL)
     conn.commit()
     _migrate(conn)
     _maybe_seed(conn)
@@ -1669,4 +1700,97 @@ def get_supplier_scope(domain: str) -> dict:
         "scope_set_by": rec.get("scope_set_by"),
         "scope_set_at": rec.get("scope_set_at"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Night 5 — supplier notification EVENTS (T3)
+# ---------------------------------------------------------------------------
+# The notify layer records matched-request→notify events for onboarded Tier 1
+# suppliers, behind the research's conservative notify≫display asymmetry. The send
+# itself goes through the existing stubbed/flagged EmailSender — NOTHING sends live
+# (EMAIL_SEND_ENABLED defaults OFF + the conftest safety net + TIER1_V2 gate). These
+# functions are gated by TIER1_V2: when the flag is OFF they no-op (writes return
+# None, reads return []), so the notify surface is byte-identical to pre-Night-5 (T5).
+
+def record_supplier_notification(
+    run_id: Optional[str],
+    supplier_domain: str,
+    vendor_name: Optional[str],
+    *,
+    noun_class: Optional[str] = None,
+    notify_reason: Optional[str] = None,
+    send_status: str = "stubbed",
+    message_id: Optional[str] = None,
+    threshold: str = "notify",
+    metadata: Optional[dict] = None,
+    notified_at: Optional[str] = None,
+) -> Optional[str]:
+    """Record one matched-request→notify event for an onboarded Tier 1 supplier.
+
+    ``send_status`` mirrors SendResult.status ("stubbed" at the repo/test default —
+    the EmailSender gate is OFF, so the notify layer records the event WITHOUT a live
+    send). Returns the new row id, or None on flag-off / failure (fail-soft — never
+    raises into the sourcing pipeline). No-ops (None) when TIER1_V2 is off."""
+    if _tier1_dormant():
+        return None
+    dom = _normalize_domain(supplier_domain) if supplier_domain else None
+    if not dom:
+        return None
+    now = notified_at or datetime.utcnow().isoformat()
+    row = (
+        str(uuid.uuid4()), run_id, dom, vendor_name, noun_class, notify_reason,
+        now, send_status, message_id, threshold,
+        json.dumps(metadata) if metadata is not None else None, now,
+    )
+    try:
+        with closing(_get_conn()) as conn:
+            conn.execute(
+                """INSERT INTO supplier_notifications
+                   (id, run_id, supplier_domain, vendor_name, noun_class, notify_reason,
+                    notified_at, send_status, message_id, threshold, metadata_json, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                row,
+            )
+            conn.commit()
+        print(f"[SupplierRegistry] Notification recorded: {vendor_name} ({dom}) "
+              f"reason={notify_reason} status={send_status}")
+        return row[0]
+    except Exception as exc:
+        print(f"[SupplierRegistry] record_supplier_notification failed for {dom!r}: {exc}")
+        return None
+
+
+def get_supplier_notifications(
+    run_id: Optional[str] = None, domain: Optional[str] = None,
+) -> list[dict]:
+    """Return notification event rows (newest first), optionally filtered by run_id
+    and/or supplier domain. ``metadata_json`` is decoded into ``metadata``. Empty when
+    TIER1_V2 is off or no rows match. Fail-soft: [] on error."""
+    if _tier1_dormant():
+        return []
+    clauses: list[str] = []
+    params: list = []
+    if run_id is not None:
+        clauses.append("run_id = ?")
+        params.append(run_id)
+    if domain is not None:
+        clauses.append("supplier_domain = ?")
+        params.append(_normalize_domain(domain))
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM supplier_notifications{where} ORDER BY created_at DESC",
+                params,
+            ).fetchall()
+            out = []
+            for r in rows:
+                d = dict(r)
+                d["metadata"] = _decode_json_field(d.pop("metadata_json"), None)
+                out.append(d)
+            return out
+    except Exception as exc:
+        print(f"[SupplierRegistry] get_supplier_notifications failed: {exc}")
+        return []
 
