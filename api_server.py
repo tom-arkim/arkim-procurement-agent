@@ -858,6 +858,14 @@ def _transform_option(opt: dict, tier: int, idx: int, quote: Optional[dict] = No
         # confirmation_needed is set False in the raw data and this flips to False,
         # causing the frontend card to switch from "Request Confirmation" to "Buy Now".
         "confirmationPending":   tier == 1 and bool(opt.get("confirmation_needed", True)),
+        # Night 5 (T4) — aftermarket disclosure + registry provenance. The DATA reaches
+        # the candidate payload here; frontend rendering is morning work. isAftermarket
+        # above is derived from match_type (kept for back-compat); the explicit
+        # aftermarket_disclosure text + tier1_match_explanation are registry-backed Tier 1
+        # provenance that a card / audit can surface.
+        "aftermarketDisclosure":  opt.get("aftermarket_disclosure"),
+        "registryBacked":         bool(opt.get("is_registry_backed")),
+        "tier1MatchExplanation":  opt.get("tier1_match_explanation"),
     }
     if quote:
         out.update(_quote_overlay(quote))
@@ -1234,6 +1242,17 @@ def _run_sourcing_background(
                     for o in result.get(tier_key, {}).get("results", [])
                     if not o.get("rejection_reason")
                 ]
+                # Night 5 (I4): registry-backed Tier 1 candidates are computed fresh
+                # per run from the supplier registry and MUST NOT be cached into
+                # known_parts — a registry card cached then served from the cache-
+                # first path would lose its relationship/discard provenance and could
+                # be served for a request the registry no longer matches (the poison-
+                # bug class). The matcher marks these with is_registry_backed=True;
+                # drop them from the write-back so only Tier 2/3 discovery edges (and
+                # any legacy non-registry Tier 1) are cached. Registry Tier 1 is re-
+                # derived on every run (cheap local lookup), so nothing is lost.
+                cands = [c for c in cands
+                         if not (c.get("tier") == 1 and c.get("is_registry_backed"))]
                 written = known_parts.upsert_edges(part_key, cands)
                 log.info("[%s] known_parts write-back: %d supplier edge(s) for %r", run_id, written, part_key)
         except Exception as exc:

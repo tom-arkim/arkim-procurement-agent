@@ -432,3 +432,157 @@ def _performance_for(domain: str) -> dict:
 def tier1_v2_active() -> bool:
     """Public alias for the flag check (used by the inertness test + SourcingAgent)."""
     return _tier1_v2_active()
+
+
+# ---------------------------------------------------------------------------
+# T2 — honest candidate builder (Tier1Match → SourcingAgent candidate dict)
+# ---------------------------------------------------------------------------
+# Builds the snake_case SourcingOption-shape dict `_run_tier1` emits, so it flows
+# through the SAME `_transform_option` path the frontend contract (I1) expects — no
+# bespoke transform, no contract drift. The candidate is HONEST:
+#   - NO fabricated price. price_tbd=True, base_price absent (0.0 is the model default
+#     but price_tbd gates the transform → price=None → "Quote Required" card) UNLESS a
+#     DATED CONFIRMED price_db entry (source="rfq") exists for (manufacturer,
+#     part_number, vendor_name) — the only price source a Tier 1 card may carry. The
+#     quote-expected framing ("Quote Required" + leadTime on quote) is the default.
+#   - relationship badge from the brand amplifier (AUTHORIZED|CARRIES|
+#     AFTERMARKET_COMPATIBLE), surfaced on `suitability_tier` (the frontend's
+#     `relationship` Pill) AND `vendor_authorization_status` (for isAuthorizedDistributor).
+#   - aftermarket disclosure (T4): when the relationship is AFTERMARKET_COMPATIBLE,
+#     `is_aftermarket` + `aftermarket_disclosure` text are carried on the payload.
+#   - match_explanation metadata carried on `tier1_match_explanation` for the audit /
+#     card debugging (frontend rendering is morning work; the DATA is here).
+#   - source_url = the supplier's domain (the registry identity, not a fabricated
+#     listing URL) so the cache type-gate + dedup see a real, stable domain.
+#
+# Fresh-per-run, no cache write: this builder reads price_db READ-ONLY (a confirmed
+# price lookup) and never writes known_parts/price_db. The SourcingAgent excludes
+# Tier 1 from the known_parts write-back (T2 integration), so registry-backed cards
+# never enter staleness (I4).
+
+# Aftermarket disclosure text (T4). Surfaces on the candidate payload so the frontend
+# can render the disclosure (morning work); the DATA is the contract here.
+_AFTERMARKET_DISCLOSURE = (
+    "Aftermarket-compatible part — not the OEM brand. Verify fit and warranty terms "
+    "before purchase; aftermarket parts may affect OEM warranty coverage."
+)
+
+
+def _confirmed_price_for(manufacturer: str, part_number: str,
+                         vendor_name: str) -> Optional[dict]:
+    """Return a DATED CONFIRMED price_db entry (source="rfq") for
+    (manufacturer, part_number, vendor_name), or None. READ-ONLY — never writes.
+    A confirmed RFQ quote is the only price source a Tier 1 card may carry (gate-2
+    trust). price_db's null-PN guard returns {} for spec-based requests (UNKNOWN-PN),
+    so a PN-less request honestly gets no price → quote-expected framing."""
+    if not manufacturer or not part_number or not vendor_name:
+        return None
+    try:
+        from utils import price_db
+        entries = price_db.get_cached_prices(manufacturer, part_number) or {}
+    except Exception:
+        return None
+    entry = entries.get(vendor_name)
+    if not entry:
+        return None
+    # Only a CONFIRMED quote (source="rfq", a human-confirmed RFQ reply) is trustworthy
+    # enough to surface as a Tier 1 price. A "live" (Tavily-discovered) price is not a
+    # registry-backed relationship claim and is not surfaced on the Tier 1 card.
+    if (entry.get("source") or "") != "rfq":
+        return None
+    return entry
+
+
+def to_candidate(match: Tier1Match, *, manufacturer: str,
+                 part_number: str) -> dict:
+    """Build an honest Tier 1 candidate dict (SourcingOption shape) from a match.
+
+    ``manufacturer`` / ``part_number`` come from the request specs (used ONLY to look
+    up a confirmed price_db quote — never to fabricate). The candidate carries:
+      - identity (vendor_name, source_url=domain, merchant_type="Arkim Network"),
+      - relationship badge + aftermarket disclosure (T4),
+      - a confirmed prior quote's price/lead IF a dated source="rfq" price_db entry
+        exists, ELSE quote-expected framing (price_tbd=True, no price),
+      - match-explanation metadata,
+      - `is_registry_backed=True` so the SourcingAgent can exclude Tier 1 from the
+        known_parts write-back (I4) — a marker the cache path does NOT carry.
+    """
+    rel = match.brand_relationship  # AUTHORIZED | CARRIES | AFTERMARKET_COMPATIBLE | None
+    is_aftermarket = match.is_aftermarket
+
+    # Confirmed prior quote (price_db source="rfq", dated) — the ONLY honest price.
+    quote_entry = _confirmed_price_for(manufacturer, part_number, match.vendor_name)
+    has_confirmed_price = quote_entry is not None
+    base_price = float(quote_entry["price"]) if has_confirmed_price else 0.0
+    lead_days = quote_entry.get("lead_days") if quote_entry else None
+    price_tbd = not has_confirmed_price
+
+    # Relationship → authorization status (for isAuthorizedDistributor) + tier (Pill).
+    if rel == sr.BRAND_AUTHORIZED:
+        auth_status = "Authorized"
+        tier_label = "Authorized"
+    elif rel == sr.BRAND_CARRIES:
+        auth_status = "Unknown"        # not a sanctioned channel — do NOT overclaim Authorized
+        tier_label = "Carries"
+    elif rel == sr.BRAND_AFTERMARKET_COMPATIBLE:
+        auth_status = "Unknown"
+        tier_label = "Aftermarket"
+    else:
+        # Brand-neutral: class-matched, no brand row. Honest — no relationship badge.
+        auth_status = "Unknown"
+        tier_label = ""
+
+    candidate: dict = {
+        "vendor_name": match.vendor_name,
+        "base_price": base_price,
+        "price_tbd": price_tbd,
+        "lead_time_days": lead_days,            # None → "Lead time on quote" (honest)
+        "lead_time_source": "quoted" if has_confirmed_price else "placeholder",
+        "reliability_score": 95.0,              # onboarded network partner (relationship-backed)
+        "merchant_type": "Arkim Network",
+        "match_type": "Aftermarket Compatible" if is_aftermarket else "Functional Alternative",
+        "source_url": f"https://{match.domain}",
+        "suitability_score": 92.0 if match.is_core else 70.0,
+        "confidence_score": 90.0 if rel == sr.BRAND_AUTHORIZED else 75.0,
+        "vendor_authorization_status": auth_status,
+        "onboarding_status": "Active",
+        "in_stock": None,                       # no fabricated stock signal
+        "notes": _card_notes(match, has_confirmed_price),
+        "found_part_number": part_number if (has_confirmed_price and part_number
+                                             and part_number not in _NULL_PN_TOKENS_SET) else None,
+        # Tier 1 relationship / registry provenance — the load-bearing new fields:
+        "suitability_tier": tier_label,                 # frontend `relationship` Pill
+        "is_registry_backed": True,                     # exclude from known_parts write-back (I4)
+        "is_aftermarket": is_aftermarket,
+        "aftermarket_disclosure": _AFTERMARKET_DISCLOSURE if is_aftermarket else None,
+        "tier1_match_explanation": dict(match.match_explanation),
+        "confirmation_needed": True,                   # Tier 1 two-mode display (existing convention)
+    }
+    return candidate
+
+
+# A set form of the null-PN tokens for the found_part_number guard (avoid a circular
+# import of known_parts._NULL_PN_TOKENS at module load; replicate the small set — it is
+# the canonical placeholder-PN set used across price_db / known_parts).
+_NULL_PN_TOKENS_SET = {"", "UNKNOWNPN", "UNKNOWN", "NA", "TBD", "NONE", "NONE0"}
+
+
+def _card_notes(match: Tier1Match, has_confirmed_price: bool) -> str:
+    """Honest human-readable card note: relationship + class + price framing."""
+    rel = match.brand_relationship
+    rel_text = {
+        sr.BRAND_AUTHORIZED: "Authorized distributor",
+        sr.BRAND_CARRIES: "Carries brand (broad-line)",
+        sr.BRAND_AFTERMARKET_COMPATIBLE: "Aftermarket-compatible",
+    }.get(rel, "Class-matched")
+    core_text = "core class" if match.is_core else "carried class"
+    price_text = "Confirmed quote on file" if has_confirmed_price else "Quote expected"
+    return f"Arkim onboarded — {rel_text} for {match.noun_class} ({core_text}). {price_text}."
+
+
+def candidates_from_matches(matches: list[Tier1Match], *, manufacturer: str,
+                            part_number: str) -> list[dict]:
+    """Build the full Tier 1 candidate list from matches (preserves the matcher's
+    deterministic ordering). Convenience wrapper around to_candidate."""
+    return [to_candidate(m, manufacturer=manufacturer, part_number=part_number)
+            for m in matches]
