@@ -341,3 +341,43 @@ def is_known_type(part_type: Optional[str]) -> bool:
     if not isinstance(part_type, str) or not part_type:
         return False
     return part_type.strip().lower() in _PROFILES
+
+
+# ---------------------------------------------------------------------------
+# variant_selecting_attr -> real AssetSpecs field mapping
+# ---------------------------------------------------------------------------
+# A `variant_selecting_attr` is a registry-side label; the actual AssetSpecs
+# fields it maps to can differ (e.g. motor_drive's "voltage_phase" is carried
+# by the SEPARATE spec fields `voltage` and `phase`, not by any field named
+# "voltage_phase"). The confirm_intake binding guard (api_server) checks
+# whether a variant-selecting attr is ANSWERED post-ask — it MUST resolve
+# through this table, never by checking the registry name as a literal spec
+# key (that would make family-level requests permanently unconfirmable except
+# via open_family — the ask-then-brick failure).
+#
+# INVARIANT: anyone adding an entry to a profile's `variant_selecting_attrs`
+# MUST add its mapping here. The test suite asserts a mapping exists for every
+# variant_selecting_attr, so a missing row fails loudly rather than silently
+# bricking confirmations.
+VARIANT_ATTR_TO_SPEC_FIELDS: Dict[str, tuple] = {
+    "hp":             ("hp",),
+    "voltage_phase":  ("voltage", "phase"),          # either field answers it
+    "shaft_size":     ("shaft_size",),
+    "bore_diameter":  ("bore_diameter",),
+    "hydraulic_duty": ("gpm", "psi", "head", "hp"),  # any one duty signal answers it
+}
+
+
+def variant_attr_answered(specs: dict, attr: str) -> bool:
+    """True when a variant-selecting attr is present in `specs` under any of its
+    mapped real fields. ``specs`` is an AssetSpecs-shaped dict; null/placeholder
+    values (None / "" / "Unknown" / "UNKNOWN-PN" / "N/A") do NOT count as
+    answered. Returns False for an attr with no mapping row (fail-safe: an
+    unmapped attr is treated as unanswered rather than bricking confirm — but
+    the test suite asserts a mapping exists for every variant_selecting_attr,
+    so a missing row is caught in dev)."""
+    mapped = VARIANT_ATTR_TO_SPEC_FIELDS.get(attr)
+    if not mapped:
+        return False
+    _null = {None, "", "null", "N/A", "Unknown", "UNKNOWN-PN", "none", "unknown"}
+    return any(specs.get(f) not in _null for f in mapped)

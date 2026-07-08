@@ -2521,6 +2521,7 @@ def confirm_intake(
     request: Request,
     background_tasks: BackgroundTasks,
     exact_only: bool = False,
+    open_family: bool = False,
 ):
     """
     Confirm intake specs and atomically advance to sourcing.
@@ -2532,6 +2533,26 @@ def confirm_intake(
     exact_only=true ("find exact replacements only" — the no-spec-sheet honesty
     branch): records the flag so the background sourcing drops aftermarket/equivalent
     Tier 2/3 candidates, surfacing only exact OEM matches (Tier 1 network unaffected).
+
+    open_family=true ("I don't know the rating — source the family as-is"):
+    bypasses the family-variant binding guard (below) for a family-level request
+    (model present, no part_number) that has not resolved a variant-selecting
+    attr. Records the choice so the run commits as an HONEST open-family /
+    spec-based commit (the existing spec_based_sourcing / "could not be
+    confirmed" honesty path), not a silent variant pick. Inert for non-family
+    requests (clean-PN, spec-described-no-model, non-variant classes).
+
+    Family-variant binding guard: a family-level request for a variant-selecting
+    class (a model names a FAMILY, e.g. "PowerFlex 40" — the intake chat asked
+    for HP/kW + voltage) cannot be silently confirmed until at least one
+    variant-selecting attr is answered. Without this, confirm_intake bypasses
+    the chat ask (it is phase-gated, not sufficiency-gated) and sourcing runs on
+    an open family spec — or on an extractor-hallucinated rating. The guard
+    fires AFTER the 409/422/cap guards and BEFORE the phase mutate; it returns
+    422 with a frontend-consumable detail naming the missing attrs so the intake
+    card can re-surface the ask + the open-family affordance. The chat-side
+    ask-then-resolve is SOFT (any reply clears the pending flag — the
+    conversation stays conversational); the HARD enforcement lives ONLY here.
 
     DEMO_MODE session isolation: scoped to the run's owner (404 on mismatch/missing/
     NULL-session — not 403). Inert when DEMO_MODE is off.
@@ -2562,8 +2583,44 @@ def confirm_intake(
             "sourcing_per_session", demo_sid, _DEMO_MAX_SOURCING_PER_SESSION, "sourcing"
         )
         specs_dict = json.loads(run.asset_specs_json)
+
+        # Family-variant binding guard (T3) — AFTER the 409/422/cap guards, BEFORE
+        # the phase mutate. A family-level request (model present, no PN) for a
+        # variant-selecting class cannot be silently confirmed without an answered
+        # variant-selecting attr OR an explicit open_family opt-in. The opt-in
+        # commits as an honest open-family/spec-based source; the block returns a
+        # stable, frontend-consumable 422 so the intake card can re-surface the ask
+        # and the open-family affordance (T5). Clean-PN, spec-described-no-model,
+        # and non-variant classes: family_disambig_block returns None -> byte-
+        # identical to the pre-guard path.
+        if not open_family:
+            from utils.procurement_agent.agents.intake_agent import family_disambig_block
+            block = family_disambig_block(specs_dict)
+            if block is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "message": (
+                            f"{block['model']} is a product family, not a specific variant — "
+                            f"confirm the rating ({', '.join(block['missing_labels'])}) in the "
+                            f"chat, or source the family as-is if you don't know it."
+                        ),
+                        "reason": block["reason"],
+                        "model": block["model"],
+                        "missing_attrs": block["missing_attrs"],
+                        "missing_labels": block["missing_labels"],
+                    },
+                )
+
         if exact_only:
             specs_dict["exact_only"] = True
+        if open_family:
+            # Honest open-family commit: the user explicitly chose to source the
+            # family as-is rather than confirm a variant. Recorded (not silent) so
+            # sourcing + the UI can flag the run as family-open / spec-based.
+            specs_dict["spec_based_sourcing"] = True
+            specs_dict["family_open_commit"] = True
+        if exact_only or open_family:
             run.asset_specs_json = json.dumps(specs_dict)
         urgency_factor = run.urgency_factor
         warranty_status = run.warranty_status
@@ -2579,7 +2636,10 @@ def confirm_intake(
         _run_sourcing_background, run_id, specs_dict, urgency_factor, warranty_status
     )
     # Night 1 — capture the confirm-intake user action (RUN_CAPTURE-gated, fail-soft).
-    _run_capture.capture_user_action(run_id, "confirm_intake", detail={"exact_only": exact_only})
+    _run_capture.capture_user_action(
+        run_id, "confirm_intake",
+        detail={"exact_only": exact_only, "open_family": open_family},
+    )
     return {"run_id": run_id, "phase": Phase.SOURCING.value}
 
 

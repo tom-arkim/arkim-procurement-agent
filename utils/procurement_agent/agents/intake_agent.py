@@ -313,6 +313,57 @@ def _variant_disambiguation_question(specs: dict, vs_attrs: list) -> str:
     )
 
 
+def family_disambig_block(specs: dict) -> Optional[dict]:
+    """The confirm_intake binding guard's verdict (T3). Returns None when the
+    confirm may proceed normally; otherwise a stable, frontend-consumable dict
+    naming the variant-selecting attrs still unanswered, for the 422 detail:
+
+        {"reason": "family_variant_unconfirmed",
+         "model": <model>,
+         "missing_attrs": [<registry attr>, ...],
+         "missing_labels": [<human label>, ...]}
+
+    Fires ONLY when ALL hold: family-level (`_is_family_level` — model present,
+    no PN), a variant-selecting class (`_variant_selecting_attrs_for` non-empty),
+    the variant ask is in flight (`_variant_disambig_pending` — set when the
+    chat issued the ask, cleared when the user engaged with it), AND at least
+    one variant-selecting attr is still unanswered (resolved through
+    `part_type_registry.variant_attr_answered`, which maps registry attr names
+    to real AssetSpecs fields — e.g. voltage_phase is answered when `voltage`
+    OR `phase` is filled). The pending gate is what makes this
+    hallucination-robust: an extractor that filled a rating without the user
+    engaging keeps `_variant_disambig_pending=True`, so the guard still blocks
+    even though the attr is "filled". Once the user sends a chat turn after the
+    ask, the intake clears pending (resolved) and the guard falls back to the
+    answered-attr check alone. Clean-PN, spec-described-no-model, and
+    non-variant classes return None (byte-identical confirm path). Pure; no
+    flag dependence; never raises. The `open_family` opt-in bypasses this guard
+    at the call site (an honest open-family commit, not a silent one)."""
+    if not _is_family_level(specs):
+        return None
+    vs_attrs = _variant_selecting_attrs_for(specs)
+    if not vs_attrs:
+        return None
+    # If the variant ask was never issued (no pending flag, never set), the
+    # family-level gate either already proceeded on its own dims or this is a
+    # pre-fix run shape — do not brick a confirm the chat never gated. The guard
+    # only binds once the chat has actually asked.
+    if not specs.get("_variant_disambig_pending"):
+        return None
+    from utils.procurement_agent.part_type_registry import variant_attr_answered
+    missing = [a for a in vs_attrs if not variant_attr_answered(specs, a)]
+    if not missing:
+        return None
+    return {
+        "reason": "family_variant_unconfirmed",
+        "model": specs.get("model"),
+        "missing_attrs": missing,
+        "missing_labels": [
+            _VARIANT_ATTR_LABELS.get(a, a.replace("_", " ")) for a in missing
+        ],
+    }
+
+
 def assess_proceed_state(
     specs: dict, mfg_conf: float, part_conf: float
 ) -> tuple:
@@ -715,10 +766,17 @@ class IntakeAgent:
                 sufficient = True
                 follow_up = None
 
-        # Carry the pending flag forward into the persisted specs when the
-        # variant ask is issued this turn (set in _next_clarification via the
-        # `variant_disambig` missing_field). When cleared above it is already
-        # False on merged; when the ask fires, _next_clarification sets it True.
+        # Carry the pending flag forward into the persisted specs. When the
+        # variant ask is issued this turn, _next_clarification sets it True; when
+        # the user engaged (cleared above) it is already False on merged; when
+        # neither applies, inherit the prior value (a non-variant ask turn should
+        # not silently clear a pending variant ask). The flag is the binding
+        # signal for api_server.confirm_intake (T3): pending + unanswered variant
+        # attrs -> 422 unless open_family.
+        if "_variant_disambig_pending" not in merged:
+            merged["_variant_disambig_pending"] = bool(
+                prior_specs.get("_variant_disambig_pending")
+            )
         return {
             "asset_specs":             merged,
             "manufacturer_confidence": mfg_conf,
