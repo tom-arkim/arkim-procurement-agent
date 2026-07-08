@@ -47,7 +47,7 @@ from utils.procurement_agent.onboarding.harvester import HarvestResult
 # Model: Haiku by default (cheap, fits the ≤60-call eval budget). Env override
 # mirrors BRAND_INTEL_MODEL / OS_EXTRACTION_MODEL house convention.
 _DEFAULT_MODEL = os.environ.get("ONBOARDING_EXTRACTION_MODEL", "claude-haiku-4-5-20251001")
-_MAX_TOKENS = 2048
+_MAX_TOKENS = 4096
 _TIMEOUT = 45
 
 # Relationship vocabulary — MUST match supplier_registry.BRAND_RELATIONSHIPS so
@@ -249,6 +249,101 @@ def _parse_llm_json(raw: str) -> dict:
         return {}
 
 
+def _repair_truncated_json(raw: str) -> dict:
+    """Best-effort repair of a JSON object truncated by a max_tokens cap.
+
+    A line-card page can yield a brands/classes array longer than the output
+    budget; the model stops mid-value with stop_reason=max_tokens. We close
+    the deepest still-open structures (drop a trailing partial key/string,
+    close open arrays/objects) so the partial draft is salvaged rather than
+    discarded. Returns {} if unrepairable. Never raises.
+    """
+    if not raw:
+        return {}
+    txt = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    txt = re.sub(r"\s*```$", "", txt)
+    # Find the opening brace.
+    start = txt.find("{")
+    if start < 0:
+        return {}
+    txt = txt[start:]
+    # Strip a trailing partial string/value: drop characters back to the last
+    # complete value boundary (a comma, brace, or bracket with no open string).
+    # Remove an unterminated trailing string first.
+    # Walk and track string + structure depth.
+    in_str = False
+    esc = False
+    stack: list[str] = []
+    last_complete = 0  # index just after the last complete value
+    i = 0
+    n = len(txt)
+    while i < n:
+        ch = txt[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            i += 1
+            continue
+        if ch in "{[":
+            stack.append(ch)
+            i += 1
+            continue
+        if ch in "}]":
+            if stack:
+                stack.pop()
+            last_complete = i + 1
+            i += 1
+            continue
+        if ch == ",":
+            last_complete = i  # comma itself isn't a complete value; mark before
+            i += 1
+            continue
+        if ch == ":":
+            i += 1
+            continue
+        i += 1
+    # Truncate to the last complete value, then close any open structures.
+    repaired = txt[:last_complete]
+    # Remove a trailing dangling comma.
+    repaired = re.sub(r",\s*$", "", repaired)
+    # Close open structures in reverse order.
+    # Recompute open stack on the truncated text.
+    open_stack: list[str] = []
+    in_str2 = False
+    esc2 = False
+    for ch in repaired:
+        if in_str2:
+            if esc2:
+                esc2 = False
+            elif ch == "\\":
+                esc2 = True
+            elif ch == '"':
+                in_str2 = False
+            continue
+        if ch == '"':
+            in_str2 = True
+        elif ch in "{[":
+            open_stack.append(ch)
+        elif ch in "}]":
+            if open_stack:
+                open_stack.pop()
+    closers = {"{": "}", "[": "]"}
+    for op in reversed(open_stack):
+        repaired += closers[op]
+    try:
+        return json.loads(repaired)
+    except Exception:
+        return {}
+
+
 def _call_llm(system: str, user: str, api_key: str, model: str) -> Optional[dict]:
     """One Anthropic call. Returns parsed JSON dict or None (fail-soft)."""
     try:
@@ -281,7 +376,14 @@ def _call_llm(system: str, user: str, api_key: str, model: str) -> Optional[dict
         except Exception:
             pass
         raw_text = data["content"][0]["text"]
-        return _parse_llm_json(raw_text)
+        parsed = _parse_llm_json(raw_text)
+        if not parsed and data.get("stop_reason") == "max_tokens":
+            # The JSON was truncated by the output cap (a brand-rich line-card
+            # can exceed 2048 tokens). Try to repair: close the deepest open
+            # array/object so json.loads succeeds. This salvages a truncated
+            # draft rather than discarding it to the heuristic fallback.
+            parsed = _repair_truncated_json(raw_text)
+        return parsed
     except Exception as exc:
         print(f"[OnboardingExtractor] LLM call failed: {exc}")
         return None

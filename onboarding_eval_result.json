@@ -1,0 +1,506 @@
+{
+  "live": true,
+  "live_llm_calls": 5,
+  "sites": {
+    "bearing": {
+      "site_kind": "bearing_house",
+      "home_url": "https://www.rbcbearings.com/",
+      "pages_harvested": [
+        "https://www.rbcbearings.com/"
+      ],
+      "extraction_method": "llm",
+      "overall_confidence": 0.92,
+      "extracted_brands": [
+        "HEIM\u00ae Bearings Company",
+        "Dodge Industrial",
+        "Climax\u2122 Metal Products",
+        "Airtomic\u00ae",
+        "Schaublin\u00ae",
+        "NICE\u00ae Ball Bearings",
+        "Fiberglide\u00ae",
+        "Kahr\u00ae Bearing"
+      ],
+      "expected_brands": [
+        "RBC Bearings",
+        "RBC AeroComponents",
+        "RBC AeroStructures",
+        "RBC Aircraft Products",
+        "Airtomic",
+        "All Power Manufacturing",
+        "Climax Metal Products",
+        "Dodge Industrial",
+        "HEIM Bearings",
+        "RBC Industrial",
+        "Industrial Tectonics Bearings",
+        "Kahr"
+      ],
+      "brand_score": {
+        "precision": 0.625,
+        "recall": 0.4166666666666667,
+        "tp": 5,
+        "extracted": 8,
+        "expected": 12
+      },
+      "extracted_classes": [
+        "BEARING",
+        "SEAL",
+        "LUBRICANT",
+        "COUPLING",
+        "GEARBOX"
+      ],
+      "class_score": {
+        "precision": 0.6,
+        "recall": 1.0,
+        "tp": 3,
+        "extracted": 5,
+        "expected": 3,
+        "extracted_classes": [
+          "BEARING",
+          "COUPLING",
+          "GEARBOX",
+          "LUBRICANT",
+          "SEAL"
+        ],
+        "expected_classes": [
+          "BEARING",
+          "COUPLING",
+          "SEAL"
+        ],
+        "expected_off_dictionary": [
+          "fasteners",
+          "mounts"
+        ]
+      },
+      "ship_area_guess": {
+        "kind": "NATIONWIDE_US"
+      },
+      "expected_ship_area": "US + international (manufacturer with domestic locations)",
+      "location_match": true
+    },
+    "ibt": {
+      "site_kind": "line_card_distributor",
+      "home_url": "https://ibtinc.com/",
+      "pages_harvested": [
+        "https://ibtinc.com/",
+        "https://ibtinc.com/brands/"
+      ],
+      "extraction_method": "llm",
+      "overall_confidence": 0.88,
+      "extracted_brands": [
+        "ABB",
+        "AIE Company",
+        "Argo Hytos",
+        "Belt Concepts",
+        "Brady Corporation",
+        "Timken",
+        "Fenner Dunlop",
+        "Lubriplate",
+        "Maxco Chain",
+        "Nachi",
+        "National Safety Apparel",
+        "Pinnacle Climate Technologies",
+        "Rhino Hyde",
+        "Safari Belting",
+        "SKF",
+        "Tsubaki",
+        "Continental",
+        "Yates Cylinders",
+        "Solve Industrial Motion Group"
+      ],
+      "expected_brands": [
+        "3M",
+        "4B Components",
+        "ABB",
+        "AIE",
+        "AAF",
+        "Belt Concepts",
+        "Bio-Circle",
+        "Bondhus",
+        "Brady",
+        "CGW",
+        "Chicago Latrobe",
+        "Cleveland Twist Drill",
+        "Climax",
+        "Cooper",
+        "CribMaster",
+        "DeWalt",
+        "Dixon",
+        "Fabco-Air",
+        "Fenner Dunlop",
+        "Flexco",
+        "Gates",
+        "Hub City",
+        "Hytrol",
+        "Ingersoll Rand",
+        "Invertek",
+        "Isostatic",
+        "JTEKT",
+        "Lovejoy",
+        "Lubriplate",
+        "Motorola Solutions",
+        "Motovario",
+        "NORD",
+        "Nachi",
+        "National Safety Apparel",
+        "Noshok",
+        "Power Blanket",
+        "Putnam Tools",
+        "Radians",
+        "Rhino Hyde",
+        "Safari Belting",
+        "Schaefer",
+        "Schaeffler",
+        "Schmersal",
+        "Sealmaster",
+        "Siemens",
+        "Solve Industrial Motion Group",
+        "Stanley",
+        "SureWerx",
+        "Supplyforce",
+        "Timken",
+        "Vostermans Ventilation",
+        "Warner Electric",
+        "Wix Filters",
+        "YASKAWA",
+        "Yates"
+      ],
+      "brand_score": {
+        "precision": 0.6842105263157895,
+        "recall": 0.23636363636363636,
+        "tp": 13,
+        "extracted": 19,
+        "expected": 55
+      },
+      "extracted_classes": [
+        "BEARING",
+        "BELTING",
+        "COUPLING",
+        "GEARBOX",
+        "HOSE",
+        "LUBRICANT",
+        "CHAIN",
+        "MOTOR",
+        "CONVEYOR"
+      ],
+      "class_score": {
+        "precision": 0.3333333333333333,
+        "recall": 0.6,
+        "tp": 3,
+        "extracted": 9,
+        "expected": 5,
+        "extracted_classes": [
+          "BEARING",
+          "BELTING",
+          "CHAIN",
+          "CONVEYOR",
+          "COUPLING",
+          "GEARBOX",
+          "HOSE",
+          "LUBRICANT",
+          "MOTOR"
+        ],
+        "expected_classes": [
+          "BEARING",
+          "COUPLING",
+          "MOTOR",
+          "SEAL",
+          "SENSOR"
+        ],
+        "expected_off_dictionary": [
+          "power transmission",
+          "belts",
+          "hydraulics",
+          "pneumatics",
+          "industrial supplies",
+          "fasteners",
+          "conveying"
+        ]
+      },
+      "ship_area_guess": null,
+      "expected_ship_area": "US (regional/national distributor)",
+      "location_match": true
+    },
+    "lesman": {
+      "site_kind": "instruments_distributor",
+      "home_url": "https://www.lesman.com/",
+      "pages_harvested": [
+        "https://www.lesman.com/",
+        "https://www.lesman.com/brands"
+      ],
+      "extraction_method": "llm",
+      "overall_confidence": 0.92,
+      "extracted_brands": [
+        "ASCO",
+        "Honeywell",
+        "Red Lion Controls",
+        "SICK",
+        "Siemens",
+        "Turck",
+        "DeZurik",
+        "Dwyer",
+        "WIKA",
+        "WAGO",
+        "UE (United Electric Controls)",
+        "Parker",
+        "Panametrics",
+        "PULS Power",
+        "Jordan Valve",
+        "Omron",
+        "TE Connectivity",
+        "Pepperl+Fuchs",
+        "Mettler Toledo",
+        "KROHNE",
+        "Vaisala",
+        "Minebea Intec",
+        "Sierra Instruments",
+        "ABB",
+        "Precision Digital",
+        "Red Valve",
+        "Eurotherm",
+        "Gems Sensors",
+        "Testo",
+        "TSI",
+        "Gefran",
+        "Fireye"
+      ],
+      "expected_brands": [
+        "ABB",
+        "ASCO",
+        "Ametek",
+        "Anderson Greenwood",
+        "APC",
+        "Aquametrix",
+        "Azbil",
+        "Marsh Bellofram",
+        "Bestobell",
+        "Clark-Reliance",
+        "CVS Controls",
+        "DelVal",
+        "DeZurik",
+        "Dungs",
+        "DwyerOmega",
+        "Equilibar",
+        "Eurotherm",
+        "Fireye",
+        "Functional Devices",
+        "Gasmet",
+        "Gefran",
+        "Gems Sensors",
+        "Graphic Controls",
+        "GPI Flomec",
+        "Hoffman Enclosures",
+        "Honeywell",
+        "IBOCO",
+        "Idec",
+        "Ion Science",
+        "Jacoby-Tarbox",
+        "Jerguson",
+        "Jordan Valve",
+        "K-Patents",
+        "Kele",
+        "Kestrel",
+        "KROHNE",
+        "LowFlow Valve",
+        "Marwin Valve",
+        "Maxon",
+        "Meriam",
+        "Mettler Toledo",
+        "Mid-West Instruments",
+        "Minebea Intec",
+        "NOSHOK",
+        "Omron",
+        "Panametrics",
+        "Parker",
+        "Pepperl+Fuchs",
+        "Perma Pure",
+        "PIE Cal",
+        "Precision Digital",
+        "ProComSol",
+        "PULS Power",
+        "Red Lion Controls",
+        "Richards Industrials",
+        "SICK",
+        "Siemens",
+        "Turck",
+        "United Electric Controls",
+        "WAGO",
+        "WIKA"
+      ],
+      "brand_score": {
+        "precision": 0.8125,
+        "recall": 0.4262295081967213,
+        "tp": 26,
+        "extracted": 32,
+        "expected": 61
+      },
+      "extracted_classes": [
+        "SENSOR",
+        "VALVE",
+        "SWITCH",
+        "SOLENOID",
+        "FILTER",
+        "ENCLOSURE",
+        "TRANSFORMER"
+      ],
+      "class_score": {
+        "precision": 0.2857142857142857,
+        "recall": 1.0,
+        "tp": 2,
+        "extracted": 7,
+        "expected": 2,
+        "extracted_classes": [
+          "ENCLOSURE",
+          "FILTER",
+          "SENSOR",
+          "SOLENOID",
+          "SWITCH",
+          "TRANSFORMER",
+          "VALVE"
+        ],
+        "expected_classes": [
+          "SENSOR",
+          "VALVE"
+        ],
+        "expected_off_dictionary": [
+          "flow",
+          "temperature",
+          "gas detection",
+          "regulators",
+          "controls",
+          "programmers",
+          "industrial networking",
+          "power products",
+          "calibration",
+          "machine safety"
+        ]
+      },
+      "ship_area_guess": {
+        "kind": "NATIONWIDE_US"
+      },
+      "expected_ship_area": "US (national distributor; in-stock ships within one business day)",
+      "location_match": true
+    },
+    "seal": {
+      "site_kind": "aftermarket_seal_shop",
+      "home_url": "https://www.sealingdevices.com/",
+      "pages_harvested": [
+        "https://www.sealingdevices.com/"
+      ],
+      "extraction_method": "llm",
+      "overall_confidence": 0.88,
+      "extracted_brands": [
+        "Parker",
+        "Parker Chomerics",
+        "3M",
+        "Coorstek",
+        "Flexitallic",
+        "Freudenberg",
+        "Garlock",
+        "Gore",
+        "Interface Solutions",
+        "J.M. Clipper",
+        "Klinger",
+        "Loctite",
+        "Minnesota Rubber",
+        "Rogers Corporation",
+        "Saint-Gobain Performance Plastics",
+        "Warco"
+      ],
+      "expected_brands": [
+        "GORE",
+        "Sealing Devices"
+      ],
+      "brand_score": {
+        "precision": 0.0625,
+        "recall": 0.5,
+        "tp": 1,
+        "extracted": 16,
+        "expected": 2
+      },
+      "extracted_classes": [
+        "SEAL",
+        "GASKET",
+        "PACKING"
+      ],
+      "class_score": {
+        "precision": 0.6666666666666666,
+        "recall": 1.0,
+        "tp": 2,
+        "extracted": 3,
+        "expected": 2,
+        "extracted_classes": [
+          "GASKET",
+          "PACKING",
+          "SEAL"
+        ],
+        "expected_classes": [
+          "GASKET",
+          "SEAL"
+        ],
+        "expected_off_dictionary": [
+          "molded rubber",
+          "EMI shielding",
+          "thermal management",
+          "sponge & foams"
+        ]
+      },
+      "ship_area_guess": null,
+      "expected_ship_area": "US (serves industrial/telecom/defense/aerospace)",
+      "location_match": true
+    },
+    "smallshop": {
+      "site_kind": "messy_small_shop",
+      "home_url": "https://www.magnaloy.com/",
+      "pages_harvested": [
+        "https://www.magnaloy.com/"
+      ],
+      "extraction_method": "llm",
+      "overall_confidence": 0.88,
+      "extracted_brands": [],
+      "expected_brands": [
+        "Magnaloy"
+      ],
+      "brand_score": {
+        "precision": null,
+        "recall": 0.0,
+        "tp": 0,
+        "extracted": 0,
+        "expected": 1
+      },
+      "extracted_classes": [
+        "COUPLING",
+        "MOTOR",
+        "PUMP",
+        "VALVE"
+      ],
+      "class_score": {
+        "precision": 0.5,
+        "recall": 1.0,
+        "tp": 2,
+        "extracted": 4,
+        "expected": 2,
+        "extracted_classes": [
+          "COUPLING",
+          "MOTOR",
+          "PUMP",
+          "VALVE"
+        ],
+        "expected_classes": [
+          "COUPLING",
+          "MOTOR"
+        ],
+        "expected_off_dictionary": [
+          "manifolds",
+          "reservoirs",
+          "fluid power accessories",
+          "rod end couplers"
+        ]
+      },
+      "ship_area_guess": {
+        "kind": "NATIONWIDE_US"
+      },
+      "expected_ship_area": "US + international (via distributor network: Motion Industries, Applied Industrial Technologies)",
+      "location_match": true
+    }
+  }
+}
