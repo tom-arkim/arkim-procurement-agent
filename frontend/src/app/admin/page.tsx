@@ -26,11 +26,11 @@ const TOKEN_KEY = "arkim_admin_token";
 
 type Tab =
   | "runs" | "suppliers" | "sent-messages" | "review-queue" | "orders" | "prices"
-  | "unmatched-replies" | "fulfilment" | "labeling";
+  | "unmatched-replies" | "fulfilment" | "labeling" | "onboarding";
 
-// `labeling` is a Night 2 addition: it has no `path`/`listKey` (it renders its
-// own dedicated view, not the generic table). TABS still lists it so the tab
-// chip appears; the render branch special-cases it.
+// `labeling` (Night 2) and `onboarding` (Night 4) have no `path`/`listKey`
+// (they render their own dedicated views, not the generic table). TABS still
+// lists them so the tab chips appear; the render branch special-cases them.
 const TABS: { id: Tab; label: string; path: string; listKey: string }[] = [
   { id: "runs", label: "Runs", path: "/runs", listKey: "runs" },
   { id: "suppliers", label: "Suppliers", path: "/suppliers", listKey: "suppliers" },
@@ -41,6 +41,7 @@ const TABS: { id: Tab; label: string; path: string; listKey: string }[] = [
   { id: "orders", label: "Orders", path: "/orders", listKey: "orders" },
   { id: "prices", label: "Prices", path: "/prices", listKey: "prices" },
   { id: "labeling", label: "Labeling", path: "", listKey: "" },
+  { id: "onboarding", label: "Onboarding", path: "", listKey: "" },
 ];
 
 type FetchResult = { ok: boolean; status: number; body: unknown };
@@ -125,6 +126,18 @@ export default function AdminInspectorPage() {
   }>>({});
   const [labelMsg, setLabelMsg] = useState<string>("");
 
+  // Onboarding tab state (Night 4): URL → harvest → draft; the draft queue;
+  // the selected draft inspector with approve/reject + concierge edits.
+  const [onbUrl, setOnbUrl] = useState<string>("");
+  const [onbMsg, setOnbMsg] = useState<string>("");
+  const [onbDrafts, setOnbDrafts] = useState<Record<string, unknown>[]>([]);
+  const [onbSelected, setOnbSelected] = useState<FetchResult | null>(null);
+  const [onbSelectedId, setOnbSelectedId] = useState<string | null>(null);
+  // Concierge edits (optional overrides applied on approve).
+  const [onbEdit, setOnbEdit] = useState<{
+    name: string; vertical: string; shipAreaKind: string;
+  }>({ name: "", vertical: "", shipAreaKind: "" });
+
   useEffect(() => {
     const saved = typeof window !== "undefined" ? window.localStorage.getItem(TOKEN_KEY) : null;
     if (saved) setToken(saved);
@@ -140,6 +153,11 @@ export default function AdminInspectorPage() {
       if (def.id === "labeling") {
         // Labeling tab has its own view; fetch the failures-first queue.
         setResult(await fetchAdmin("/labeling/queue", token));
+      } else if (def.id === "onboarding") {
+        // Onboarding tab has its own view; fetch the pending-draft queue.
+        const r = await fetchAdmin("/onboarding/drafts", token);
+        setResult(r);
+        if (r.ok) setOnbDrafts(((r.body as Record<string, unknown>)?.drafts as Record<string, unknown>[]) || []);
       } else {
         setResult(await fetchAdmin(def.path, token));
       }
@@ -241,6 +259,78 @@ export default function AdminInspectorPage() {
 
   async function refreshQueue() {
     setResult(await fetchAdmin("/labeling/queue", token));
+  }
+
+  // --- Onboarding (Night 4) ------------------------------------------------
+  async function onbHarvest() {
+    if (!onbUrl.trim()) return;
+    setOnbMsg("Harvesting + extracting…");
+    const r = await postAdmin("/onboarding/harvest", token, { url: onbUrl.trim() });
+    if (r.ok) {
+      const b = r.body as Record<string, unknown>;
+      setOnbMsg(`Draft created: ${String(b.draft_id)} (${(b.harvested_pages as string[])?.length ?? 0} pages)`);
+      const q = await fetchAdmin("/onboarding/drafts", token);
+      if (q.ok) setOnbDrafts(((q.body as Record<string, unknown>)?.drafts as Record<string, unknown>[]) || []);
+      // Open the new draft directly.
+      await onbOpen(String(b.draft_id));
+    } else {
+      setOnbMsg(`Harvest failed (HTTP ${r.status})`);
+    }
+  }
+
+  async function onbOpen(id: string) {
+    setOnbSelectedId(id || null);
+    setOnbMsg("");
+    if (!id) { setOnbSelected(null); return; }
+    const r = await fetchAdmin(`/onboarding/drafts/${id}`, token);
+    setOnbSelected(r);
+    if (r.ok) {
+      const b = r.body as Record<string, unknown>;
+      setOnbEdit({
+        name: String(b.name ?? ""),
+        vertical: String(b.vertical ?? ""),
+        shipAreaKind: ((b.ship_area_guess as Record<string, unknown>)?.kind as string) || "",
+      });
+    }
+  }
+
+  async function onbRefresh() {
+    const r = await fetchAdmin("/onboarding/drafts", token);
+    if (r.ok) setOnbDrafts(((r.body as Record<string, unknown>)?.drafts as Record<string, unknown>[]) || []);
+  }
+
+  async function onbApprove() {
+    if (!onbSelectedId) return;
+    // Build optional revisions from the concierge edit fields (only non-empty).
+    const revisions: Record<string, unknown> = {};
+    if (onbEdit.name) revisions.name = onbEdit.name;
+    if (onbEdit.vertical) revisions.vertical = onbEdit.vertical;
+    if (onbEdit.shipAreaKind === "NATIONWIDE_US") {
+      revisions.ship_area_guess = { kind: "NATIONWIDE_US" };
+    } else if (onbEdit.shipAreaKind === "STATES") {
+      revisions.ship_area_guess = { kind: "STATES", states: [] };
+    }
+    const r = await postAdmin(`/onboarding/drafts/${onbSelectedId}/approve`, token,
+      Object.keys(revisions).length ? revisions : undefined);
+    if (r.ok) {
+      setOnbMsg(`Approved → onboarded: ${((r.body as Record<string, unknown>)?.supplier as Record<string, unknown>)?.name ?? ""}`);
+      await onbRefresh();
+      setOnbSelected(null);
+      setOnbSelectedId(null);
+    } else {
+      setOnbMsg(`Approve failed (HTTP ${r.status})`);
+    }
+  }
+
+  async function onbReject() {
+    if (!onbSelectedId) return;
+    const r = await postAdmin(`/onboarding/drafts/${onbSelectedId}/reject`, token);
+    setOnbMsg(r.ok ? "Draft rejected (nothing applied)." : `Reject failed (HTTP ${r.status})`);
+    if (r.ok) {
+      await onbRefresh();
+      setOnbSelected(null);
+      setOnbSelectedId(null);
+    }
   }
 
   async function dismissUnmatched(id: string) {
@@ -345,6 +435,24 @@ export default function AdminInspectorPage() {
             onSubmitCandidateLabel={submitCandidateLabel}
             onExport={exportLabels}
             onRefreshQueue={refreshQueue}
+          />
+        )}
+
+        {tab === "onboarding" && (
+          <OnboardingView
+            drafts={onbDrafts}
+            selected={onbSelected}
+            selectedId={onbSelectedId}
+            url={onbUrl}
+            msg={onbMsg}
+            edit={onbEdit}
+            onUrl={setOnbUrl}
+            onHarvest={onbHarvest}
+            onOpen={onbOpen}
+            onRefresh={onbRefresh}
+            onApprove={onbApprove}
+            onReject={onbReject}
+            onEdit={setOnbEdit}
           />
         )}
 
@@ -469,6 +577,214 @@ export default function AdminInspectorPage() {
             <pre className="whitespace-pre-wrap text-[10.5px] text-fg-2">
               {JSON.stringify(detail.body, null, 2)}
             </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Night 4 — Onboarding concierge view (URL → draft → review/approve).
+// Renders the URL harvester input, the pending-draft queue, and a selected
+// draft's prepopulated scope (brands / classes / locations / ship-area) with
+// approve / reject. Approve is the ONLY path that writes to the supplier
+// registry; reject discards. The must-confirm trio (brand relationship, class
+// core-competency, ship-area) is flagged on every draft regardless of
+// confidence — v1 never auto-applies.
+// ---------------------------------------------------------------------------
+
+function OnboardingView(props: {
+  drafts: Record<string, unknown>[];
+  selected: FetchResult | null;
+  selectedId: string | null;
+  url: string;
+  msg: string;
+  edit: { name: string; vertical: string; shipAreaKind: string };
+  onUrl: (s: string) => void;
+  onHarvest: () => void;
+  onOpen: (id: string) => void;
+  onRefresh: () => void;
+  onApprove: () => void;
+  onReject: () => void;
+  onEdit: (e: { name: string; vertical: string; shipAreaKind: string }) => void;
+}) {
+  const {
+    drafts, selected, selectedId, url, msg, edit,
+    onUrl, onHarvest, onOpen, onRefresh, onApprove, onReject, onEdit,
+  } = props;
+  const selBody = (selected?.ok ? selected.body : null) as Record<string, unknown> | null;
+  const brands = (selBody?.brands as Record<string, unknown>[]) || [];
+  const classes = (selBody?.classes as Record<string, unknown>[]) || [];
+  const locations = (selBody?.locations as Record<string, unknown>[]) || [];
+  const mustConfirm = (selBody?.must_confirm as Record<string, boolean>) || {};
+
+  return (
+    <div className="flex gap-4">
+      {/* Queue column */}
+      <div className="w-[340px] shrink-0">
+        <div className="rounded border border-hr-2 bg-bg-3 p-3 mb-3">
+          <p className="text-fg-1 mb-2">Onboard a supplier by URL</p>
+          <input
+            value={url}
+            onChange={(e) => onUrl(e.target.value)}
+            placeholder="https://supplier-site.com/"
+            className="w-full rounded border border-hr-2 bg-bg-2 px-2 py-1 text-fg-1"
+          />
+          <button onClick={onHarvest}
+            className="mt-2 rounded bg-fg-1 px-3 py-1 text-bg-1 text-[11px] w-full">
+            Harvest + extract → draft
+          </button>
+          {msg && <p className="mt-2 text-fg-3 text-[11px]">{msg}</p>}
+        </div>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-fg-4">Pending drafts ({drafts.length})</p>
+          <button onClick={onRefresh}
+            className="rounded border border-hr-2 px-2 py-0.5 text-fg-3">Refresh</button>
+        </div>
+        <div className="flex flex-col gap-1">
+          {drafts.length === 0 && <p className="text-fg-4">no pending drafts</p>}
+          {drafts.map((d) => (
+            <button
+              key={String(d.id)}
+              onClick={() => onOpen(String(d.id))}
+              className={
+                "text-left rounded border px-2 py-1 " +
+                (String(d.id) === selectedId
+                  ? "border-fg-1 bg-bg-4"
+                  : "border-hr-2 hover:bg-bg-4")
+              }
+            >
+              <span className="text-fg-2">{String(d.name ?? d.domain)}</span>
+              <span className="block text-fg-4 text-[10px] truncate">
+                {String(d.domain ?? "")} · conf {String(d.overall_confidence ?? "—")}
+              </span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Inspector column */}
+      <div className="flex-1">
+        {!selectedId && <p className="text-fg-4">Harvest a URL or pick a draft from the queue.</p>}
+        {selected && !selected.ok && (
+          <p className="text-red-fg">HTTP {selected.status}</p>
+        )}
+        {selBody && (
+          <div className="flex flex-col gap-4">
+            <div className="rounded border border-hr-2 bg-bg-3 p-3">
+              <div className="flex items-center justify-between">
+                <p className="text-fg-1">{String(selBody.name ?? selBody.domain)}</p>
+                <span className="text-fg-4 text-[10px]">{String(selBody.status)}</span>
+              </div>
+              <p className="text-fg-4 text-[11px] mt-1">{String(selBody.domain)}</p>
+              <div className="grid grid-cols-2 gap-2 mt-2 text-[11px]">
+                <label className="text-fg-4">name (edit)
+                  <input value={edit.name}
+                    onChange={(e) => onEdit({ ...edit, name: e.target.value })}
+                    className="block w-full rounded border border-hr-2 bg-bg-2 px-2 py-1 text-fg-1" />
+                </label>
+                <label className="text-fg-4">vertical (edit)
+                  <input value={edit.vertical}
+                    onChange={(e) => onEdit({ ...edit, vertical: e.target.value })}
+                    className="block w-full rounded border border-hr-2 bg-bg-2 px-2 py-1 text-fg-1" />
+                </label>
+                <label className="text-fg-4">ship-area (edit)
+                  <select value={edit.shipAreaKind}
+                    onChange={(e) => onEdit({ ...edit, shipAreaKind: e.target.value })}
+                    className="block w-full rounded border border-hr-2 bg-bg-2 px-2 py-1 text-fg-1">
+                    <option value="">— (keep draft)</option>
+                    <option value="NATIONWIDE_US">NATIONWIDE_US</option>
+                    <option value="STATES">STATES</option>
+                  </select>
+                </label>
+                <label className="text-fg-4">extraction method
+                  <span className="block text-fg-2 px-2 py-1">{String(selBody.extraction_method ?? "—")}</span>
+                </label>
+              </div>
+              <p className="text-fg-4 text-[10px] mt-2">
+                overall confidence {String(selBody.overall_confidence ?? "—")} · must-confirm:
+                {" "}
+                {Object.entries(mustConfirm).filter(([, v]) => v).map(([k]) => k).join(", ") || "—"}
+              </p>
+              {selBody.notes ? (
+                <p className="text-fg-4 text-[10px] mt-1">{String(selBody.notes)}</p>
+              ) : null}
+            </div>
+
+            {/* Brands */}
+            <div className="rounded border border-hr-2 p-3">
+              <p className="text-fg-1 mb-2">
+                Brands ({brands.length})
+                {mustConfirm.brands && <span className="text-fg-4 text-[10px] ml-2">must-confirm</span>}
+              </p>
+              {brands.length === 0 && <p className="text-fg-4 text-[11px]">none extracted — add via approve revisions in a later build</p>}
+              <div className="flex flex-col gap-1">
+                {brands.map((b, i) => (
+                  <div key={i} className="border border-hr-2/60 p-2 text-[11px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-fg-2">{String(b.name)}</span>
+                      <span className="text-fg-4 text-[10px]">
+                        {String(b.relationship_guess)} · conf {String(b.confidence ?? "—")}
+                      </span>
+                    </div>
+                    {b.evidence ? <p className="text-fg-4 text-[10px] mt-1">{String(b.evidence)}</p> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Classes */}
+            <div className="rounded border border-hr-2 p-3">
+              <p className="text-fg-1 mb-2">
+                Classes ({classes.length})
+                {mustConfirm.classes && <span className="text-fg-4 text-[10px] ml-2">must-confirm</span>}
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {classes.map((c, i) => (
+                  <span key={i}
+                    className={
+                      "rounded px-2 py-0.5 text-[10px] border " +
+                      (c.is_core_guess ? "border-fg-1 text-fg-1" : "border-hr-2 text-fg-3")
+                    }
+                    title={String(c.evidence ?? "")}
+                  >
+                    {String(c.class_id)}{c.is_core_guess ? " ★" : ""}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {/* Locations + ship area */}
+            <div className="rounded border border-hr-2 p-3">
+              <p className="text-fg-1 mb-2">
+                Locations / ship-area
+                {mustConfirm.ship_area && <span className="text-fg-4 text-[10px] ml-2">must-confirm</span>}
+              </p>
+              <p className="text-fg-2 text-[11px]">
+                {(selBody.ship_area_guess as Record<string, unknown>)?.kind
+                  ? `ship-area: ${JSON.stringify(selBody.ship_area_guess)}`
+                  : "ship-area: —"}
+              </p>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {locations.map((l, i) => (
+                  <span key={i} className="rounded border border-hr-2 px-2 py-0.5 text-[10px] text-fg-3">
+                    {String(l.locality)}, {String(l.region)} {String(l.country ?? "")}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button onClick={onApprove}
+                className="rounded bg-fg-1 px-4 py-1.5 text-bg-1 text-[11px]">
+                Approve → onboard supplier
+              </button>
+              <button onClick={onReject}
+                className="rounded border border-hr-2 px-4 py-1.5 text-fg-2 text-[11px]">
+                Reject (discard)
+              </button>
+            </div>
           </div>
         )}
       </div>

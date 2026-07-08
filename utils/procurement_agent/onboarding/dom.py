@@ -144,10 +144,16 @@ class _DOMPruner(HTMLParser):
         return any(s[2] for s in self._stack)
 
     def _attrs_dict(self, attrs: list[tuple[str, Optional[str]]]) -> dict[str, str]:
-        return {k: (v or "") for k, v in attrs}
+        # HTMLParser passes boolean attributes as (name, None). Preserve them
+        # as "" so `hidden in attrs` is True for a boolean `hidden` attr (the
+        # value None must NOT be dropped, or _is_hidden misses boolean attrs).
+        return {k: ("" if v is None else v) for k, v in attrs}
 
     def _is_hidden(self, attrs: dict[str, str]) -> bool:
-        if "hidden" in attrs and attrs.get("hidden", "").lower() not in ("", "false"):
+        # The boolean `hidden` attribute: present (any value, incl. empty) hides
+        # the element per HTML spec. Only an explicit "false" opts out (some
+        # frameworks use hidden="false" to mean not-hidden).
+        if "hidden" in attrs and attrs.get("hidden", "").lower() != "false":
             return True
         style = (attrs.get("style") or "").lower().replace(" ", "")
         if "display:none" in style or "visibility:hidden" in style:

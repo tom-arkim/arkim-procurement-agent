@@ -4332,3 +4332,146 @@ def admin_cancel_order(order_id: str, body: OrderCancelRequest,
         raise HTTPException(status_code=409,
                             detail=f"Cannot cancel from '{existing.get('status')}'")
     return cancelled
+
+
+# ---------------------------------------------------------------------------
+# Night 4 — ONBOARDING AGENT (admin-gated, TIER1_V2-gated, inert when off).
+#
+# URL → harvest → extract → prepopulate supplier profile → concierge
+# review/approve → writes an onboarded supplier via Night 3's TIER1_V2
+# supplier-scope registry. Every endpoint is require_admin (401/403/503) AND
+# gated on TIER1_V2 — when the flag is off they 503 (dormant), so the flag-off
+# API is byte-identical (the inertness wall). These routes are NOT on the
+# DEMO_MODE allowlist, so a public demo 403s them fail-closed (the harvester
+# fetches arbitrary URLs server-side — SSRF caution, I1; it must not be
+# reachable unauthenticated). The SSRF guard itself lives in the harvester.
+#
+#   POST /api/admin/onboarding/harvest        — URL → draft (harvest + extract)
+#   GET  /api/admin/onboarding/drafts         — list pending drafts
+#   GET  /api/admin/onboarding/drafts/{id}    — load a draft for the inspector
+#   POST /api/admin/onboarding/drafts/{id}/approve  — approve ⇒ registry write
+#   POST /api/admin/onboarding/drafts/{id}/reject   — discard (no write)
+# ---------------------------------------------------------------------------
+
+def _require_onboarding_enabled():
+    """TIER1_V2 must be on for the onboarding surface to be live. Mirrors the
+    require_admin / _require_labeling_enabled fail-closed pattern: flag off ->
+    503 (dormant), never 404-ish pretend-not-here."""
+    from utils.procurement_agent.onboarding import flags as _obf
+    if not _obf.is_enabled():
+        raise HTTPException(status_code=503,
+                            detail="Onboarding disabled (TIER1_V2 off)")
+    return _obf
+
+
+class OnboardingHarvestRequest(BaseModel):
+    url: str
+    model: Optional[str] = None
+
+
+@app.post("/api/admin/onboarding/harvest", status_code=200)
+def admin_onboarding_harvest(body: OnboardingHarvestRequest,
+                             role: str = Depends(require_admin)):
+    """URL → harvest a bounded set of same-domain pages → extract a structured
+    supplier-scope draft → persist it as a PENDING review item.
+
+    Admin-gated (the harvester fetches arbitrary URLs server-side — SSRF
+    caution). Fail-soft: unreachable/blocked pages are skipped; a draft is
+    still created from whatever fetched. The draft is NOT applied to the
+    registry here — approve is the only writer. Returns the draft id + view."""
+    _require_onboarding_enabled()
+    from utils.procurement_agent.onboarding.harvester import harvest_site
+    from utils.procurement_agent.onboarding.extractor import extract_scope
+    from utils.procurement_agent.onboarding import concierge
+    url = (body.url or "").strip()
+    if not url:
+        raise HTTPException(status_code=422, detail="url required")
+    if not _url_scheme_ok(url):
+        raise HTTPException(status_code=422, detail="url must be http/https")
+    harvest = harvest_site(url)  # SSRF guard inside the harvester
+    draft = extract_scope(harvest, model=body.model)
+    draft_id = concierge.create_draft(draft, source_url=url, set_by=role)
+    if draft_id is None:
+        raise HTTPException(status_code=503,
+                            detail="Onboarding disabled or draft could not be created")
+    view = concierge.get_draft(draft_id) or {}
+    return {
+        "draft_id": draft_id,
+        "draft": view,
+        "harvested_pages": [p.url for p in harvest.pages],
+        "skipped": harvest.skipped,
+    }
+
+
+@app.get("/api/admin/onboarding/drafts")
+def admin_onboarding_drafts(role: str = Depends(require_admin)):
+    """List pending onboarding drafts (the concierge queue)."""
+    _require_onboarding_enabled()
+    from utils.procurement_agent.onboarding import concierge
+    return {"count": len(concierge.list_drafts()),
+            "drafts": concierge.list_drafts()}
+
+
+@app.get("/api/admin/onboarding/drafts/{draft_id}")
+def admin_onboarding_draft_detail(draft_id: str, role: str = Depends(require_admin)):
+    """Load one draft for the concierge inspector (load → edit/confirm)."""
+    _require_onboarding_enabled()
+    from utils.procurement_agent.onboarding import concierge
+    view = concierge.get_draft(draft_id)
+    if not view:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    return view
+
+
+class OnboardingApproveRequest(BaseModel):
+    # Optional concierge edits applied INSTEAD of the stored draft's fields
+    # (present keys win; absent keys keep the stored value). approve is still
+    # the single registry-write point — the editor never writes directly.
+    name: Optional[str] = None
+    vertical: Optional[str] = None
+    brands: Optional[List[dict]] = None
+    classes: Optional[List[dict]] = None
+    ship_area_guess: Optional[dict] = None
+    locations: Optional[List[dict]] = None
+
+
+@app.post("/api/admin/onboarding/drafts/{draft_id}/approve")
+def admin_onboarding_approve(draft_id: str, body: OnboardingApproveRequest,
+                             role: str = Depends(require_admin)):
+    """Approve a draft → apply its scope to the Night 3 registry + drive
+    lifecycle onboarding→onboarded. The ONLY path that writes an onboarding
+    draft into the registry. Double-approve idempotent. 404 unknown draft;
+    returns the updated supplier record on success."""
+    _require_onboarding_enabled()
+    from utils.procurement_agent.onboarding import concierge
+    view = concierge.get_draft(draft_id)
+    if not view:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    revisions = {k: v for k, v in body.model_dump().items() if v is not None}
+    record = concierge.approve_draft(draft_id, revisions=revisions or None,
+                                     set_by=role)
+    if record is None:
+        raise HTTPException(status_code=409,
+                            detail="Approve failed (registry write rejected)")
+    return {"ok": True, "supplier": record,
+            "draft": concierge.get_draft(draft_id)}
+
+
+@app.post("/api/admin/onboarding/drafts/{draft_id}/reject")
+def admin_onboarding_reject(draft_id: str, role: str = Depends(require_admin)):
+    """Discard a draft — nothing is applied to the registry. 404 unknown."""
+    _require_onboarding_enabled()
+    from utils.procurement_agent.onboarding import concierge
+    view = concierge.get_draft(draft_id)
+    if not view:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    out = concierge.reject_draft(draft_id, set_by=role)
+    return {"ok": True, "draft": out}
+
+
+def _url_scheme_ok(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url).scheme.lower() in ("http", "https")
+    except Exception:
+        return False
