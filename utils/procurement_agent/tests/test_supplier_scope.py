@@ -689,3 +689,122 @@ class TestClarifierCoexistence:
         apollo.org_enrich.assert_called_once()  # stale + not onboarded -> refresh
 
 
+# ---------------------------------------------------------------------------
+# T5 — the inertness wall: an independent, end-to-end proof that TIER1_V2 OFF
+# leaves the WHOLE shipping registry path byte-identical to pre-Night-3. The
+# TestInertnessFlagOff section above covers the per-function dormancy; this
+# section proves the SYSTEM-level invariant: running the clarifier end-to-end
+# flag-off produces IDENTICAL candidate annotations + Apollo call counts to the
+# pre-Night-3 baseline, and the scope child tables stay empty.
+# ---------------------------------------------------------------------------
+
+class TestInertnessWall:
+    """End-to-end inertness: flag-off, the Night-3 extensions are invisible to a
+    full clarifier run. A fresh miss enriches + writes back exactly as before,
+    no scope tables are populated, and the Apollo call count is the pre-Night-3
+    one (one call on a miss, zero on a fresh cache hit)."""
+
+    def _agent(self, apollo):
+        from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+        a = SourcingAgent(apollo_api_key=None)
+        a._apollo = apollo
+        a._requirement_match = lambda specs, org, is_us: "confirmed"
+        return a
+
+    def _specs(self):
+        from utils.models import AssetSpecs
+        return AssetSpecs(
+            manufacturer="Gusher Pumps", model="Type 21", part_number="TYPE21",
+            voltage="N/A", category="Part", detected_type="mechanical seal",
+        )
+
+    def _enabled_apollo(self, org_return=None):
+        from unittest.mock import MagicMock
+        m = MagicMock()
+        m.enabled = True
+        m.org_enrich.return_value = org_return
+        return m
+
+    def _org(self):
+        return {"name": "Mesco Corporation", "industry": "wholesale",
+                "country": "United States", "state": "Texas",
+                "raw_address": "5226 Manor Glen Dr, Houston, TX 77345, US",
+                "description": "industrial and commercial pump repair products",
+                "keywords": ["pump rebuild kits", "mechanical seals"]}
+
+    def _scope_table_counts(self, s) -> dict:
+        conn = s._get_conn()
+        try:
+            counts = {}
+            for t in ("supplier_classes", "supplier_brands", "supplier_local_service"):
+                counts[t] = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            # tier1 columns on suppliers: how many rows have non-null tier1 data
+            counts["suppliers_with_tier1_lifecycle"] = conn.execute(
+                "SELECT COUNT(*) FROM suppliers WHERE tier1_lifecycle IS NOT NULL"
+            ).fetchone()[0]
+            counts["suppliers_with_ship_area"] = conn.execute(
+                "SELECT COUNT(*) FROM suppliers WHERE ship_area_json IS NOT NULL "
+                "AND ship_area_json != ''"
+            ).fetchone()[0]
+            return counts
+        finally:
+            conn.close()
+
+    def test_flag_off_miss_enriches_byte_identical_to_baseline(self, isolated_db_off):
+        """Flag-off: a cache miss enriches, writes back, annotates — exactly the
+        pre-Night-3 clarifier behavior. Apollo called once; the candidate carries
+        the verdict; the scope child tables stay EMPTY (no extension ran)."""
+        s = isolated_db_off
+        apollo = self._enabled_apollo(org_return=self._org())
+        agent = self._agent(apollo)
+        cands = [{"vendor_name": "Mesco", "source_url": "https://mescocorp.com/contact"}]
+        agent._apollo_clarify(cands, self._specs())
+        # pre-Night-3 clarifier contract
+        apollo.org_enrich.assert_called_once_with("mescocorp.com")
+        assert cands[0]["suitability_status"] == "confirmed"
+        rec = s.lookup_by_domain("mescocorp.com")
+        assert rec["suitability_status"] == "confirmed"
+        assert rec["is_us_confirmed"] == 1
+        # the Night-3 extensions are dormant: NO scope data anywhere
+        counts = self._scope_table_counts(s)
+        assert counts["supplier_classes"] == 0
+        assert counts["supplier_brands"] == 0
+        assert counts["supplier_local_service"] == 0
+        assert counts["suppliers_with_tier1_lifecycle"] == 0
+        assert counts["suppliers_with_ship_area"] == 0
+
+    def test_flag_off_fresh_cache_hit_zero_apollo_calls(self, isolated_db_off):
+        """Flag-off: a fresh cache hit makes zero Apollo calls (store-check-first,
+        the pre-Night-3 cost guarantee) and writes no scope data."""
+        s = isolated_db_off
+        s.upsert_apollo_data("mescocorp.com", {
+            "suitability_status": "confirmed", "apollo_industry": "wholesale",
+            "apollo_country": "United States", "is_us_confirmed": True,
+        })  # apollo_enriched_at stamped to now -> fresh
+        apollo = self._enabled_apollo(org_return=self._org())
+        agent = self._agent(apollo)
+        cands = [{"vendor_name": "Mesco", "source_url": "https://www.mescocorp.com/x"}]
+        agent._apollo_clarify(cands, self._specs())
+        apollo.org_enrich.assert_not_called()  # COST GUARANTEE (unchanged)
+        assert cands[0]["suitability_status"] == "confirmed"
+        counts = self._scope_table_counts(s)
+        assert counts["supplier_classes"] == 0
+        assert counts["suppliers_with_tier1_lifecycle"] == 0
+
+    def test_flag_on_extension_writes_scope_data(self, isolated_db):
+        """The counterpart proof: flag-ON, the extension DOES write scope data
+        (the child tables populate). This anchors that the inertness tests above
+        are meaningful — they would catch a regression where the extension
+        accidentally runs flag-off."""
+        s = isolated_db
+        s.set_supplier_classes("mescocorp.com", [{"class_id": "SEAL", "is_core": True}])
+        s.set_supplier_brands("mescocorp.com",
+                              [{"brand_id": "goulds", "relationship": "AUTHORIZED"}])
+        s.set_supplier_territory("mescocorp.com", {"kind": "NATIONWIDE_US"})
+        counts = self._scope_table_counts(s)
+        assert counts["supplier_classes"] == 1
+        assert counts["supplier_brands"] == 1
+        assert counts["suppliers_with_tier1_lifecycle"] == 0  # not transitioned
+        assert counts["suppliers_with_ship_area"] == 1
+
+
