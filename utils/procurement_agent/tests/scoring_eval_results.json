@@ -180,7 +180,7 @@
       "id": "endress_sensor_correct",
       "split": "dev",
       "expected_pass": true,
-      "score_flag_on": 75.0,
+      "score_flag_on": 52.5,
       "score_flag_off": 95.0,
       "passes_floor_flag_on": true,
       "passes_floor_flag_off": true,

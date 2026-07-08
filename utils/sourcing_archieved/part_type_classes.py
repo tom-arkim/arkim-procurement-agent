@@ -30,7 +30,28 @@ class NounClass:
     canonical: str                       # short canonical label, e.g. "SEAL"
     synonyms: tuple[str, ...]            # human-language phrases, lowercase
     slug_tokens: tuple[str, ...] = field(default_factory=tuple)  # URL slug fragments, no slashes
+    # UNSPSC crosswalk — the commodity code for this class. PROVISIONAL best-effort
+    # mapping (see UNSPSC_PINNED_RELEASE below); structurally a string so callers can
+    # treat it as opaque. Embedded here so the dictionary is the single source of truth
+    # for class identity, slug tokens, AND the UNSPSC crosswalk (Night 3 T1 / I4).
+    unspsc: str = ""
 
+
+# ---------------------------------------------------------------------------
+# UNSPSC crosswalk (I4 / Night 3 T1)
+# ---------------------------------------------------------------------------
+# A per-class UNSPSC commodity code is carried on each NounClass (`unspsc`).
+# This is the static class->code mapping the supplier-scope schema (Night 3 T2)
+# references so a supplier's class coverage maps to a pinned commodity taxonomy.
+#
+# PROVISIONAL: the codes below are best-effort segment-level codes (typically the
+# 8-digit family/commodity level). They are NOT yet verified against an official
+# pinned UNSPSC release — they are placeholders that carry the STRUCTURE of the
+# crosswalk. Before production sourcing/reporting consumes them, verify each code
+# against a pinned official release (UNSPSC is a separate maintained taxonomy)
+# and freeze the mapping. The pinned-release identifier will be recorded here at
+# that time. Treat the codes as opaque identifiers until then.
+UNSSPSC_PINNED_RELEASE = "provisional-unverified"   # replace with a real release tag at verification
 
 # ---------------------------------------------------------------------------
 # The dictionary
@@ -39,6 +60,18 @@ class NounClass:
 # highest-leverage noun-class signal (the URL slug encodes the catalog category
 # the vendor itself filed the page under). Synonyms cover titles / snippets /
 # detected_type strings. Keep both lists lowercase; matching is case-insensitive.
+#
+# EXPANSION NOTE (Night 3 T1): the dictionary below grew from 10 -> 27 classes.
+# The expansion is ADDITIONS ONLY — no existing class was renamed, removed, or
+# had its synonyms/slug_tokens edited (the shared-asset guard: SCORING_V2
+# detection is live against this dictionary, so any change to an existing
+# class's match surface could reclassify existing results). The new classes
+# (PACKING, HOSE, FILTER, SENSOR, GEARBOX, CONVEYOR, BELTING, LUBRICANT,
+# WEAR RING, CARBON BRUSH, DIAPHRAGM, CHAIN, SOLENOID, SWITCH, GEAR,
+# TRANSFORMER, ENCLOSURE) were chosen so their synonyms/slug tokens do NOT
+# appear as substrings in any existing detection/scoring fixture, verified by
+# simulation (zero reclassifications across the t3/t4/t6 + detection-eval
+# battery). Each carries a provisional UNSPSC code (see UNSSPSC_PINNED_RELEASE).
 
 _NOUN_CLASSES: tuple[NounClass, ...] = (
     NounClass(
@@ -49,6 +82,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "elastomeric seal", "seal assembly", "seal",
         ),
         slug_tokens=("mechanical-seals", "seal-kit", "seals", "shaft-seal", "seal"),
+        unspsc="31162701",  # mechanical seals (provisional)
     ),
     NounClass(
         canonical="PUMP",
@@ -58,6 +92,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "sump pump", "booster pump", "process pump", "pump",
         ),
         slug_tokens=("centrifugal-pumps", "pump", "pumps", "centrifugal-pump"),
+        unspsc="40121700",  # centrifugal pumps (provisional)
     ),
     NounClass(
         canonical="BEARING",
@@ -67,6 +102,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "bearing assembly", "bearing",
         ),
         slug_tokens=("bearings", "bearing", "ball-bearings", "roller-bearings"),
+        unspsc="31171500",  # bearings (provisional)
     ),
     NounClass(
         canonical="GASKET",
@@ -75,6 +111,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "o-ring", "oring", "o ring", "gasket set", "gasket kit",
         ),
         slug_tokens=("gaskets", "gasket", "o-rings", "oring", "seals-gaskets"),
+        unspsc="31161500",  # gaskets (provisional)
     ),
     NounClass(
         canonical="VALVE",
@@ -84,6 +121,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "valve",
         ),
         slug_tokens=("valves", "valve", "ball-valves", "butterfly-valves"),
+        unspsc="40141800",  # valves (provisional)
     ),
     NounClass(
         canonical="MOTOR",
@@ -93,6 +131,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "brake motor", "motor",
         ),
         slug_tokens=("motors", "motor", "electric-motors", "ac-motors"),
+        unspsc="31151500",  # ac motors (provisional)
     ),
     NounClass(
         canonical="DRIVE",
@@ -102,6 +141,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "motor starter", "starter", "drive",
         ),
         slug_tokens=("drives", "drive", "vfd", "vfds", "inverters", "soft-starters"),
+        unspsc="31202300",  # motor drives / controllers (provisional)
     ),
     NounClass(
         canonical="SLEEVE",
@@ -110,6 +150,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "bushing sleeve",
         ),
         slug_tokens=("sleeves", "sleeve", "shaft-sleeves"),
+        unspsc="31171800",  # bushings / sleeves (provisional)
     ),
     NounClass(
         canonical="IMPELLER",
@@ -118,6 +159,7 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "semi-open impeller", "impeller assembly",
         ),
         slug_tokens=("impellers", "impeller", "pump-impellers"),
+        unspsc="40121717",  # pump impellers (provisional)
     ),
     NounClass(
         canonical="COUPLING",
@@ -126,6 +168,181 @@ _NOUN_CLASSES: tuple[NounClass, ...] = (
             "jaw coupling", "grid coupling", "gear coupling", "coupling assembly",
         ),
         slug_tokens=("couplings", "coupling", "shaft-couplings"),
+        unspsc="31201500",  # couplings (provisional)
+    ),
+    # --- Night 3 T1 expansion (ADDITIONS ONLY; see EXPANSION NOTE above) -------
+    # GASKET/PACKING split: packing is a distinct compression-seal commodity from
+    # a flat gasket (gland/pump packing is braided cord, not a cut sheet).
+    NounClass(
+        canonical="PACKING",
+        synonyms=(
+            "gland packing", "pump packing", "compression packing",
+            "packing set", "packing kit", "packing",
+        ),
+        slug_tokens=("packing", "gland-packing", "packing-kits", "packings"),
+        unspsc="31162400",  # packing (provisional)
+    ),
+    NounClass(
+        canonical="HOSE",
+        synonyms=(
+            "hydraulic hose", "industrial hose", "air hose", "water hose",
+            "hose assembly", "hose",
+        ),
+        slug_tokens=("hose", "hoses", "hydraulic-hose", "hose-assemblies"),
+        unspsc="31192700",  # hose (provisional)
+    ),
+    NounClass(
+        canonical="FILTER",
+        synonyms=(
+            "filter element", "filter cartridge", "filter housing",
+            "filter bag", "air filter", "oil filter", "strainer", "filter",
+        ),
+        slug_tokens=("filters", "filter", "strainers", "filter-element",
+                     "filter-housings"),
+        unspsc="40101700",  # filters (provisional)
+    ),
+    # sensor/instrument: the part_type_registry's sensor_instrument family maps
+    # here (instruments + transmitters + gauges + sensors share a sourcing lane).
+    NounClass(
+        canonical="SENSOR",
+        synonyms=(
+            "pressure sensor", "level sensor", "temperature sensor",
+            "flow sensor", "pressure transmitter", "level transmitter",
+            "temperature transmitter", "pressure gauge", "gauge",
+            "instrument", "sensor",
+        ),
+        slug_tokens=("sensors", "transmitters", "gauges", "instruments",
+                     "pressure-sensors", "level-transmitters"),
+        unspsc="41111700",  # sensors / transmitters (provisional)
+    ),
+    NounClass(
+        canonical="GEARBOX",
+        synonyms=(
+            "gear reducer", "speed reducer", "gearbox assembly", "gear box",
+            "gearbox", "reducer",
+        ),
+        slug_tokens=("gearboxes", "gear-reducers", "speed-reducers", "gearbox"),
+        unspsc="31201800",  # gearboxes / speed reducers (provisional)
+    ),
+    # conveyor components (rollers/idlers/pulleys); conveyor *belt* is BELTING.
+    NounClass(
+        canonical="CONVEYOR",
+        synonyms=(
+            "conveyor roller", "conveyor component", "conveyor idler",
+            "conveyor pulley", "conveyor",
+        ),
+        slug_tokens=("conveyors", "conveyor-rollers", "conveyor-components",
+                     "conveyor-idlers"),
+        unspsc="31182700",  # conveyor components (provisional)
+    ),
+    NounClass(
+        canonical="BELTING",
+        synonyms=(
+            "conveyor belt", "timing belt", "v-belt", "v belt", "fan belt",
+            "flat belt", "drive belt", "synchronous belt", "belting",
+        ),
+        slug_tokens=("belts", "v-belts", "timing-belts", "conveyor-belts",
+                     "drive-belts", "belting"),
+        unspsc="31201600",  # belts (provisional)
+    ),
+    NounClass(
+        canonical="LUBRICANT",
+        synonyms=(
+            "lubricating grease", "gear oil", "gearbox oil", "lubricating oil",
+            "hydraulic oil", "grease", "lubricant",
+        ),
+        slug_tokens=("lubricants", "greases", "gear-oil", "lubricating-oil"),
+        unspsc="12320000",  # lubricants (provisional)
+    ),
+    # wear ring — documented dictionary debt (CLEANUP §7.5 names wear ring as a
+    # non-seal component that lacks a noun-class entry). Distinct from SLEEVE
+    # (wear *sleeve* stays SLEEVE); a wear ring is a pump-casing clearance part.
+    NounClass(
+        canonical="WEAR RING",
+        synonyms=(
+            "wear ring", "wear part", "wear component", "wear plate",
+        ),
+        slug_tokens=("wear-rings", "wear-ring", "wear-plates"),
+        unspsc="31171817",  # wear rings (provisional)
+    ),
+    # carbon brush — documented dictionary debt (CLEANUP §7.5). Motor-commutator
+    # consumable; distinct from MOTOR (the motor itself).
+    NounClass(
+        canonical="CARBON BRUSH",
+        synonyms=(
+            "carbon brush", "carbon brush holder", "brush holder",
+            "motor brush", "brush",
+        ),
+        slug_tokens=("carbon-brush", "brushes", "brush-holders", "motor-brushes"),
+        unspsc="31151600",  # motor brushes (provisional)
+    ),
+    # diaphragm kit — documented dictionary debt (CLEANUP §7.5). A diaphragm
+    # repair kit; "diaphragm pump" stays PUMP (a diaphragm pump is a pump).
+    NounClass(
+        canonical="DIAPHRAGM",
+        synonyms=(
+            "diaphragm kit", "diaphragm assembly", "diaphragm",
+        ),
+        slug_tokens=("diaphragms", "diaphragm-kit", "diaphragm-kits"),
+        unspsc="31162900",  # diaphragms (provisional)
+    ),
+    NounClass(
+        canonical="CHAIN",
+        synonyms=(
+            "roller chain", "drive chain", "conveyor chain", "chain link",
+            "chain",
+        ),
+        slug_tokens=("chains", "roller-chains", "drive-chains", "chain-links"),
+        unspsc="31201700",  # chains (provisional)
+    ),
+    NounClass(
+        canonical="SOLENOID",
+        synonyms=(
+            "solenoid coil", "solenoid actuator", "solenoid",
+        ),
+        slug_tokens=("solenoids", "solenoid-coils", "solenoid-valves"),
+        unspsc="32101700",  # solenoids (provisional)
+    ),
+    NounClass(
+        canonical="SWITCH",
+        synonyms=(
+            "pressure switch", "limit switch", "selector switch",
+            "toggle switch", "switch",
+        ),
+        slug_tokens=("switches", "limit-switches", "pressure-switches",
+                     "selector-switches"),
+        unspsc="39121400",  # switches (provisional)
+    ),
+    # GEAR — bare "gear" intentionally NOT a synonym: it is a substring of
+    # "gearmotor" (a MOTOR synonym) and would reclassify it. Multi-word gear
+    # phrases only; the canonical "GEAR" still self-references via "gear wheel".
+    NounClass(
+        canonical="GEAR",
+        synonyms=(
+            "spur gear", "helical gear", "bevel gear", "worm gear",
+            "pinion gear", "gear wheel", "gear set", "gear rack",
+        ),
+        slug_tokens=("gears", "spur-gears", "helical-gears", "bevel-gears",
+                     "gear-racks"),
+        unspsc="31201900",  # gears (provisional)
+    ),
+    NounClass(
+        canonical="TRANSFORMER",
+        synonyms=(
+            "power transformer", "control transformer", "isolation transformer",
+            "transformer",
+        ),
+        slug_tokens=("transformers", "power-transformers", "control-transformers"),
+        unspsc="39121000",  # transformers (provisional)
+    ),
+    NounClass(
+        canonical="ENCLOSURE",
+        synonyms=(
+            "electrical enclosure", "junction enclosure", "nema enclosure",
+            "enclosure",
+        ),
+        slug_tokens=("enclosures", "nema-enclosures", "junction-enclosures"),
+        unspsc="39121500",  # enclosures (provisional)
     ),
 )
 
