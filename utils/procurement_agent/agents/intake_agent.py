@@ -207,6 +207,112 @@ def _field_is_missing(specs: dict, field: str) -> bool:
     return specs.get(field) in _NULL_VALUES
 
 
+# ---------------------------------------------------------------------------
+# Family-level variant disambiguation (detect-and-ask) — the model-no-PN case.
+# ---------------------------------------------------------------------------
+# A `model` present with NO `part_number` names a FAMILY (e.g. "PowerFlex 40",
+# "Goulds 3196", "SKF 6205"), not a specific variant. The clarify-gate keys on
+# dimension-field PRESENCE with a PN escape hatch — so a model + any-filled-dim
+# passes, and an extractor that hallucinates a rating for a "well-known" family
+# satisfies the gate silently. No provenance is tracked, so the only
+# hallucination-robust rule is block-regardless-of-extracted: ask the user to
+# confirm/supply the variant-selecting attrs even if the extractor filled them.
+# Generalizes by PART CLASS (never family strings) via a dual-source lookup:
+# the registry profile's variant_selecting_attrs when a known profile is
+# classified, else the legacy CATEGORY_REQUIRED_FIELDS dims for profile-less
+# classes (e.g. bearing -> bore_diameter). The ask is recorded under the
+# synthetic `_q2_variant` ledger key (de-dup, asked once); the BINDING against
+# a silent confirm_intake bypass is in api_server.confirm_intake (T3), which
+# reads the `_variant_disambig_pending` flag this gate sets.
+
+# Human-readable labels for the variant-selecting attrs in the disambiguation
+# question. Falls back to a prettified field name for unmapped attrs.
+_VARIANT_ATTR_LABELS: dict[str, str] = {
+    "hp":              "HP/kW rating",
+    "voltage_phase":   "voltage/phase",
+    "voltage":         "voltage",
+    "shaft_size":      "shaft size",
+    "bore_diameter":   "bore diameter",
+    "seal_face_size":  "seal face size",
+    "hydraulic_duty":  "duty (flow/head or HP/RPM)",
+    "frame":           "NEMA frame",
+    "rpm":             "RPM",
+}
+
+
+def _is_family_level(specs: dict) -> bool:
+    """True when the request identifies a FAMILY, not a variant: a `model` is
+    present AND no real `part_number`. A PN present is the escape hatch (the
+    catalog number fixes the variant — `_first_missing_required_field` already
+    skips dims on a PN). A request with neither model nor PN is the spec-based
+    path, not family-level. Pure; no flag dependence."""
+    has_model = specs.get("model") not in _NULL_VALUES
+    has_pn = specs.get("part_number") not in _NULL_VALUES
+    return has_model and not has_pn
+
+
+def _variant_selecting_attrs_for(specs: dict) -> list:
+    """The attrs that select a VARIANT within an identified family for the
+    request's part class — dual-source, class-keyed (never family strings).
+
+    Prefers the registry profile's `variant_selecting_attrs` when a known
+    profile is classified (motor_drive -> [hp, voltage_phase]; mechanical_seal
+    -> [shaft_size]; pump -> [hydraulic_duty]); returns [] for a known profile
+    with no variant-selecting attrs (valve, sensor_instrument). Falls back to
+    the legacy CATEGORY_REQUIRED_FIELDS dimension attrs (minus detected_type)
+    for profile-less classes (e.g. bearing -> [bore_diameter]) — covers classes
+    not yet in the 5-profile registry. Works flag-off (no _classified_type ->
+    legacy fallback) and flag-on. Pure; never raises."""
+    try:
+        from utils.procurement_agent.part_type_registry import (
+            get_profile, is_known_type,
+        )
+        classified = specs.get("_classified_type")
+        if is_known_type(classified):
+            profile = get_profile(classified)
+            return list(profile.variant_selecting_attrs)
+    except Exception:
+        pass
+    # Profile-less class (or flag-off / no classification) — legacy category map.
+    detected = (specs.get("detected_type") or "").lower()
+    for key, fields in CATEGORY_REQUIRED_FIELDS.items():
+        if key in detected:
+            return [f for f in fields if f != "detected_type"]
+    return []
+
+
+def _variant_disambiguation_question(specs: dict, vs_attrs: list) -> str:
+    """Build the family-disambiguation question: names the model + the
+    variant-selecting attrs, phrased as confirmation (block-regardless-of-
+    extracted — the user may be confirming an extracted value or correcting a
+    hallucinated one). Uses the registry's q2_template verbatim when available
+    (INTAKE_TYPE_AWARE + known profile with a template); otherwise constructs
+    a focused question off the vs_attrs (works flag-off / profile-less)."""
+    model = specs.get("model") or "this model"
+    try:
+        if _intake_type_aware():
+            from utils.procurement_agent.part_type_registry import (
+                get_profile, is_known_type,
+            )
+            classified = specs.get("_classified_type")
+            if is_known_type(classified):
+                tpl = get_profile(classified).q2_template
+                if tpl:
+                    return tpl
+    except Exception:
+        pass
+    labels = [_VARIANT_ATTR_LABELS.get(a, a.replace("_", " ")) for a in vs_attrs]
+    if len(labels) == 1:
+        attrs_phrase = labels[0]
+    else:
+        attrs_phrase = ", ".join(labels[:-1]) + " and " + labels[-1]
+    return (
+        f"{model} is a product family, not a specific variant — what {attrs_phrase} "
+        f"do you need? (Confirm or correct the rating so we source the right unit, "
+        f"or say you don't know and we'll source the family as-is.)"
+    )
+
+
 def assess_proceed_state(
     specs: dict, mfg_conf: float, part_conf: float
 ) -> tuple:
@@ -561,6 +667,34 @@ class IntakeAgent:
         state, missing_field, caveat = assess_proceed_state(merged, mfg_conf, part_conf)
         if state == "proceed_spec_based":
             merged["spec_based_sourcing"] = True
+
+        # Family-level variant disambiguation (detect-and-ask) — runs AFTER the
+        # base assessment and BEFORE the sufficient decision. A model present
+        # with no PN names a FAMILY; for a variant-selecting class the intake
+        # must ask for the variant-selecting attrs (HP/kW+voltage for a drive,
+        # shaft size for a seal, ...) regardless of whether the extractor filled
+        # them (block-regardless-of-extracted — no provenance exists, so this is
+        # the only hallucination-robust rule). Asked once (`_q2_variant` de-dup);
+        # the BINDING against a silent confirm_intake bypass is the
+        # `_variant_disambig_pending` flag, read by api_server.confirm_intake (T3).
+        # A PRIOR pending ask + this new user turn => the user engaged => resolved.
+        if prior_specs.get("_variant_disambig_pending"):
+            # The user sent a message after the variant ask — they engaged with
+            # it (answered, corrected, or will opt into open-family via the
+            # confirm affordance). Clear the pending flag so confirm_intake no
+            # longer blocks on it. The de-dup (`_q2_variant` in asked) prevents
+            # re-asking; the base assessment decides sufficiency from here.
+            merged["_variant_disambig_pending"] = False
+        elif "_q2_variant" not in (prior_specs.get("_asked_fields") or []):
+            vs_attrs = _variant_selecting_attrs_for(merged)
+            if vs_attrs and _is_family_level(merged):
+                # Override to needs_clarification — the variant ask is due, even
+                # if the base assessment said proceed (a hallucinated rating
+                # must not satisfy the gate silently).
+                state = "needs_clarification"
+                missing_field = "variant_disambig"
+                merged["spec_based_sourcing"] = False
+
         sufficient = state in (
             "proceed_full_confidence",
             "proceed_with_manufacturer_caveat",
@@ -581,6 +715,10 @@ class IntakeAgent:
                 sufficient = True
                 follow_up = None
 
+        # Carry the pending flag forward into the persisted specs when the
+        # variant ask is issued this turn (set in _next_clarification via the
+        # `variant_disambig` missing_field). When cleared above it is already
+        # False on merged; when the ask fires, _next_clarification sets it True.
         return {
             "asset_specs":             merged,
             "manufacturer_confidence": mfg_conf,
@@ -896,6 +1034,27 @@ class IntakeAgent:
             merged["_asked_fields"] = asked
             merged["_intake_turns"] = this_turn
             return None, self._COMMIT_MESSAGE
+
+        # Family-level variant disambiguation — fires when the base assessment
+        # overrode to needs_clarification with missing_field="variant_disambig"
+        # (a model present + no PN + a variant-selecting class + the ask not yet
+        # issued). Issues the family-disambiguation question (registry q2_template
+        # when available, else a constructed confirm-the-rating question), records
+        # the `_q2_variant` de-dup key, and sets `_variant_disambig_pending` so
+        # confirm_intake (T3) can block a silent bypass until the user engages.
+        # Block-regardless-of-extracted: the question is asked even if the
+        # extractor filled the variant attrs (no provenance — the user must
+        # confirm/correct). Placed AFTER the cap so a runaway family ask still
+        # terminates at the turn cap; placed BEFORE the q2_template/identity
+        # paths so a family-level ask takes precedence over the generic walk.
+        if missing_field == "variant_disambig" and "_q2_variant" not in asked:
+            vs_attrs = _variant_selecting_attrs_for(merged)
+            if vs_attrs and _is_family_level(merged):
+                asked.append("_q2_variant")
+                merged["_asked_fields"] = asked
+                merged["_intake_turns"] = this_turn
+                merged["_variant_disambig_pending"] = True
+                return _variant_disambiguation_question(merged, vs_attrs), None
 
         # Phase 2 — type-aware Q2 (gated behind INTAKE_TYPE_AWARE). When identity
         # is absent AND a known part type was classified, ask the registry's

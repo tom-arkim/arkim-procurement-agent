@@ -251,6 +251,11 @@ class TestSufficiency:
     def test_fails_motor_missing_hp(self):
         agent = IntakeAgent(anthropic_api_key="test-key")
         motor_specs = _extracted({
+            "manufacturer":     None,   # no identity -> genuine spec-described path
+            "model":            None,   # (the family-level model-no-PN case is covered by
+                                        #  the T4 variant-disambiguation tests; this test
+                                        #  guards the no-identity spec-described path the
+                                        #  variant gate must leave UNAFFECTED)
             "detected_type":    "induction motor",
             "category":         "Equipment",
             "part_number":      None,   # spec-based (no PN) -> the dimension requirement applies
