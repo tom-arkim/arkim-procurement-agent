@@ -236,9 +236,15 @@ export async function rejectRun(
 export async function confirmIntake(
   runId: string,
   exactOnly = false,
+  openFamily = false,
 ): Promise<{ run_id: string; phase: string }> {
-  const qs = exactOnly ? "?exact_only=true" : "";
-  return request(`/runs/${runId}/confirm-intake${qs}`, { method: "POST" });
+  // Both flags are backend query params (api_server.confirm_intake reads
+  // exact_only / open_family). open_family=true is the "I don't know the rating —
+  // source the family as-is" honest-escape opt-in (T5); inert for non-family runs.
+  const qs = [exactOnly && "exact_only=true", openFamily && "open_family=true"]
+    .filter(Boolean)
+    .join("&");
+  return request(`/runs/${runId}/confirm-intake${qs ? `?${qs}` : ""}`, { method: "POST" });
 }
 
 export async function openFromPending(

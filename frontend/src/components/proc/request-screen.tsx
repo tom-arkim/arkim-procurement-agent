@@ -16,7 +16,7 @@ import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { createRun, sendMessage, confirmIntake, uploadNameplate, seedAssetSpecs } from "@/lib/api";
 import { useRun } from "@/lib/queries";
-import { queryKeys, apiErrorMessage } from "@/lib/query-client";
+import { queryKeys, apiErrorMessage, ApiError } from "@/lib/query-client";
 import { ProcIcon } from "./proc-icon";
 import { ProcHead, ArkimLoader } from "./proc-ui";
 import { useProcToast } from "./proc-shell";
@@ -59,6 +59,18 @@ function specsReady(specs?: AssetSpecs): boolean {
 
 type Stage = "entry" | "working" | "identify" | "error";
 
+// The family-variant 422 detail (T5 contract — test_run_pending_then_confirm_422).
+// Sent by api_server.confirm_intake when a family-level request for a variant-
+// selecting class is confirmed without a resolved variant-selecting attr. `pending`
+// distinguishes "confirm the rating you've nearly named" from "provide the rating".
+type FamilyVariantBlock = {
+  message: string;
+  model: string;
+  missing_attrs: string[];
+  missing_labels: string[];
+  pending: boolean;
+};
+
 /** One part in the request, each backed by its OWN run (the per-item / basket model). The
  *  parent holds the runId + the latest intake reply; specs / partLabel / ready-state are
  *  derived per-card from useRun(runId) (Stage A data layer). */
@@ -89,6 +101,10 @@ export function RequestScreen() {
   // the basket advance can gate on GENUINE all-sufficient.
   const [readyById, setReadyById] = useState<Record<string, boolean>>({});
   const [advancing, setAdvancing] = useState(false);
+  // Family-variant 422 detail attributed to the specific run that confirm_intake
+  // blocked (T5). Keyed by runId so only the blocked card re-surfaces the ask;
+  // cleared at the start of each advance so a fresh confirm never shows a stale block.
+  const [blockById, setBlockById] = useState<Record<string, FamilyVariantBlock>>({});
   // The real failure reason (server detail) when the backend responded with an error;
   // null means a pure network failure -> show the "is the backend running?" fallback.
   const [errMsg, setErrMsg] = useState<string | null>(null);
@@ -216,13 +232,31 @@ export function RequestScreen() {
   const advance = async () => {
     if (!allReady || advancing || items.length === 0) return;
     setAdvancing(true);
-    try {
-      await Promise.all(items.map((it) => confirmIntake(it.runId, false)));
+    setBlockById({});   // fresh confirm — never carry a stale block forward
+    // allSettled (not Promise.all) so a 422 on one item doesn't short-circuit and
+    // hide which runs DID advance to sourcing. Per-run attribution lets the exact
+    // blocked card re-surface the family-variant ask (T5); other rejections keep the
+    // existing toast. The variant-blocked items render state on their card (no toast).
+    const results = await Promise.allSettled(items.map((it) => confirmIntake(it.runId, false)));
+    const blocked: Record<string, FamilyVariantBlock> = {};
+    let failed = false;
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled") return;
+      if (r.reason instanceof ApiError && r.reason.status === 422) {
+        const detail = (r.reason.body as { detail?: unknown } | undefined)?.detail;
+        if (detail && typeof detail === "object" && (detail as { reason?: string }).reason === "family_variant_unconfirmed") {
+          blocked[items[i].runId] = detail as FamilyVariantBlock;
+          return;
+        }
+      }
+      failed = true;
+    });
+    if (failed) fire("Couldn't start sourcing — please try again.");
+    if (Object.keys(blocked).length) setBlockById(blocked);
+    if (!failed && !Object.keys(blocked).length) {
       router.push(`/parts/${items[0].runId}`);
-    } catch {
-      fire("Couldn't start sourcing — please try again.");
-      setAdvancing(false);   // stay on the page so the user can retry
     }
+    setAdvancing(false);   // stay on the page so the user can answer / escape / retry
   };
 
   return (
@@ -324,6 +358,7 @@ export function RequestScreen() {
               runId={item.runId}
               initialReply={item.reply}
               multiPart={item.multiPart}
+              variantBlock={blockById[item.runId]}
               onReady={handleReady}
               // Removable only when there's more than one card — you can't remove the last part.
               onRemove={items.length > 1 ? removeItem : undefined}
@@ -385,16 +420,20 @@ function ItemCard({
   runId,
   initialReply,
   multiPart,
+  variantBlock,
   onReady,
   onRemove,
 }: {
   runId: string;
   initialReply: string;
   multiPart?: boolean;
+  variantBlock?: FamilyVariantBlock;
   onReady?: (runId: string, ready: boolean) => void;
   onRemove?: (runId: string) => void;
 }) {
   const qc = useQueryClient();
+  const router = useRouter();
+  const fire = useProcToast();
   const { data: run } = useRun(runId, { enabled: Boolean(runId) });
   const specs = run?.asset_specs;
   const ready = specsReady(specs);
@@ -473,6 +512,26 @@ function ItemCard({
     }
   };
 
+  // Honest escape (T5): "I don't know the rating — source the family as-is." Re-calls
+  // confirm-intake with open_family=true so the run commits as an honest open-family /
+  // spec-based source rather than a silent variant pick. Single-item proceed: the other
+  // basket items already advanced to sourcing in the same advance() attempt, so only this
+  // blocked run remains. On success navigate as the normal advance does; a failure (e.g.
+  // 409) hits the existing toast — no special casing.
+  const [escaping, setEscaping] = useState(false);
+  const escapeFamily = async () => {
+    if (escaping) return;
+    setEscaping(true);
+    try {
+      await confirmIntake(runId, false, true);
+      router.push(`/parts/${runId}`);
+    } catch {
+      fire("Couldn't start sourcing — please try again.");
+    } finally {
+      setEscaping(false);
+    }
+  };
+
   return (
     <div className="proc-id" style={{ marginTop: 10 }}>
       <div className="id-top">
@@ -507,6 +566,23 @@ function ItemCard({
             </div>
           )}
           {!ready && reply && <div className="id-meta" style={{ marginTop: 4 }}>{reply}</div>}
+          {/* Family-variant 422 (T5): the run IS ready by the sufficiency gate (mfg + model,
+              no PN) but confirm_intake's binding guard blocked it. Re-surface the ask here —
+              pending frames "confirm the rating you nearly named" vs "provide the rating" —
+              reusing the id-kick/id-meta question styling. The input below (re-shown via the
+              !ready || variantBlock gate) is the primary path: it submits through the EXISTING
+              /messages flow so the answer persists into asset_specs before the next confirm
+              (the guard reads persisted specs — a local-only answer wouldn't clear it). */}
+          {variantBlock && (
+            <>
+              <div className="id-kick" style={{ marginTop: 6 }}>
+                {variantBlock.pending
+                  ? `Confirm the rating for your ${variantBlock.model}`
+                  : "Provide the rating"}
+              </div>
+              <div className="id-meta" style={{ marginTop: 2 }}>{variantBlock.message}</div>
+            </>
+          )}
         </div>
         {onRemove && (
           <button
@@ -521,7 +597,7 @@ function ItemCard({
         )}
       </div>
 
-      {!ready && (
+      {(!ready || variantBlock) && (
         <div className="id-actions" style={{ marginTop: 10 }}>
           <input
             className="proc-idinput"
@@ -535,6 +611,21 @@ function ItemCard({
             {pending ? "Sending…" : "Send"}
           </button>
         </div>
+      )}
+
+      {/* Honest escape (T5): a link-style secondary action, NOT a primary button — the
+          primary path is answering the rating in chat. Re-calls confirm-intake with
+          open_family=true and proceeds; failure falls back to the existing toast. */}
+      {variantBlock && (
+        <button
+          className="proc-btn"
+          data-kind="quiet"
+          style={{ marginTop: 8, padding: "2px 0", textDecoration: "underline" }}
+          disabled={escaping}
+          onClick={escapeFamily}
+        >
+          {escaping ? "Sourcing the family as-is…" : "I don't know the rating — source the family as-is"}
+        </button>
       )}
 
       {err && (
