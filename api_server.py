@@ -96,6 +96,7 @@ from utils.procurement_agent.state.persistence import (
 )
 from sqlalchemy import text
 from utils.procurement_agent.state.phases import Phase
+from utils.procurement_agent import tier1_matcher, tier1_notify
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -858,6 +859,14 @@ def _transform_option(opt: dict, tier: int, idx: int, quote: Optional[dict] = No
         # confirmation_needed is set False in the raw data and this flips to False,
         # causing the frontend card to switch from "Request Confirmation" to "Buy Now".
         "confirmationPending":   tier == 1 and bool(opt.get("confirmation_needed", True)),
+        # Night 5 (T4) — aftermarket disclosure + registry provenance. The DATA reaches
+        # the candidate payload here; frontend rendering is morning work. isAftermarket
+        # above is derived from match_type (kept for back-compat); the explicit
+        # aftermarket_disclosure text + tier1_match_explanation are registry-backed Tier 1
+        # provenance that a card / audit can surface.
+        "aftermarketDisclosure":  opt.get("aftermarket_disclosure"),
+        "registryBacked":         bool(opt.get("is_registry_backed")),
+        "tier1MatchExplanation":  opt.get("tier1_match_explanation"),
     }
     if quote:
         out.update(_quote_overlay(quote))
@@ -1234,12 +1243,56 @@ def _run_sourcing_background(
                     for o in result.get(tier_key, {}).get("results", [])
                     if not o.get("rejection_reason")
                 ]
+                # Night 5 (I4): registry-backed Tier 1 candidates are computed fresh
+                # per run from the supplier registry and MUST NOT be cached into
+                # known_parts — a registry card cached then served from the cache-
+                # first path would lose its relationship/discard provenance and could
+                # be served for a request the registry no longer matches (the poison-
+                # bug class). The matcher marks these with is_registry_backed=True;
+                # drop them from the write-back so only Tier 2/3 discovery edges (and
+                # any legacy non-registry Tier 1) are cached. Registry Tier 1 is re-
+                # derived on every run (cheap local lookup), so nothing is lost.
+                cands = [c for c in cands
+                         if not (c.get("tier") == 1 and c.get("is_registry_backed"))]
                 written = known_parts.upsert_edges(part_key, cands)
                 log.info("[%s] known_parts write-back: %d supplier edge(s) for %r", run_id, written, part_key)
         except Exception as exc:
             log.warning("[%s] known_parts write-back failed: %s", run_id, exc)
 
     # ── Step 3: Persist final results and advance phase (both paths) ─────────
+    # Night 5 (I4) — registry-backed Tier 1 is re-derived FRESH per run, on BOTH
+    # the cache-hit and discovery paths. The cache-first path bypasses SourcingAgent
+    # (so _run_tier1's matcher never runs on a hit), and a cached Tier 2/3 edge set
+    # must NOT crowd out the onboarded-supplier relationship lane. So: when TIER1_V2
+    # is on, run the matcher here and set result["tier_1"] to its candidates — the
+    # matcher is the single source of truth for Tier 1, its ordering is the
+    # relationship-aware one, and registry Tier 1 never enters staleness (it is not
+    # read from nor written to known_parts). Fail-soft: a matcher error leaves the
+    # existing tier_1 (cache or discovery) untouched.
+    _tier1_matches = []
+    try:
+        if tier1_matcher.tier1_v2_active():
+            _tier1_matches = tier1_matcher.match_tier1(
+                detected_type=specs_dict.get("detected_type"),
+                manufacturer=specs_dict.get("manufacturer") or "Unknown",
+                description=specs_dict.get("description"),
+                model=specs_dict.get("model"),
+            )
+            if _tier1_matches:
+                result["tier_1"] = {
+                    "results": tier1_matcher.candidates_from_matches(
+                        _tier1_matches,
+                        manufacturer=specs_dict.get("manufacturer") or "Unknown",
+                        part_number=specs_dict.get("part_number") or "",
+                    ),
+                    "count": len(_tier1_matches), "status": "ok",
+                }
+            else:
+                result["tier_1"] = {"results": [], "count": 0, "status": "ok"}
+    except Exception as exc:
+        log.warning("[%s] Tier 1 fresh re-derive failed (keeping %s tier_1): %s",
+                    run_id, "cached" if result is not None else "discovered", exc)
+
     with _SessionFactory() as session:
         orm = session.get(SourcingRunORM, run_id)
         if orm and orm.current_phase == Phase.SOURCING.value:
@@ -1276,6 +1329,20 @@ def _run_sourcing_background(
     except Exception:
         # Capture must never break sourcing write-back; run_capture counts its own failures.
         pass
+
+    # Night 5 (T3) — Tier 1 notify≫display asymmetry. The matches were re-derived
+    # above (fresh per run, I4); fire the notify layer over them. The notify gate
+    # (brand-match-or-core-class) + per-RFQ cap are applied; events are recorded
+    # behind the stubbed/flagged EmailSender (double-gate: EMAIL_SEND_ENABLED
+    # defaults OFF + TIER1_V2). Gated by TIER1_V2; fail-soft (a notify error is
+    # recorded, never breaks sourcing). The notify set matches the displayed Tier 1
+    # set exactly (same _tier1_matches).
+    try:
+        if _tier1_matches:
+            tier1_notify.notify_tier1(_tier1_matches, run_id=run_id)
+    except Exception as exc:
+        log.warning("[%s] Tier 1 notify failed (fail-soft, sourcing unaffected): %s",
+                    run_id, exc)
     log.info("[%s] Sourcing complete → comparison", run_id)
 
 

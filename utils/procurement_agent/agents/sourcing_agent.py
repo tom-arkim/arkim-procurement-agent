@@ -18,6 +18,7 @@ from typing import Optional
 
 from utils.apollo_client import ApolloClient
 from utils.models import SourcingRun, AssetSpecs, SourcingOption, lead_time_source_for, lead_time_speed_confidence
+from utils.procurement_agent import tier1_matcher
 
 _TIER1_CATALOG_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
@@ -507,21 +508,53 @@ class SourcingAgent:
     # ------------------------------------------------------------------
 
     def _run_tier1(self, specs: AssetSpecs, weights: dict) -> list[dict]:
-        """Match against the Arkim onboarded supplier catalog (Fix 2: normalized PN).
+        """Match against the Arkim onboarded supplier catalog.
 
-        The seed catalog (data/mock_tier1_suppliers.json) is now {"suppliers": []}
-        — all fabricated vendors purged at the source — and the synthetic
-        _seeded_tier1_candidates fallback is permanently disabled, so Tier 1 is
-        honestly EMPTY in all modes until real onboarded suppliers exist. This
-        still reads the (empty) file and falls through to _seeded_tier1_candidates
-        (which returns []), so the result is [] for any specs. The DEMO_MODE
-        early-return below is retained as belt-and-suspenders: it short-circuits
-        the empty read under demo (no behavioral change) and documents the
-        demo-live-only intent. Tier 2/3 carry all real sourcing.
+        Night 5 (TIER1_V2): when the supplier-scope redesign is live, Tier 1 is
+        populated by the onboarded-supplier MATCHER (``tier1_matcher.match_tier1``)
+        against the Night 3 supplier-scope registry — class hard-gate + brand
+        amplifier + territory rank + local_service hard filter, fresh per run, NO
+        fabricated prices (a card carries a price ONLY when a dated confirmed
+        price_db quote exists; else quote-expected framing). See tier1_matcher.py
+        for the design + honesty guarantees. The matcher result is built into
+        honest candidate dicts and returned; the caller excludes Tier 1 from the
+        known_parts write-back (I4 — registry-backed cards never enter staleness).
+
+        Flag-off (TIER1_V2 not live): the seed catalog
+        (data/mock_tier1_suppliers.json is {"suppliers": []} — fabricated vendors
+        purged at the source) + the permanently-disabled _seeded_tier1_candidates
+        fallback leave Tier 1 honestly EMPTY — byte-identical to pre-Night-5 (T5).
+        The DEMO_MODE early-return is belt-and-suspenders: it short-circuits the
+        empty read under demo (no behavioral change). Tier 2/3 carry all real
+        sourcing when Tier 1 is empty.
         """
         if _demo_mode_active():
             print("[SourcingAgent] DEMO_MODE: Tier 1 live-only — seed catalog + synthetic fallback gated off")
             return []
+
+        # Night 5 — registry-backed Tier 1 (TIER1_V2). Fresh per run, no cache write.
+        # Gated by the flag (tier1_matcher.tier1_v2_active reads supplier_registry.TIER1_V2
+        # live, so tests monkeypatch it). Fail-soft: a matcher/registry error degrades
+        # to [] (the matcher never raises into the pipeline).
+        if tier1_matcher.tier1_v2_active():
+            try:
+                matches = tier1_matcher.match_tier1(
+                    detected_type=getattr(specs, "detected_type", None),
+                    manufacturer=specs.manufacturer,
+                    description=getattr(specs, "description", None),
+                    model=getattr(specs, "model", None),
+                )
+            except Exception as exc:
+                print(f"[SourcingAgent] Tier 1 matcher error (degraded to empty): {exc}")
+                matches = []
+            if not matches:
+                return []
+            results = tier1_matcher.candidates_from_matches(
+                matches, manufacturer=specs.manufacturer,
+                part_number=specs.part_number or "",
+            )
+            return self._rank(results, weights)
+
         try:
             with open(_TIER1_CATALOG_PATH, "r") as fh:
                 catalog = json.load(fh)
