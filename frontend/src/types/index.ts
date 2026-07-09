@@ -44,7 +44,7 @@ export type CompatibilitySummary =
   | "incompatible";
 export type FieldMatch = "exact" | "compatible" | "different" | "unknown";
 export type CompletionKind =
-  | "arkim_transaction"
+  | "gofer_transaction"
   | "external_handoff"
   | "cancelled"
   | "no_results";
