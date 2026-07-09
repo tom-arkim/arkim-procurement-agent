@@ -449,3 +449,126 @@ class TestConciergeReviewRevision:
                             headers=_auth(portal_api._token)).json()
         rev = [r for r in q2["review_items"] if r["id"] == rid][0]
         assert rev["status"] == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# T5 - inertness + security
+# ---------------------------------------------------------------------------
+
+class TestInertnessFlagOff:
+    def test_flag_off_route_byte_identical_to_unknown(self, portal_api_off):
+        """SUPPLIER_PORTAL_V1 OFF -> the public route responds byte-identically
+        to an unknown route (404 + FastAPI's unknown-route body)."""
+        r_portal = portal_api_off.get("/api/portal/some-token/profile")
+        r_unknown = portal_api_off.get("/api/this-route-does-not-exist")
+        assert r_portal.status_code == 404
+        assert r_unknown.status_code == 404
+        assert r_portal.json() == r_unknown.json()
+
+    def test_flag_off_propose_revision_absent(self, portal_api_off):
+        r = portal_api_off.post("/api/portal/some-token/propose-revision",
+                                json={"brands": []})
+        r_unknown = portal_api_off.post("/api/nope", json={})
+        assert r.status_code == 404
+        assert r.json() == r_unknown.json()
+
+    @pytest.mark.parametrize("flag", ["", "0", "false", "no", "off", "junk", None])
+    def test_falsy_token_is_flag_off(self, monkeypatch, tmp_path, flag):
+        """Every non-truthy flag token -> the route is OFF (fail safe/closed)."""
+        import api_server
+        # The live resolver reads os.environ; a falsy token -> OFF.
+        monkeypatch.setenv("SUPPLIER_PORTAL_V1", flag or "")
+        assert api_server._portal_enabled() is False
+
+
+class TestUniformRejection:
+    def _profile(self, client, token):
+        return client.get(f"/api/portal/{token}/profile")
+
+    def test_invalid_expired_reused_uniform(self, portal_api):
+        live = _mint(portal_api)
+        # Make an expired token (mint then force its row into the past).
+        from utils import claim_tokens as ct
+        import hashlib, sqlite3
+        exp = ct.generate_for("dxpe.com", expiry_days=0)
+        conn = sqlite3.connect(ct._DB_PATH)
+        conn.execute(
+            "UPDATE claim_tokens SET expires_at = ? WHERE token_hash = ?",
+            ((datetime.utcnow() - timedelta(days=1)).isoformat(),
+             hashlib.sha256(exp["token"].encode()).hexdigest()),
+        )
+        conn.commit()
+        conn.close()
+        # All three rejected categories -> the SAME 404 (no oracle).
+        r_invalid = self._profile(portal_api, "totally-garbage")
+        r_expired = self._profile(portal_api, exp["token"])
+        # Regeneration revokes `live`; a reused-after-regen token is rejected.
+        new = portal_api.post("/api/admin/suppliers/claim-link/regenerate",
+                              json={"supplier_domain": "dxpe.com"},
+                              headers=_auth(portal_api._token)).json()["token"]
+        r_reused = self._profile(portal_api, live)
+        r_live = self._profile(portal_api, new)
+        assert r_invalid.status_code == r_expired.status_code == r_reused.status_code
+        assert r_invalid.json() == r_expired.json() == r_reused.json()
+        assert r_invalid.status_code == 404
+        # The live token still works.
+        assert r_live.status_code == 200
+
+
+class TestNoAdminSurfaceFromPortal:
+    def test_portal_token_reaches_no_admin(self, portal_api):
+        """A portal token must NEVER satisfy require_admin - no /api/admin/*
+        path is reachable through it."""
+        tok = _mint(portal_api)
+        # Use the portal token as an admin bearer - must be rejected.
+        for path in ("/api/admin/ping", "/api/admin/suppliers",
+                     "/api/admin/review-queue"):
+            r = portal_api.get(path, headers={"Authorization": f"Bearer {tok}"})
+            assert r.status_code in (401, 403), (path, r.status_code, r.text)
+
+
+class TestNoRegistryWriteFromPortal:
+    def test_property_no_registry_write_from_supplier_route(self, portal_api):
+        """PROPERTY TEST: no code path in the supplier route writes the
+        supplier registry. The only writers are the admin concierge paths
+        (approve). A propose-revision writes a review_items row ONLY (the
+        pending store), never the scope tables."""
+        from utils import supplier_registry as sr
+        tok = _mint(portal_api)
+        # Snapshot the registry scope BEFORE.
+        before_brands = sr.get_supplier_brands("dxpe.com")
+        before_classes = sr.get_supplier_classes("dxpe.com")
+        before_terr = sr.get_supplier_territory("dxpe.com")
+        # Exercise every supplier-route mutation.
+        portal_api.post(f"/api/portal/{tok}/propose-revision",
+                        json={"brands": [{"brand_id": "Goulds", "relationship": "CARRIES"}],
+                              "classes": [{"class_id": "PUMP", "is_core": True}],
+                              "ship_area": {"kind": "STATES", "states": ["TX"]}})
+        portal_api.get(f"/api/portal/{tok}/profile")
+        # The registry scope tables are UNCHANGED.
+        assert sr.get_supplier_brands("dxpe.com") == before_brands
+        assert sr.get_supplier_classes("dxpe.com") == before_classes
+        assert sr.get_supplier_territory("dxpe.com") == before_terr
+
+
+class TestRateLimit:
+    def test_rate_limit_keyed_on_ip_and_prefix(self, portal_api, monkeypatch):
+        """Repeated invalid-token hits from the same IP are rate-limited (429
+        after the cap); the limiter is keyed on IP + token-prefix (so a valid
+        token is not penalized by an attacker's noise on the same IP beyond the
+        prefix dimension)."""
+        tok = _mint(portal_api)
+        # Hammer the route with garbage tokens from one IP (TestClient has a
+        # fixed client IP). The cap is small (test default); after it, 429.
+        statuses = []
+        for i in range(60):
+            r = portal_api.get(f"/api/portal/garbage-{i}/profile")
+            statuses.append(r.status_code)
+            if r.status_code == 429:
+                break
+        assert 429 in statuses, "rate limit never engaged"
+        # A VALID token still works through the rate-limited IP (not blocked by
+        # the invalid-token bucket - keyed on token-prefix, the valid token has
+        # a distinct prefix).
+        r_live = portal_api.get(f"/api/portal/{tok}/profile")
+        assert r_live.status_code == 200
