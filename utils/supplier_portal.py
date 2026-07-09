@@ -114,18 +114,19 @@ def read_profile(supplier_domain: str) -> Optional[dict]:
 
 def demand_teaser(supplier_domain: str,
                   *, window_days: int = TEASER_WINDOW_DAYS_DEFAULT) -> dict:
-    """The read-only demand teaser for the portal HERO. Counts GENUINE buyer-
-    match events from ``supplier_notifications`` for the single supplier within
-    a stated time window. Returns ONLY the bare count + the window - no per-
-    request / per-buyer / per-time detail (so nothing derivable beyond the
+    """The read-only demand teaser for the portal HERO. Counts DISTINCT REAL
+    buyer requests from ``supplier_notifications`` for the single supplier
+    within a stated time window. Returns ONLY the bare count + the window - no
+    per-request / per-buyer / per-time detail (so nothing derivable beyond the
     count). Zero-state -> honest category/network framing (never a "0" hero,
     never a fabricated count).
 
-    Honesty (I4): the ``supplier_notifications`` ledger has NO seed/demo/
-    synthetic rows by construction - the sole writer is the live notify layer
-    (``record_supplier_notification`` from ``tier1_notify.notify_tier1``). So
-    the count is naturally honest: it counts real notify events. See
-    audit/NIGHT6_INVESTIGATION.md I4 for the dev-DB-hygiene caveat.
+    The count is ``DISTINCT run_id`` over LIVE rows only (``is_test = 0``),
+    within the window — i.e. distinct buyer requests, NOT notification events.
+    A single sourcing run that re-fires the same class-match across runs is ONE
+    request; a request that triggers many notifications is still one request.
+    Test/fixture/seed rows (``is_test = 1``) are excluded so they never inflate
+    a supplier's demand.
 
     Window comparison: timestamps are PARSED to timezone-aware UTC datetimes and
     compared as datetimes (not ISO strings). The stored ``notified_at`` is naive
@@ -137,17 +138,28 @@ def demand_teaser(supplier_domain: str,
     sub-second sorts AFTER a naive microsecond cutoff, so string compare wrongly
     counts it). Parsing makes the result correct regardless of string format.
     A malformed/missing timestamp is excluded from the count (never crashes,
-    never counts-as-matched)."""
+    never counts-as-matched).
+
+    A row with no ``run_id`` is skipped: a distinct-request count needs a
+    request key, and a NULL run_id can't be de-duplicated (counting NULL once
+    would conflate an unknown number of requests; counting it per-row would
+    re-introduce the row-count bug)."""
     if not _portal_enabled():
         return _zero_state()
     dom = sr._normalize_domain(supplier_domain)
     rows = sr.get_supplier_notifications(domain=dom)  # [] when TIER1_V2 off
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
-    count = 0
+    distinct_runs: set[str] = set()
     for r in rows:
+        if r.get("is_test"):  # exclude test/fixture/seed provenance
+            continue
+        run_id = r.get("run_id")
+        if not run_id:
+            continue  # no request key to de-duplicate on
         at = r.get("notified_at") or r.get("created_at") or ""
         if _ts_in_window(at, cutoff):
-            count += 1
+            distinct_runs.add(run_id)
+    count = len(distinct_runs)
     if count <= 0:
         return _zero_state(window_days=window_days)
     return {

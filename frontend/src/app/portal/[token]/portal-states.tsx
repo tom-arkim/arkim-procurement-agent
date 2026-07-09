@@ -80,16 +80,19 @@ function WarningGlyph({ label }: { label: string }) {
 
 export function PortalTeaser({ teaser }: { teaser: DemandTeaser }) {
   if (teaser.has_matches) {
-    // Real demand — the count is genuine (backend counts real buyer-match
-    // events only; never seeded/demo/synthetic). The number is the hero.
+    // Real demand — the count is genuine: the backend counts DISTINCT real
+    // buyer requests (DISTINCT run_id, is_test=0, within the window), never
+    // seeded/demo/synthetic rows and never raw notification events. The number
+    // is the hero.
     return (
       <section className="portal-teaser portal-teaser--has-matches" aria-labelledby="teaser-h">
         <p className="portal-teaser-eyebrow" id="teaser-h">
           Buyer demand
         </p>
         <p className="portal-teaser-hero">
+          matched{" "}
           <span className="portal-teaser-count">{teaser.count}</span>{" "}
-          buyer{teaser.count === 1 ? "" : "s"} matched your categories in the last{" "}
+          buyer request{teaser.count === 1 ? "" : "s"} in the last{" "}
           {teaser.window_days} days
         </p>
         <p className="portal-teaser-sub">

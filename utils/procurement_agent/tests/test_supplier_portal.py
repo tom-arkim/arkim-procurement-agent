@@ -140,13 +140,17 @@ def _mint(client, domain="dxpe.com"):
     return r.json()["token"]
 
 
-def _seed_notification(domain="dxpe.com", *, days_ago=0, reason="core_class"):
+def _seed_notification(domain="dxpe.com", *, days_ago=0, reason="core_class",
+                       run_id="fixture-run-uuid"):
     """Record a genuine buyer-match notification event for a fixture supplier
-    (the ONLY writer the portal teaser reads - the live notify layer)."""
+    (the ONLY writer the portal teaser reads - the live notify layer). Each call
+    defaults to the SAME run_id (so legacy callers reproduce one request); pass a
+    distinct ``run_id`` to model distinct buyer requests (the teaser counts
+    DISTINCT run_id, not rows)."""
     from utils import supplier_registry as sr
     at = (datetime.utcnow() - timedelta(days=days_ago)).isoformat()
     return sr.record_supplier_notification(
-        run_id="fixture-run-uuid", supplier_domain=domain, vendor_name="DXP Enterprises",
+        run_id=run_id, supplier_domain=domain, vendor_name="DXP Enterprises",
         noun_class="SEAL", notify_reason=reason, send_status="stubbed",
         notified_at=at, metadata={"fixture": True},
     )
@@ -279,8 +283,10 @@ class TestPublicProfileAndTeaser:
         assert not set_cookie
 
     def test_teaser_has_matches_count(self, portal_api):
-        _seed_notification("dxpe.com", days_ago=1)
-        _seed_notification("dxpe.com", days_ago=2)
+        # Two DISTINCT buyer requests (distinct run_ids) -> count 2. The teaser
+        # counts DISTINCT run_id, not notification rows.
+        _seed_notification("dxpe.com", days_ago=1, run_id="req-1")
+        _seed_notification("dxpe.com", days_ago=2, run_id="req-2")
         tok = _mint(portal_api)
         b = portal_api.get(f"/api/portal/{tok}/profile").json()
         t = b["teaser"]
@@ -292,10 +298,33 @@ class TestPublicProfileAndTeaser:
         assert "events" not in t
         assert "runs" not in t
 
+    def test_teaser_counts_distinct_requests_not_rows(self, portal_api):
+        """One buyer request that re-fires the same match across runs is ONE
+        request, NOT N rows. Same run_id, two notification rows -> count 1
+        (the bug this fixes: a naive row count would show 2)."""
+        _seed_notification("dxpe.com", days_ago=1, run_id="req-same")
+        _seed_notification("dxpe.com", days_ago=2, run_id="req-same")
+        tok = _mint(portal_api)
+        b = portal_api.get(f"/api/portal/{tok}/profile").json()
+        assert b["teaser"]["count"] == 1
+
+    def test_teaser_excludes_test_rows(self, portal_api):
+        """A test/fixture row (is_test=1) never inflates the demand count.
+        One live request + one test row (same run_id) -> count 1, not 2."""
+        from utils import supplier_registry as sr
+        _seed_notification("dxpe.com", days_ago=1, run_id="req-live")
+        sr.record_supplier_notification(
+            run_id="run-test", supplier_domain="dxpe.com", vendor_name="DXP Enterprises",
+            noun_class="SEAL", notify_reason="core_class", send_status="stubbed",
+            metadata={}, is_test=True)
+        tok = _mint(portal_api)
+        b = portal_api.get(f"/api/portal/{tok}/profile").json()
+        assert b["teaser"]["count"] == 1
+
     def test_teaser_window_excludes_old_events(self, portal_api):
         # One within the window, one outside (40 days > 30-day default window).
-        _seed_notification("dxpe.com", days_ago=5)
-        _seed_notification("dxpe.com", days_ago=40)
+        _seed_notification("dxpe.com", days_ago=5, run_id="req-in")
+        _seed_notification("dxpe.com", days_ago=40, run_id="req-out")
         tok = _mint(portal_api)
         b = portal_api.get(f"/api/portal/{tok}/profile").json()
         assert b["teaser"]["count"] == 1  # only the within-window event
