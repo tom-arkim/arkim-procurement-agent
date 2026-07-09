@@ -421,12 +421,23 @@
    later visual pass can retune without touching Tailwind config.
    =========================================================================== */
 .portal-surface {
-  /* Palette — single source (brief design direction) */
-  --portal-graphite: #26282B;   /* text, headings, primary */
-  --portal-slate:   #4E5A63;   /* secondary text, borders, chrome */
-  --portal-orange:  #F4581C;   /* the ONE action accent — used sparingly */
-  --portal-amber:   #E8A33D;   /* needs-review / pending state */
-  --portal-green:   #2E9E6B;   /* success / confirmed */
+  /* Palette — single source (brief design direction).
+     Accessible values (WCAG-verified): the bright brand orange #F4581C cannot
+     carry text (best case 3.36:1 on white → FAILS AA), so it stays a NON-TEXT
+     accent only — border-lefts, checked-state borders, input accent-color. For
+     orange that must carry text or be a button label, use --portal-deep-orange
+     (white-on-it 5.99:1, on-paper 5.54:1). Amber #E8A33D is a fill/border only
+     and ALWAYS pairs with graphite text (6.85:1); it is never a text color.
+     --portal-success / --portal-error are white-text-safe and more
+     CVD-separable than the originals, for when success/error status land. */
+  --portal-graphite: #26282B;   /* text, headings, primary (13.67:1 on paper) */
+  --portal-slate:   #4E5A63;   /* secondary text, borders, chrome (6.55:1) */
+  --portal-orange:  #F4581C;   /* NON-TEXT accent only (3:1 UI); never text/button label */
+  --portal-deep-orange: #B23A12; /* orange that carries text/labels (5.54:1 on paper; 5.99:1 white-on-it) */
+  --portal-amber:   #E8A33D;   /* FILL/BORDER only; always graphite text (6.85:1) */
+  --portal-success: #1E7A50;   /* success status (white text 5.31:1) — CVD-separable */
+  --portal-error:   #B3261E;   /* error status (white text 6.54:1) — CVD-separable */
+  --portal-green:   #2E9E6B;   /* DEPRECATED — use --portal-success (CVD-separable). Kept for reference; do not use for new status. */
   --portal-paper:   #F7F6F2;   /* background (warm off-white) */
   --portal-ink:     #1A1D1F;   /* dark surfaces */
   --portal-card:    #FFFFFF;
@@ -445,13 +456,18 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   /* Visible keyboard focus for the public surface (a11y). */
-  --portal-focus: 0 0 0 3px rgba(244, 88, 28, 0.35);
+  --portal-focus: 0 0 0 3px rgba(38, 40, 43, 0.30);
 }
 .portal-surface :focus-visible {
   outline: none;
   box-shadow: var(--portal-focus);
   border-radius: 4px;
 }
+/* STANDING RULE (WCAG 1.4.1 Use of Color): a status color is NEVER the sole
+   signal on the portal surface. Every status indicator carries a SHAPE (glyph)
+   + a TEXT LABEL as well as its color, so the deuteranopia green↔red / protan
+   green↔amber collisions can never cause a misread. Do not introduce a green/red
+   (or any color-only) status pair without this redundancy. */
 
 /* Header — minimal: brand mark + supplier name */
 .portal-header {
@@ -536,7 +552,7 @@
 }
 .portal-teaser-count {
   font-family: var(--font-jetbrains), ui-monospace, monospace;
-  color: var(--portal-orange);
+  color: var(--portal-deep-orange); /* text — bright orange fails AA; #B23A12 = 5.54:1 on card */
   font-variant-numeric: tabular-nums;
 }
 /* Zero-state framing: same hero weight, no number (honesty carve-out). */
@@ -610,7 +626,7 @@
   text-transform: uppercase;
   letter-spacing: 0.1em;
   font-size: 11px;
-  color: var(--portal-amber);
+  color: var(--portal-graphite); /* amber text fails AA; graphite on card = 13.67:1. Amber stays as the card border (non-text). */
   margin: 0 0 8px;
 }
 .portal-submitted-title {
@@ -793,8 +809,8 @@
   font-size: 10.5px;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--portal-orange);
-  border: 1px solid var(--portal-orange);
+  color: var(--portal-deep-orange); /* text — #B23A12 = 5.54:1 on paper; bright orange fails AA */
+  border: 1px solid var(--portal-orange); /* non-text border — bright orange OK (3:1 UI) */
   border-radius: 3px;
   padding: 1px 6px;
 }
@@ -874,7 +890,7 @@
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 10.5px;
-  color: var(--portal-amber);
+  color: var(--portal-graphite); /* amber text fails AA; graphite on paper = 13.67:1. Amber stays as the border-left (non-text). */
   margin: 0 0 4px;
 }
 .portal-disclosure-body {
@@ -891,7 +907,11 @@
   align-items: flex-start;
 }
 .portal-submit {
-  background: var(--portal-orange);
+  /* Primary action: graphite fill + white text = 14.78:1 (passes AA). Bright
+     orange #F4581C with white text was 3.36:1 (FAIL), so orange is demoted to a
+     non-text accent only. Graphite is the primary; deep-orange (#B23A12,
+     5.99:1) is an available alternate if an orange button is ever wanted. */
+  background: var(--portal-graphite);
   color: #FFFFFF;
   border: none;
   border-radius: 6px;
@@ -902,7 +922,7 @@
   min-height: 44px;
   transition: background 0.12s;
 }
-.portal-submit:hover { background: #d9440f; }
+.portal-submit:hover { background: var(--portal-ink); }
 .portal-submit:disabled { opacity: 0.6; cursor: default; }
 .portal-submit-note {
   margin: 0;
