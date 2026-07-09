@@ -14,9 +14,10 @@
  *    for the page lifetime only. It is NEVER written to localStorage /
  *    sessionStorage / a cookie, NEVER sent to a third party (no analytics, no
  *    error reporting beacons), and NEVER logged (no console.* with the token).
- *  - Referrer-Policy: no-referrer is set (via <meta> in the page) so an
- *    outbound click can't leak the token via the Referer header. The API also
- *    sets it server-side; we set it here too, defense-in-depth.
+ *  - Referrer-Policy: no-referrer is set via the page metadata export
+ *    (metadata.referrer) so an outbound click can't leak the token via the
+ *    Referer header. The API also sets it server-side. (No inline <meta> in the
+ *    body — the export is the canonical single source.)
  *  - The page calls ONLY /api/portal/{token}/* (lib/portal-api.ts). It can
  *    reach no admin endpoint and exposes no admin data.
  *  - Uniform rejection: on any non-200 (invalid / expired / reused / flag-off /
@@ -31,8 +32,10 @@ export const dynamic = "force-dynamic";
 export const metadata = {
   title: "Confirm your supplier profile",
   description: "Confirm your brands, classes, and ship area so buyers can match you.",
-  // Defense-in-depth: the page-level meta is supplemented by an explicit tag in
-  // the body too (see claim-page). The API also sets this header on responses.
+  // Canonical Referrer-Policy: no-referrer for the page (so an outbound click
+  // can't leak the token via Referer). The API also sets this header on every
+  // portal response. No inline <meta> in the body — that was technically-invalid
+  // redundancy; this export is the single source.
   referrer: "no-referrer",
 };
 

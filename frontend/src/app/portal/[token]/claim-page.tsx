@@ -164,10 +164,10 @@ function PortalLayout({
 }) {
   return (
     <div className="portal-surface">
-      {/* Defense-in-depth: the API sets Referrer-Policy: no-referrer on every
-          portal response; we also set it via this meta so a same-page anchor or
-          any outbound navigation can't leak the token via Referer. */}
-      <meta name="referrer" content="no-referrer" />
+      {/* Referrer-Policy: no-referrer is set once, canonically, via the page
+          metadata export in page.tsx (metadata.referrer). No inline <meta> here
+          — it was technically-invalid redundancy in the body. The no-referrer
+          behavior is preserved; the API also sets it server-side. */}
       <header className="portal-header">
         <span className="portal-brand">{BRAND_NAME}</span>
         <span className="portal-supplier" title={domain}>
@@ -185,7 +185,6 @@ function PortalLayout({
 function PortalLoading() {
   return (
     <div className="portal-surface portal-loading">
-      <meta name="referrer" content="no-referrer" />
       <GoferLoader size={120} aria-label="Loading your supplier profile" />
       <p className="portal-loading-text">Loading your profile…</p>
     </div>
