@@ -1,7 +1,7 @@
 import { type CSSProperties } from "react";
 
 /**
- * ArkimMark — the real Arkim logo mark, geometry taken VERBATIM from the source
+ * GoferMark — the Gofer logo mark, geometry taken VERBATIM from the source
  * vector (frontend/public/arkim-mark.svg): the top bar + three descending arrow
  * bands. The dark background rect from the source asset is omitted (transparent),
  * and fill is driven by `currentColor` so the same component serves both uses:
@@ -13,7 +13,7 @@ import { type CSSProperties } from "react";
  * the source — only document order differs (the shapes do not overlap), so the
  * rendered mark is identical to the source.
  */
-export function ArkimMark({
+export function GoferMark({
   size = 32,
   className,
   style,

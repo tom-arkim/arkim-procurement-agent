@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useRouter, usePathname } from "next/navigation";
 import { ProcIcon, type ProcIconName } from "./proc-icon";
 import { ProcToast } from "./proc-ui";
-import { ArkimMark } from "./arkim-mark";
+import { GoferMark } from "./arkim-mark";
 import { PROC_TENANT, PRIMARY_SITE } from "@/lib/proc-config";
 import { BRAND_NAME } from "@/lib/brand";
 import { useEvents } from "@/lib/queries";
@@ -162,7 +162,7 @@ export function ProcShell({ children }: { children: ReactNode }) {
           {/* left nav */}
           <nav className="proc-dnav">
             <button type="button" className="proc-brand" onClick={() => router.push("/")} aria-label={`${BRAND_NAME} — go to home`}>
-              <span className="bm"><ArkimMark size={20} /></span>
+              <span className="bm"><GoferMark size={20} /></span>
               <span className="bn">{BRAND_NAME.toLowerCase()}</span>
             </button>
 
