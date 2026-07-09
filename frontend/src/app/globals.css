@@ -594,6 +594,19 @@
   border-radius: 10px;
   padding: 32px 24px;
 }
+
+/* Status glyphs — the SHAPE half of the shape+label+color status rule (WCAG
+   1.4.1). currentColor is graphite (contrast-safe on the card); the status
+   COLOR is carried by the card border, not the glyph, so an amber glyph (which
+   would fail the 3:1 non-text threshold on white) is never used. */
+.portal-status-glyph-wrap {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 12px;
+}
+.portal-status-glyph {
+  color: var(--portal-graphite); /* 13.67:1 on card — passes AA + 3:1 non-text */
+}
 .portal-rejection-title {
   font-size: 22px;
   font-weight: 600;
