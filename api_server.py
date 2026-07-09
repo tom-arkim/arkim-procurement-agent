@@ -4679,3 +4679,161 @@ def _url_scheme_ok(url: str) -> bool:
     except Exception:
         return False
 
+
+
+# ===========================================================================
+# Night 6 - Supplier claim-portal: PUBLIC route (T2) - the app's FIRST PUBLIC
+# ROUTE. Security posture is the highest-risk part of this build.
+# ===========================================================================
+# Route prefix: /api/portal/{token}/... - a fresh, non-admin prefix. These
+# handlers do NOT declare Depends(require_admin); their ONLY auth is the claim
+# token (validated by utils.claim_tokens.validate_token, lookup-by-hash). The
+# admin-session/auth boundary is require_admin (I3): anything not declaring it
+# is public. A portal token never satisfies require_admin (asserted in T5).
+#
+# Flag gating (guardrail 3): SUPPLIER_PORTAL_V1 off -> these routes are ABSENT.
+# Implemented as a 404 raised at handler entry matching FastAPI's unknown-route
+# body ({"detail":"Not Found"}) so flag-off is byte-identical to an unknown
+# route (T5 inertness). The flag is read LIVE (_portal_enabled, honors
+# monkeypatched os.environ).
+#
+# Security (T1/T2/T5):
+#   - Token validated by hash, never string compare; raw token never logged.
+#   - Strict Referrer-Policy: no-referrer on every portal response (token kept
+#     out of downstream referrer headers).
+#   - NO session cookies issued (token-only auth; no session to hijack).
+#   - Uniform rejection: invalid / expired / reused-after-regeneration tokens
+#     all -> the SAME 404 (byte-identical to an unknown route), so no oracle
+#     distinguishes wrong from expired (T5). A 404 (not 401) is deliberate:
+#     the route must not confirm whether a token existed.
+#   - Rate-limit keyed on IP + token-prefix (T5) - see _portal_rate_check.
+#   - No admin surface reachable (no require_admin here; the property test
+#     proves a portal token reaches no /api/admin/* path).
+#
+# DEMO_MODE: the portal route is NOT on _DEMO_ALLOWLIST, so under DEMO_MODE the
+# allowlist middleware 403s it fail-closed (a public no-login demo must not
+# expose the supplier claim portal). The flag-off 404 below is the gate in
+# normal dev/prod.
+# ---------------------------------------------------------------------------
+
+# Rate-limit caps for the public portal route (in-process, mirrors the DEMO_MODE
+# _DemoRateCounter pattern). Keyed on (client IP, token-prefix) so an attacker
+# hammering garbage tokens from one IP is throttled, while a valid token (distinct
+# prefix) from the same IP is not penalized by the attacker's noise. Caps are
+# generous for a concierge-distributed link (a real supplier hits the route a
+# handful of times); tight enough to stop a token-guessing spray.
+_PORTAL_RATE_CAP_PER_BUCKET: int = _env_int("SUPPLIER_PORTAL_RATE_CAP", 20)
+_PORTAL_RATE_WINDOW_SEC: int = _env_int("SUPPLIER_PORTAL_RATE_WINDOW_SEC", 60)
+
+# A fixed-window limiter keyed on (ip, token_prefix): dict of bucket ->
+# [count, window_start]. Thread-safe via a lock (mirrors _DemoRateCounter). NOT
+# a sliding window - sufficient for a public route's anti-spray posture; a
+# production deploy would use Redis.
+_portal_rate_lock = threading.Lock()
+_portal_rate_buckets: Dict[tuple, list] = {}
+
+
+def _client_ip(request: Request) -> str:
+    """The client IP for rate-limiting. Trusts X-Forwarded-For's first hop only
+    when the request came through localhost (a dev proxy); otherwise the direct
+    client host. Conservative: a misconfigured proxy cannot spoof an arbitrary
+    IP to bypass the limiter unless it's the localhost dev proxy."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff and request.client and request.client.host in ("127.0.0.1", "localhost"):
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _portal_rate_check(request: Request, token: str) -> None:
+    """Raise 429 (with Retry-After) if the (IP, token-prefix) bucket has exceeded
+    the cap within the window. Inert when the cap is <= 0. The bucket key is
+    (ip, prefix) so a valid token (distinct prefix) is not throttled by an
+    attacker's garbage-token noise on the same IP."""
+    if _PORTAL_RATE_CAP_PER_BUCKET <= 0:
+        return
+    import time
+    ip = _client_ip(request)
+    prefix = (token or "")[:8]
+    bucket = (ip, prefix)
+    now = time.monotonic()
+    with _portal_rate_lock:
+        entry = _portal_rate_buckets.get(bucket)
+        if not entry or (now - entry[1]) >= _PORTAL_RATE_WINDOW_SEC:
+            entry = [0, now]
+            _portal_rate_buckets[bucket] = entry
+        entry[0] += 1
+        count = entry[0]
+    if count > _PORTAL_RATE_CAP_PER_BUCKET:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests.",
+            headers={"Retry-After": str(_PORTAL_RATE_WINDOW_SEC)},
+        )
+
+
+def _portal_flag_off_404():
+    """Raise the byte-identical-to-unknown-route 404 when SUPPLIER_PORTAL_V1 is
+    off. FastAPI's unknown-route body is {"detail":"Not Found"} - we match it
+    exactly so flag-off is indistinguishable from a route that never existed
+    (T5 inertness)."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _portal_reject_404():
+    """The uniform rejection for invalid / expired / reused tokens. A 404 with
+    FastAPI's unknown-route body - deliberately NOT 401, so the route does not
+    confirm whether a token existed (no oracle). Identical across all three
+    rejection cases (T5)."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _validate_portal_token(request: Request, token: str) -> dict:
+    """The shared portal-token gate. Returns the validated token row (with
+    supplier_domain) on success. On flag-off OR any token failure, raises a
+    404 byte-identical to an unknown route (flag-off = route absent; bad token
+    = uniform rejection). Applies the rate-limit BEFORE the token check so a
+    garbage-token spray is throttled regardless of validity."""
+    if not _portal_enabled():
+        _portal_flag_off_404()
+    _portal_rate_check(request, token)
+    row = claim_tokens.validate_token(token)
+    if not row:
+        _portal_reject_404()
+    return row
+
+
+def _portal_response_headers(headers: dict) -> dict:
+    """Strict security headers for every portal response (T2 [REVIEW-ADD])."""
+    headers["Referrer-Policy"] = "no-referrer"
+    # The token is in the path, not a query string, but a no-store cache-control
+    # keeps the token-bearing URL out of any shared/proxy cache.
+    headers["Cache-Control"] = "no-store"
+    return headers
+
+
+@app.get("/api/portal/{token}/profile")
+def portal_profile(token: str, request: Request):
+    """The public supplier claim page contract: the read-only demand teaser
+    (HERO, first element) + the editable profile (brands/classes/ship-area +
+    aftermarket disclosure). Token-validated; flag-gated inert. Never exposes
+    lifecycle / performance / other suppliers. Zero-state teaser -> honest
+    category/network framing (never a "0" hero, never a fabricated count)."""
+    row = _validate_portal_token(request, token)
+    from utils import supplier_portal
+    profile = supplier_portal.read_profile(row["supplier_domain"])
+    if profile is None:
+        # The token is valid but the supplier vanished (deleted mid-session) -
+        # uniform rejection (do not reveal the supplier existed).
+        _portal_reject_404()
+    teaser = supplier_portal.demand_teaser(row["supplier_domain"])
+    # HERO first in the contract (the research's demand-as-hero placement).
+    body = {
+        "teaser": teaser,
+        "supplier_domain": profile["supplier_domain"],
+        "name": profile["name"],
+        "brands": profile["brands"],
+        "classes": profile["classes"],
+        "ship_area": profile["ship_area"],
+        "aftermarket_disclosure": profile["aftermarket_disclosure"],
+    }
+    return JSONResponse(content=body, headers=_portal_response_headers({}))
