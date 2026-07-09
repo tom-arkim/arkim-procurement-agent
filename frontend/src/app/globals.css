@@ -786,6 +786,102 @@
   flex-shrink: 0;
 }
 
+/* Brand row head — name + remove action (the supplier can drop a brand) */
+.portal-brand-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.portal-brand-remove {
+  background: none;
+  border: none;
+  padding: 2px 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--portal-slate);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  min-height: 28px;
+  transition: color 0.12s;
+}
+.portal-brand-remove:hover { color: var(--portal-graphite); }
+.portal-brand-remove:focus-visible {
+  outline: 2px solid var(--portal-orange);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Add-brand control — the supplier adds their own brands (centerpiece). */
+.portal-brand-add {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px dashed var(--portal-line-strong);
+  border-radius: 8px;
+  background: var(--portal-card);
+}
+.portal-brand-add-name {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.portal-brand-add-label {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10.5px;
+  color: var(--portal-slate);
+}
+.portal-brand-add-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 6px;
+  background: var(--portal-paper);
+  color: var(--portal-graphite);
+  font-size: 14px;
+  min-height: 44px;          /* touch target ≥44px */
+  font-family: inherit;
+}
+.portal-brand-add-input::placeholder { color: var(--portal-slate); opacity: 0.8; }
+.portal-brand-add-input:focus-visible {
+  outline: 2px solid var(--portal-orange);
+  outline-offset: 1px;
+  border-color: var(--portal-orange);
+}
+.portal-rel-group--add {
+  /* same tri-state radio group, slightly tighter inside the add card */
+}
+.portal-brand-add-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--portal-deep-orange);
+}
+.portal-brand-add-btn {
+  align-self: flex-start;
+  background: var(--portal-card);
+  color: var(--portal-graphite);
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 6px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  transition: border-color 0.12s, background 0.12s;
+}
+.portal-brand-add-btn:hover {
+  border-color: var(--portal-orange);
+  background: rgba(244, 88, 28, 0.06);
+}
+.portal-brand-add-btn:focus-visible {
+  outline: 2px solid var(--portal-orange);
+  outline-offset: 2px;
+}
+
 /* Classes */
 .portal-class-list {
   list-style: none;
