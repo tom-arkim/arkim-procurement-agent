@@ -49,6 +49,7 @@ export function ClaimPage({ token }: { token: string }) {
   // preserved across a failed submit — the supplier never re-enters).
   const [form, setForm] = useState<FormState | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<boolean>(false);
   // Detect first paint so we don't flash the rejection page during SSR/hydration.
   const [mounted, setMounted] = useState(false);
 
@@ -85,8 +86,10 @@ export function ClaimPage({ token }: { token: string }) {
       // loses the supplier's edits.
       setForm(nextForm);
       setSubmitError(null);
+      setSubmitting(true);
       const body: ProposeRevisionBody = formToRevision(nextForm);
       const result = await proposeRevision(tokenRef.current, body);
+      setSubmitting(false);
       if (result.ok) {
         setPhase("submitted");
       } else {
@@ -135,7 +138,7 @@ export function ClaimPage({ token }: { token: string }) {
           aftermarketDisclosure={profile.aftermarket_disclosure}
           onChange={setForm}
           onSubmit={handleSubmit}
-          submitting={false}
+          submitting={submitting}
         />
       </PortalLayout>
     );

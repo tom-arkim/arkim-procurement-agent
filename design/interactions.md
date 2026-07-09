@@ -726,3 +726,95 @@ review/approve → an onboarded supplier in the Night 3 TIER1_V2 registry.
   its `must_confirm` flag, plus overall confidence and the extraction method
   (LLM vs heuristic fallback). A raw per-field provenance (evidence quote +
   source_url) rides on each field for review.
+
+---
+
+## 10. Supplier claim-portal (public)
+
+The app's first public, unauthenticated, customer-facing surface. Route
+`/portal/[token]` — the token is the credential and lives in the URL. Behavior
+gated by the backend `SUPPLIER_PORTAL_V1` flag (flag-off → the public route
+returns 404, rendered as the uniform rejection; the admin portal surfaces
+return 503 = dormant).
+
+### Security posture (highest priority — first public route)
+- The token is NEVER stored (no localStorage / sessionStorage / cookie), NEVER
+  sent to a third party (no analytics / error reporting beacons), and NEVER
+  logged. It is held in a ref for the page lifetime only.
+- `Referrer-Policy: no-referrer` is set on the page (metadata + meta) so an
+  outbound click can't leak the token via Referer. The API also sets it
+  server-side.
+- The public page calls ONLY `/api/portal/[token]/*` (a dedicated client,
+  `lib/portal-api.ts`, separate from the internal-app client — no session
+  header, no auth). It can reach no admin endpoint and exposes no admin data.
+- Uniform rejection: invalid / expired / reused / flag-off / network failure all
+  render the SAME generic "this link is no longer valid — contact your rep"
+  page. The UI never surfaces a status code or distinguishes the failure kind
+  (no oracle). The portal client returns only `ok` vs `rejected`.
+
+### Demand-as-hero (settled decision 1)
+- The teaser is the FIRST and most prominent element — above the profile form.
+- `has_matches` → real count + window as the hero ("12 buyers matched your
+  categories in the last 30 days"). The count is genuine (backend counts real
+  buyer-match events only; never seeded/demo/synthetic).
+- Zero-state (`has_matches:false`) → the `framing` text is the hero. NEVER a
+  "0 matches" number, NEVER a fabricated/placeholder count, NEVER demo data
+  (honesty carve-out).
+
+### Profile-confirm form (settled decision 3 — anti-Ariba)
+- Single-pass edit on ONE page (no multi-screen wizard): brands / classes /
+  ship-area.
+- Tri-state brand relationship (AUTHORIZED / CARRIES /
+  AFTERMARKET_COMPATIBLE) is the centerpiece — the most prominent, clearest
+  control (only the supplier authoritatively knows it).
+- Aftermarket disclosure shown when the supplier carries any
+  AFTERMARKET_COMPATIBLE brand (so they see what buyers see).
+- One "Submit for review" → `POST /api/portal/[token]/propose-revision`. This
+  NEVER writes the registry — it lands as a pending revision the concierge
+  approves. Success message says "submitted for review," NOT "saved."
+- Submit error is a soft-error that PRESERVES the supplier's input (never
+  re-enter). Submitted state is amber "pending," not green "saved."
+
+### Public page states
+| State | Render |
+|---|---|
+| Loading | GoferLoader (branded spinner) |
+| Valid + has_matches | Teaser count/window hero + profile form |
+| Valid + zero-state | Framing text hero (no number) + profile form |
+| Invalid / expired / reused / flag-off | Uniform rejection page |
+| Submitted | Amber "submitted for review" confirmation |
+| Submit error | Soft-error banner + form with preserved input |
+
+### Brand-string discipline
+- The customer-facing brand name is one constant: `lib/brand.ts` `BRAND_NAME`
+  (defaults to "Arkim"; "Gofer" pending USPTO clearance). No hard-coded brand
+  strings elsewhere in the portal. Backend follow-up:
+  `utils/supplier_portal.py` `_ZERO_STATE_FRAMING` carries the same name inline
+  — swap it in the same motion when the name settles.
+
+## 11. Supplier claim-portal (admin controls)
+
+In the admin inspector (`/admin`), token-gated as the rest of that surface.
+
+### Generate claim link (T4) — Suppliers tab
+- Per-supplier "Claim link" action on the suppliers tab → mints a claim link
+  (`POST /api/admin/suppliers/claim-link`).
+- The raw token is returned ONCE (hashed at rest) and shown in a show-once
+  panel: the full link, a Copy button, the expiry, and a "copy and send now —
+  you won't see this again" note.
+- Regenerate (`POST /api/admin/suppliers/claim-link/regenerate`) revokes the
+  prior token and mints a new one (same show-once rule).
+- The show-once panel is cleared on tab switch so a raw token is never left
+  visible on a stale screen.
+- 503 = `SUPPLIER_PORTAL_V1` off (dormant); surfaced as such, not hidden.
+
+### Revision review (T5) — Portal Revisions tab
+- Surfaces pending supplier-proposed revisions (`review_items`
+  `kind=supplier_revision`, `status=needs_human_review`). No new backend
+  endpoint — `/api/admin/review-queue` already returns them; filtered
+  client-side.
+- Each row shows the proposed scope (brands / classes / ship-area).
+- Approve → `POST /api/admin/portal/revisions/{id}/approve` (applies the scope
+  to the registry — the ONLY writer). Reject → `/reject` (discards, nothing
+  applied). Resolved revisions collapse under a details element.
+- Closes the propose→approve loop the public claim page starts.
