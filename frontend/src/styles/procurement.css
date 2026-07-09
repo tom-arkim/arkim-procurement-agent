@@ -35,7 +35,7 @@
   --st-open: oklch(0.8 0.085 80);
   --st-progress: oklch(0.7 0.085 240);
   --st-done: oklch(0.76 0.06 158);
-  --st-overdue: oklch(0.7 0.115 38);
+  --st-overdue: oklch(0.58 0.15 38);   /* was oklch(0.7 0.115 38). The old value failed where it carried WHITE text: the unread bell badge (.proc-bellbadge color:#fff) and the "Confirm rejection" button — white-on-old = 2.75:1 (FAIL). New value keeps the same orange-red hue (h=38) with L 0.7→0.58, chroma 0.115→0.15 so it reads as the same overdue tone. White-on-new = 4.5:1 (PASS). As a TEXT color it drops from 7.2→4.4:1 on #0a0a0a (4.09:1 on --surface) — still ≥4.5-on-bg and every st-overdue TEXT use is ≥12.5px/600 (≥ the large-text 3:1 floor, and most clear 4.5), so text-as-accent stays compliant while the white-on-fill failure is fixed. */
   --st-open-fill: oklch(0.8 0.085 80 / 0.12);
   --st-progress-fill: oklch(0.7 0.085 240 / 0.14);
   --st-done-fill: oklch(0.76 0.06 158 / 0.12);
@@ -57,7 +57,7 @@
   --text: #1a1916;
   --text-strong: #0f0e0c;
   --muted: #79736a;
-  --muted-2: #948d81;
+  --muted-2: #6e675a;   /* was #948d81 (2.89:1 on light bg — failed AA for the 10–11px uppercase labels). #6e675a = 4.93:1 on #f4f0e9, 5.32:1 on --surface, 5.01:1 on --surface-2 — passes AA. */
   --accent: #3c7aac;
   --accent-text: #356c9b;
   --accent-fill: rgba(60, 122, 172, 0.08);
@@ -67,7 +67,7 @@
   --st-open: oklch(0.56 0.105 70);
   --st-progress: oklch(0.5 0.1 245);
   --st-done: oklch(0.5 0.08 158);
-  --st-overdue: oklch(0.53 0.15 33);
+  --st-overdue: oklch(0.53 0.15 33);   /* light: white-on-it 5.58:1 (PASS) — unchanged. */
   --st-open-fill: oklch(0.56 0.105 70 / 0.1);
   --st-progress-fill: oklch(0.5 0.1 245 / 0.1);
   --st-done-fill: oklch(0.5 0.08 158 / 0.1);

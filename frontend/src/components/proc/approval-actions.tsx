@@ -167,6 +167,11 @@ export function ApprovalActions({ run }: { run: SourcingRunDetail }) {
               className="proc-btn"
               disabled={busy || !name.trim() || !reason.trim()}
               onClick={onReject}
+              /* Destructive confirm: --st-overdue fill + white text. The old
+                 --st-overdue gave white-on-fill 2.75:1 (FAIL); the darkened token
+                 (procurement.css --st-overdue, oklch L 0.7→0.58) makes white-on-fill
+                 4.5:1 (PASS) — same fix the bell badge gets. Kept as #fff to match
+                 the badge and the destructive intent. */
               style={{ background: "var(--st-overdue)", borderColor: "var(--st-overdue)", color: "#fff" }}
             >
               {reject.isPending ? "Rejecting…" : "Confirm rejection"}
