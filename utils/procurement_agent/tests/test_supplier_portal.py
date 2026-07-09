@@ -324,3 +324,54 @@ class TestPublicProfileAndTeaser:
         tok = _mint(portal_api)
         b = portal_api.get(f"/api/portal/{tok}/profile").json()
         assert b["teaser"]["count"] == 1  # only dxpe's own event
+
+
+# ---------------------------------------------------------------------------
+# T3 - propose-revision endpoint (registry UNCHANGED until approve)
+# ---------------------------------------------------------------------------
+
+class TestProposeRevision:
+    def test_edit_lands_as_pending_revision(self, portal_api):
+        tok = _mint(portal_api)
+        # Edit: change the Goulds relationship AUTHORIZED -> CARRIES + add a class.
+        r = portal_api.post(f"/api/portal/{tok}/propose-revision",
+                            json={"brands": [
+                                {"brand_id": "Goulds", "relationship": "CARRIES"}],
+                                "classes": [
+                                    {"class_id": "SEAL", "is_core": True}],
+                                "ship_area": {"kind": "NATIONWIDE_US"}})
+        assert r.status_code == 200
+        b = r.json()
+        assert b["ok"] is True
+        assert b["revision_id"]
+        assert b["status"] == "pending"
+
+    def test_registry_unchanged_until_approve(self, portal_api):
+        from utils import supplier_registry as sr
+        tok = _mint(portal_api)
+        before = sr.get_supplier_brands("dxpe.com")
+        auth_before = [b for b in before if b["brand_id"] == "Goulds"][0]["relationship"]
+        assert auth_before == "AUTHORIZED"
+        portal_api.post(f"/api/portal/{tok}/propose-revision",
+                        json={"brands": [
+                            {"brand_id": "Goulds", "relationship": "CARRIES"}]})
+        after = sr.get_supplier_brands("dxpe.com")
+        auth_after = [b for b in after if b["brand_id"] == "Goulds"][0]["relationship"]
+        # Registry UNCHANGED - the proposal is pending, not applied.
+        assert auth_after == "AUTHORIZED"
+
+    def test_propose_revision_no_admin_token_required(self, portal_api):
+        # The propose endpoint is token-authed (portal token), NOT admin. An
+        # admin header is NOT needed (and irrelevant).
+        tok = _mint(portal_api)
+        r = portal_api.post(f"/api/portal/{tok}/propose-revision",
+                            json={"brands": [
+                                {"brand_id": "Goulds", "relationship": "CARRIES"}]})
+        assert r.status_code == 200
+
+    def test_propose_invalid_relationship_rejected(self, portal_api):
+        tok = _mint(portal_api)
+        r = portal_api.post(f"/api/portal/{tok}/propose-revision",
+                            json={"brands": [
+                                {"brand_id": "Goulds", "relationship": "BOGUS"}]})
+        assert r.status_code == 422

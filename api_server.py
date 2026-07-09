@@ -4837,3 +4837,42 @@ def portal_profile(token: str, request: Request):
         "aftermarket_disclosure": profile["aftermarket_disclosure"],
     }
     return JSONResponse(content=body, headers=_portal_response_headers({}))
+
+
+
+class PortalProposeRevisionRequest(BaseModel):
+    brands: Optional[List[dict]] = None
+    classes: Optional[List[dict]] = None
+    ship_area: Optional[dict] = None
+
+
+@app.post("/api/portal/{token}/propose-revision")
+def portal_propose_revision(token: str, body: PortalProposeRevisionRequest,
+                            request: Request):
+    """A supplier-proposed profile edit -> a PENDING revision (review_items
+    kind=supplier_revision) via Night 4's review machinery. NOTHING writes the
+    registry here - the concierge approve is the only writer (decision 1).
+    Returns the revision id + status. Token-validated; flag-gated inert. 422 on
+    a malformed brand relationship (the tri-state relationship is the
+    highest-value field and must be well-formed)."""
+    row = _validate_portal_token(request, token)
+    from utils import supplier_portal
+    revisions = {k: v for k, v in body.model_dump().items() if v is not None}
+    # Validate brand relationships up front (422, not a silent drop) - the
+    # tri-state relationship is the highest-value field and must be well-formed.
+    for b in (revisions.get("brands") or []):
+        rel = (b.get("relationship") or "").upper().strip()
+        from utils import supplier_registry
+        if rel and rel not in supplier_registry.BRAND_RELATIONSHIPS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid brand relationship: {rel}",
+            )
+    revision_id = supplier_portal.propose_revision(
+        row["supplier_domain"], revisions, proposed_by="supplier")
+    if revision_id is None:
+        _portal_reject_404()
+    return JSONResponse(
+        content={"ok": True, "revision_id": revision_id, "status": "pending"},
+        headers=_portal_response_headers({}),
+    )

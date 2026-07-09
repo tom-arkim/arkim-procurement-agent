@@ -157,3 +157,53 @@ def _zero_state(*, window_days: int = TEASER_WINDOW_DAYS_DEFAULT) -> dict:
         "window_days": window_days,
         "framing": _ZERO_STATE_FRAMING,
     }
+
+
+# ---------------------------------------------------------------------------
+# Propose revision (T3) - pending store ONLY, never the registry
+# ---------------------------------------------------------------------------
+
+# The review_items kind for a supplier-proposed profile revision (distinct from
+# the onboarding "supplier_scope" kind so the onboarding queue is not polluted).
+REVISION_KIND = "supplier_revision"
+REVISION_STATUS_PENDING = "needs_human_review"
+
+
+def propose_revision(supplier_domain: str, revisions: dict,
+                     *, proposed_by: Optional[str] = None) -> Optional[str]:
+    """Land a supplier-proposed profile edit as a PENDING revision in
+    ``review_items`` (kind=``supplier_revision``) via Night 4's review
+    machinery. NOTHING writes the registry here - the concierge approve is the
+    only writer (decision 1: supplier-proposes / concierge-approves). Returns
+    the revision id, or None on flag-off / empty domain / store failure
+    (fail-soft - never raises).
+
+    The payload is a full proposed-scope snapshot (brands/classes/ship_area)
+    + proposer provenance, stored in ``payload_json``. The low-friction edit
+    surface (the research's anti-Ariba-ification): the trio
+    (brands/classes/ship-area) is editable in a single lightweight pass, with
+    the tri-state brand relationship as the centerpiece (only the supplier
+    authoritatively knows "authorized vs compatible-alternatives")."""
+    if not _portal_enabled():
+        return None
+    dom = sr._normalize_domain(supplier_domain)
+    if not dom:
+        return None
+    payload = {
+        "domain": dom,
+        "brands": revisions.get("brands") or [],
+        "classes": revisions.get("classes") or [],
+        "ship_area": revisions.get("ship_area"),
+        "proposed_by": proposed_by or "supplier",
+    }
+    try:
+        item_id = sr.record_review_item(
+            kind=REVISION_KIND,
+            payload=payload,
+            status=REVISION_STATUS_PENDING,
+            supplier_domain=dom,
+        )
+        return item_id
+    except Exception as exc:
+        print(f"[SupplierPortal] propose_revision failed for {dom!r}: {exc}")
+        return None
