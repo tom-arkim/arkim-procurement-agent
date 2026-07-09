@@ -818,3 +818,35 @@ In the admin inspector (`/admin`), token-gated as the rest of that surface.
   to the registry — the ONLY writer). Reject → `/reject` (discards, nothing
   applied). Resolved revisions collapse under a details element.
 - Closes the propose→approve loop the public claim page starts.
+
+### Accessibility (WCAG 2.1 + CVD) — portal palette & status system
+- **Neutrals unchanged:** graphite `#26282B` (13.67:1 on paper) and slate
+  `#4E5A63` (6.55:1) are the text workhorses and stay as-is.
+- **Orange demoted to non-text accent only.** Bright `#F4581C` cannot carry text
+  (best 3.36:1 → fails AA). It stays for border-lefts, checked-state borders,
+  and input `accent-color` (3:1 UI). Any orange that carries text or a button
+  label uses **deep-orange `#B23A12`** (white-on-it 5.99:1; on-paper 5.54:1).
+- **Primary action button** (`.portal-submit`): graphite `#26282B` fill + white
+  text (14.78:1). Deep-orange `#B23A12` (5.99:1) is the documented alternate if
+  an orange button is ever wanted.
+- **Amber `#E8A33D` is fill/border only, always with graphite text (6.85:1).**
+  It is never a text color. The submitted/disclosure eyebrows use graphite text;
+  amber remains only as the card border/accent.
+- **Status redundancy (WCAG 1.4.1 — color is never the sole signal):** every
+  status carries a SHAPE (glyph) + a TEXT LABEL + color.
+  - Submitted → clock glyph + "Submitted for review" + amber card border.
+  - Rejection → warning-triangle glyph + "This link is no longer valid" (neutral
+    card; no status hue — the state reads by shape + words alone).
+  - Glyphs are inline SVG in graphite (13.67:1; passes AA + 3:1 non-text); the
+    status color lives on the card border, never the glyph.
+  - The teaser has-matches/zero-state pair is already distinguished by text
+    content, so no non-color cue is added there.
+- **Future success/error status** (not yet wired): success `#1E7A50` (white text
+  5.31:1), error `#B3261E` (white text 6.54:1) — white-text-safe and more
+  CVD-separable than the originals. **Standing rule:** never introduce a
+  green/red (or any color-only) status pair without shape + text-label
+  redundancy, so the deuteranopia green↔red / protan green↔amber collisions can
+  never cause a misread. (Encoded as a comment at the portal token block.)
+- **Referrer policy:** set once via the page `metadata.referrer = "no-referrer"`
+  export (the single source); no inline body `<meta>`. The API also sets it
+  server-side.
