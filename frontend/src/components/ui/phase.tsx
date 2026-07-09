@@ -44,7 +44,7 @@ function StepNode({ step, done, active }: StepNodeProps) {
           "flex h-5 w-5 items-center justify-center rounded-full border text-[9px] font-mono font-semibold transition-colors",
           done && "bg-green-50 border-green-50 text-bg-0",
           active && "bg-blue-50 border-blue-50 text-bg-0",
-          !done && !active && "bg-bg-3 border-hr-3 text-fg-4",
+          !done && !active && "bg-bg-3 border-hr-3 text-fg-3",
         )}
       >
         {done ? (
@@ -58,7 +58,7 @@ function StepNode({ step, done, active }: StepNodeProps) {
           "font-mono text-[9.5px] uppercase tracking-[0.08em] whitespace-nowrap",
           done && "text-green-fg",
           active && "text-blue-fg",
-          !done && !active && "text-fg-4",
+          !done && !active && "text-fg-3",
         )}
       >
         {step}
