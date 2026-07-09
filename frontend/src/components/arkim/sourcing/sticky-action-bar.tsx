@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Send } from "@/components/ui/icons";
 import { useArkimStore, selectSelectedCount } from "@/store";
 import { useInitiateOutreach } from "@/lib/queries";
+import { BRAND_NAME } from "@/lib/brand";
 
 interface StickyActionBarProps {
   runId: string;
@@ -63,7 +64,7 @@ export function StickyActionBar({ runId }: StickyActionBarProps) {
           Confirm outreach
         </Button>
         <span className="font-mono text-[8.5px] uppercase tracking-[0.08em] text-fg-4">
-          On your behalf · Arkim sends, you receive
+          On your behalf · {BRAND_NAME} sends, you receive
         </span>
       </div>
     </div>

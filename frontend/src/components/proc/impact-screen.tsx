@@ -17,6 +17,7 @@ import { useRouter } from "next/navigation";
 import { useImpact } from "@/lib/queries";
 import { ProcIcon, type ProcIconName } from "./proc-icon";
 import { ProcHead, procMoney } from "./proc-ui";
+import { BRAND_NAME } from "@/lib/brand";
 import type { CumulativeImpact, ImpactCounts, ImpactMonth } from "@/types";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -57,7 +58,7 @@ export function ImpactScreen() {
         <span style={{ display: "inline-flex", transform: "rotate(180deg)" }}><ProcIcon name="chevR" size={14} /></span>
         Home
       </button>
-      <ProcHead title={<>Your Arkim <b>impact</b></>} sub="What you've saved and the legwork we handled — every figure traces to a real transaction." />
+      <ProcHead title={<>Your {BRAND_NAME} <b>impact</b></>} sub="What you've saved and the legwork we handled — every figure traces to a real transaction." />
 
       {isLoading && <p style={{ fontSize: 13, color: "var(--muted)" }}>Loading…</p>}
       {isError && <p style={{ fontSize: 13, color: "var(--st-overdue)" }}>Couldn&apos;t load impact — is the backend running?</p>}
@@ -81,7 +82,7 @@ export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
           <div className="ild-s">This fills in as you use it.</div>
           <div className="ild-sub">
             Each time you compare a quote to your own prior purchase or to other quotes received, that saving
-            gets recorded here — traceable to the real transaction. The legwork Arkim does is counted as you go.
+            gets recorded here — traceable to the real transaction. The legwork {BRAND_NAME} does is counted as you go.
           </div>
         </div>
       </div>
@@ -95,7 +96,7 @@ export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
         <div className="imp-hero-card primary">
           <div className="ihc-eye"><ProcIcon name="clock" size={12} />Time saved</div>
           <div className="ihc-num">{time}</div>
-          <div className="ihc-est">Arkim&apos;s estimate ({d.estimate_model_version}) — labelled because it&apos;s an estimate</div>
+          <div className="ihc-est">{BRAND_NAME}&apos;s estimate ({d.estimate_model_version}) — labelled because it&apos;s an estimate</div>
           <div className="ihc-proof">
             Based on: <b>{d.counts.suppliers_contacted} suppliers contacted</b> · <b>{d.counts.quotes_read} quotes read &amp; compared</b>.<br />
             The counts above are real. The hours figure is our rough estimate of equivalent manual effort.
@@ -112,11 +113,11 @@ export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
         </div>
       </div>
 
-      {/* what Arkim handled */}
+      {/* what Gofer handled */}
       {steps.length > 0 && (
         <div className="imp-work-card">
           <div className="iwc-head">
-            <div className="iwc-t">What Arkim handled</div>
+            <div className="iwc-t">What {BRAND_NAME} handled</div>
             <div className="iwc-s">The steps you didn&apos;t have to take.</div>
           </div>
           <div className="imp-work-body">
@@ -132,8 +133,8 @@ export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
               <div className="iy-l">You did</div>
               <div className="iy-num">1</div>
               <div className="iy-label">decision per request</div>
-              <div className="iy-did">You reviewed the options and made the call — Arkim did the legwork.</div>
-              {time !== "—" && <div className="iy-est">Arkim&apos;s estimate: {time} of manual work saved</div>}
+              <div className="iy-did">You reviewed the options and made the call — {BRAND_NAME} did the legwork.</div>
+              {time !== "—" && <div className="iy-est">{BRAND_NAME}&apos;s estimate: {time} of manual work saved</div>}
             </div>
           </div>
         </div>
@@ -181,7 +182,7 @@ export function ImpactPanelBody({ d }: { d: CumulativeImpact }) {
       <div className="imp-method">
         <b>A note on these numbers —</b> Savings compare your actual transaction prices against your own prior
         purchases or quotes you received. Never vs a market rate, list price, or modelled baseline. If we don&apos;t
-        have two real comparable transactions, we don&apos;t claim a saving. Time-saved figures are Arkim&apos;s rough
+        have two real comparable transactions, we don&apos;t claim a saving. Time-saved figures are {BRAND_NAME}&apos;s rough
         estimate of equivalent manual effort, always labelled as estimates. These are the numbers you can show your
         CFO and back up line by line.
       </div>

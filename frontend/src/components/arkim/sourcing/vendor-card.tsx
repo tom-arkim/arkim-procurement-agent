@@ -9,6 +9,7 @@ import { External, Clock, Dollar } from "@/components/ui/icons";
 import { LeadTime } from "./lead-time";
 import { useSelectCandidate, useRequestConfirmation } from "@/lib/queries";
 import { useArkimStore } from "@/store";
+import { BRAND_NAME } from "@/lib/brand";
 import type { Candidate } from "@/types";
 
 // ---------------------------------------------------------------------------
@@ -74,8 +75,8 @@ export function VendorCard({ candidate, runId, className }: VendorCardProps) {
 
   const modalSubtitle =
     candidate.tier === 1
-      ? "This places a purchase order through your Arkim Network Partner."
-      : "This purchases through an open marketplace vendor. Arkim handles the transaction on your behalf.";
+      ? `This places a purchase order through your ${BRAND_NAME} Network Partner.`
+      : `This purchases through an open marketplace vendor. ${BRAND_NAME} handles the transaction on your behalf.`;
 
   const hasPrice = candidate.price != null;
 
@@ -193,8 +194,8 @@ export function VendorCard({ candidate, runId, className }: VendorCardProps) {
 
               <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-fg-4 text-center">
                 {candidate.tier === 1
-                  ? "Procured through Arkim"
-                  : "Available via marketplace · Arkim purchases"}
+                  ? `Procured through ${BRAND_NAME}`
+                  : `Available via marketplace · ${BRAND_NAME} purchases`}
               </span>
             </>
           )}
@@ -228,17 +229,17 @@ export function VendorCard({ candidate, runId, className }: VendorCardProps) {
           >
             <div className="flex flex-col gap-1">
               <p id="buy-modal-title" className="font-mono text-sm font-bold text-fg-1">
-                Buy Now via Arkim
+                Buy Now via {BRAND_NAME}
               </p>
               <p className="font-mono text-xs text-fg-3">
                 {modalSubtitle}
               </p>
             </div>
             <p className="font-mono text-xs text-fg-3 leading-relaxed">
-              Procurement transactions through Arkim will be available once our
+              Procurement transactions through {BRAND_NAME} will be available once our
               merchant-of-record infrastructure goes live. For now, this records your
               candidate selection and advances the run to approval. Your facility can
-              complete the purchase using your existing procurement process; Arkim will
+              complete the purchase using your existing procurement process; {BRAND_NAME} will
               handle this end-to-end at launch.
             </p>
             <div className="flex gap-2 justify-end">

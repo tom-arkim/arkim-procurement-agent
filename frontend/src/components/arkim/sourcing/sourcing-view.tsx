@@ -11,6 +11,7 @@ import { OrderPanel } from "@/components/arkim/orders/order-panel";
 import { Dot } from "@/components/ui/pill";
 import { Warn } from "@/components/ui/icons";
 import { useArkimStore } from "@/store";
+import { BRAND_NAME } from "@/lib/brand";
 import type { SourcingRunDetail } from "@/types";
 
 interface SourcingViewProps {
@@ -65,7 +66,7 @@ export function SourcingView({ run, className }: SourcingViewProps) {
       )}
 
       <div className="flex-1 overflow-y-auto">
-        {/* Tier 1 — Arkim Network */}
+        {/* Tier 1 — Gofer Network */}
         <section>
           <TierHeader tier={1} count={tier1.length} className="border-b border-hr-2" />
           {tier1.length > 0 ? (
@@ -79,7 +80,7 @@ export function SourcingView({ run, className }: SourcingViewProps) {
               ))}
             </div>
           ) : (
-            <EmptyTier message="No Arkim network partners found for this part." />
+            <EmptyTier message={`No ${BRAND_NAME} network partners found for this part.`} />
           )}
         </section>
 
@@ -157,7 +158,7 @@ const STEP_TIMINGS_MS = [2000, 5000] as const;
 
 const STEPS = [
   {
-    label: "Scanning Arkim Network...",
+    label: `Scanning ${BRAND_NAME} Network...`,
     subtext: "Checking onboarded partners for confirmed pricing",
   },
   {

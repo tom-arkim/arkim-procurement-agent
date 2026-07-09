@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { BRAND_NAME } from "@/lib/brand";
 
 interface TierHeaderProps {
   tier: 1 | 2 | 3;
@@ -8,7 +9,7 @@ interface TierHeaderProps {
 
 const tierConfig = {
   1: {
-    label: "Arkim Network",
+    label: `${BRAND_NAME} Network`,
     blurb: "Preferred partners · price-locked · instant PO",
     color: "var(--blue-fg)",
     bg: "var(--blue-tint)",

@@ -16,6 +16,7 @@ import { useProcEvents } from "./proc-shell";
 import { ProcIcon } from "./proc-icon";
 import { ProcPill, SecHead, ProcHead, type ProcTone } from "./proc-ui";
 import { HomeProcImpact } from "./home-impact";
+import { BRAND_NAME } from "@/lib/brand";
 import type { Phase, ReorderItem, SourcingRunListItem } from "@/types";
 
 const HANDOFF_PHASE: Phase = "pending_intake";
@@ -183,8 +184,8 @@ export function HomeScreen() {
         </>
       )}
 
-      {/* ---- Your Arkim impact (real, from /api/impact) ---- */}
-      <SecHead t="Your Arkim impact" />
+      {/* ---- Your Gofer impact (real, from /api/impact) ---- */}
+      <SecHead t={`Your ${BRAND_NAME} impact`} />
       <HomeProcImpact onDrill={() => router.push("/impact")} />
 
       {/* ---- Coming up (reorder intelligence, from your own order cadence) ---- */}

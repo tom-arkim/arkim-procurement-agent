@@ -19,6 +19,7 @@ import { procMoney } from "./proc-ui";
 import { ApprovalActions, deriveApproval, approvalStatusLine } from "./approval-actions";
 import { ApprovalContext } from "./approval-context";
 import { defaultShipTo, PRIMARY_SITE } from "@/lib/proc-config";
+import { BRAND_NAME } from "@/lib/brand";
 import type { Order, OrderStatus, Phase, SourcingRunDetail } from "@/types";
 
 const FLOW = ["placed", "confirmed", "shipped", "received"] as const;
@@ -210,7 +211,7 @@ function BeingPurchased({ order }: { order: Order }) {
         <span className="proc-pill" data-tone="progress"><span className="d" />Being purchased</span>
       </div>
       <div className="rc-note">
-        Arkim is purchasing this on your behalf. You&apos;ll see delivery tracking here once
+        {BRAND_NAME} is purchasing this on your behalf. You&apos;ll see delivery tracking here once
         it&apos;s placed with the supplier.
       </div>
     </div>

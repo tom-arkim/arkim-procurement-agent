@@ -59,7 +59,7 @@ _AFTERMARKET_DISCLOSURE = (
 # NEVER a fabricated count). Category/network-level, no numbers.
 _ZERO_STATE_FRAMING = (
     "Buyers post procurement requests across your categories. "
-    "Confirm your profile — brands, classes, and ship area — so Arkim can match "
+    "Confirm your profile — brands, classes, and ship area — so Gofer can match "
     "you to the right requests."
 )
 

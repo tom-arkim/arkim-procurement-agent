@@ -13,6 +13,7 @@
 import { useImpact } from "@/lib/queries";
 import { procMoney } from "./proc-ui";
 import { ProcIcon } from "./proc-icon";
+import { BRAND_NAME } from "@/lib/brand";
 import type { ImpactMonth } from "@/types";
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -110,7 +111,7 @@ export function HomeProcImpact({ onDrill }: { onDrill: () => void }) {
       {/* Methodology note */}
       <div className="pih-note">
         Savings anchored to real transactions only — no market estimates. Time figure (
-        <span className="est">{time}</span>) is Arkim&apos;s estimate ({data.estimate_model_version}).&nbsp;
+        <span className="est">{time}</span>) is {BRAND_NAME}&apos;s estimate ({data.estimate_model_version}).&nbsp;
         <button className="pih-drill" onClick={onDrill}>
           See full breakdown →
         </button>

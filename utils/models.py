@@ -221,7 +221,7 @@ class ArkimQuote:
     avl_bypass_label: str = "Direct Buy via Arkim"
     avl_time_saved_days: int = 14
     avl_friction_note: str = (
-        "Client purchases via Arkim — no new vendor onboarding required."
+        "Client purchases via Gofer — no new vendor onboarding required."
     )
     tlv_score: float = 0.0             # Total Life Cycle Value (Purchase + Downtime Risk + Shipping + Tax)
     workflow: str = "spare_parts"      # "spare_parts" | "replacement" | "capex"
@@ -230,7 +230,7 @@ class ArkimQuote:
     # Phase 1 additions — audit, compliance, lifecycle context
     tax_jurisdiction: Optional[str] = None             # e.g. "LA County, CA"
     tax_exemption_certificate_ref: Optional[str] = None  # certificate number if tax-exempt
-    merchant_of_record: str = "Arkim Industrial Procurement Services"
+    merchant_of_record: str = "Gofer Industrial Procurement Services"
     urgency_factor_used: float = 0.3                   # mirrors AssetSpecs.urgency_factor at quote time
     agent_version: str = "1.0.0-phase1"                # semantic version of the sourcing agent
     sourcing_run_id: Optional[str] = None              # UUID for audit trail correlation

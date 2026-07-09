@@ -23,6 +23,7 @@ import { QuotesSection } from "./quotes-section";
 import { OrderSection } from "./order-section";
 import type { Candidate, ComparisonArtifact, Phase, BasketRunRow } from "@/types";
 import { RailPartContext } from "./part-context";
+import { BRAND_NAME } from "@/lib/brand";
 
 const SOURCED_PHASES: Phase[] = [
   "comparison", "pending_first_approval", "pending_second_approval", "approved",
@@ -77,7 +78,7 @@ function whyBullets(c: Candidate, manufacturer?: string): string[] {
   // Priced — a real listing backs the claim.
   // State M: framed as speed/certainty + Arkim fulfils — NOT "go buy at {marketplace}".
   // The marketplace is Arkim's supply source (operational), not the customer's destination.
-  if (c.purchaseChannel === "marketplace") out.push("Available immediately at this price — Arkim can order it for you now, no quote needed.");
+  if (c.purchaseChannel === "marketplace") out.push(`Available immediately at this price — ${BRAND_NAME} can order it for you now, no quote needed.`);
   out.push(isExact(c)
     ? "Matches the exact part number on your equipment record."
     : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
@@ -127,7 +128,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
           // ("Awaiting approval" pre-approval, "Being purchased" once the order exists).
           fire(res.pending_approval
             ? "Submitted for approval — see status below."
-            : "Arkim is purchasing this for you — see status below.");
+            : `${BRAND_NAME} is purchasing this for you — see status below.`);
         },
         onError: () => {
           fire("Couldn't submit the order — please try again.");
@@ -231,7 +232,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {/* State M: don't headline the marketplace name — it's Arkim's supply
                           source, not a customer destination. Frame as an Arkim-fulfilled
                           in-stock option; price + match tag differentiate the rows. */}
-                      <div className="o-name">{namesSupplier ? c.vendorName : "Available through Arkim"}</div>
+                      <div className="o-name">{namesSupplier ? c.vendorName : `Available through ${BRAND_NAME}`}</div>
                       {namesSupplier && c.loc && <div className="o-part">{c.loc}</div>}
                       <div className="o-tags">
                         {/* State C is the strongest claim — lead the tags with it (C > M). */}
@@ -286,7 +287,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
                         confirmMktId === c.id ? (
                           <div style={{ display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
                             <span style={{ fontSize: 11.5, color: "var(--muted)", maxWidth: 210, textAlign: "right", lineHeight: 1.4 }}>
-                              This selects this part for your run and starts the purchase through Arkim.
+                              This selects this part for your run and starts the purchase through {BRAND_NAME}.
                             </span>
                             <div style={{ display: "flex", gap: 6 }}>
                               <button className="proc-btn" data-kind="quiet" disabled={orderNow.isPending}
@@ -299,7 +300,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
                           </div>
                         ) : (
                           <button className="proc-btn" data-kind="primary" onClick={() => setConfirmMktId(c.id)}>
-                            {isMkt ? "Order through Arkim" : "Order"}
+                            {isMkt ? `Order through ${BRAND_NAME}` : "Order"}
                           </button>
                         )
                       ) : (
@@ -515,7 +516,7 @@ function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin
 // approximate — the backend holds phase="sourcing" for the whole run and emits no per-tier events,
 // so this is a frontend-only progression, NOT backend-synced.
 const SOURCING_STEPS_FULL = [
-  "Searching the Arkim network",
+  "Searching the Gofer network",
   "Scanning marketplaces",
   "Checking specialist suppliers",
   "Comparing candidates",
@@ -534,7 +535,7 @@ function SourcingProgress() {
   const steps = demo ? SOURCING_STEPS_DEMO : SOURCING_STEPS_FULL;
   const sub = demo
     ? "Searching live across marketplaces and specialist suppliers — this can take up to a minute."
-    : "Searching live across the Arkim network, marketplaces, and specialist suppliers — this can take up to a minute.";
+    : `Searching live across the ${BRAND_NAME} network, marketplaces, and specialist suppliers — this can take up to a minute.`;
 
   const [step, setStep] = useState(0);
   useEffect(() => {

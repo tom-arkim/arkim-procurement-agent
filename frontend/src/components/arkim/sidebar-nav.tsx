@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { List, Plus, Settings, User, Building, Tag } from "@/components/ui/icons";
+import { BRAND_NAME } from "@/lib/brand";
 
 interface NavItem {
   href: string;
@@ -48,7 +49,7 @@ export function SidebarNav({ className }: SidebarNavProps) {
         <span
           className="font-mono text-[11px] font-semibold uppercase tracking-[0.10em] text-fg-2"
         >
-          Arkim
+          {BRAND_NAME}
         </span>
       </div>
 

@@ -3,6 +3,7 @@ import { Inter, JetBrains_Mono, Mulish, Cormorant_Garamond } from "next/font/goo
 import "./globals.css";
 import "@/styles/procurement.css";
 import { Providers } from "./providers";
+import { BRAND_NAME } from "@/lib/brand";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -36,7 +37,7 @@ const cormorant = Cormorant_Garamond({
 });
 
 export const metadata: Metadata = {
-  title: "Arkim · Sourcing Engine",
+  title: `${BRAND_NAME} · Sourcing Engine`,
   description: "Maintenance sourcing from work order to approved purchase.",
 };
 

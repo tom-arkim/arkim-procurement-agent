@@ -16,6 +16,7 @@ import { useAllOrders, useImpact } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
 import { ProcPill, ProcHead, procMoney, type ProcTone } from "./proc-ui";
 import { ImpactPanelBody } from "./impact-screen";
+import { BRAND_NAME } from "@/lib/brand";
 import type { Order, OrderStatus } from "@/types";
 
 const total = (o: Order) => (o.unit_price ?? 0) * (o.quantity ?? 1);
@@ -53,7 +54,7 @@ export function HistoryScreen() {
       />
 
       <div className="proc-sitetabs">
-        {([["orders", "Orders"], ["spend", "Spend by supplier"], ["impact", "Your Arkim impact"]] as [Tab, string][]).map(([k, l]) => (
+        {([["orders", "Orders"], ["spend", "Spend by supplier"], ["impact", `Your ${BRAND_NAME} impact`]] as [Tab, string][]).map(([k, l]) => (
           <button key={k} className="proc-sitetab" data-on={tab === k} onClick={() => setTab(k)}>{l}</button>
         ))}
       </div>

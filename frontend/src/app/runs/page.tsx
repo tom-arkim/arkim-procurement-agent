@@ -8,6 +8,7 @@ import { Plus, Package } from "@/components/ui/icons";
 import { PHASE_LABELS, urgencyTone } from "@/types";
 import type { Phase, Urgency } from "@/types";
 import { cn } from "@/lib/utils";
+import { BRAND_NAME } from "@/lib/brand";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -172,7 +173,7 @@ function EmptyState() {
       <div>
         <p className="text-sm text-fg-2 font-medium">No sourcing runs yet</p>
         <p className="mt-1 text-[12.5px] text-fg-4">
-          Start a new run to search the Arkim network and open marketplace.
+          Start a new run to search the {BRAND_NAME} network and open marketplace.
         </p>
       </div>
       <Link href="/runs/new">
