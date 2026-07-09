@@ -378,6 +378,7 @@ CREATE TABLE IF NOT EXISTS supplier_notifications (
     message_id        TEXT,                -- provider placeholder until live send
     threshold         TEXT,                -- "notify" (the higher threshold that admitted it)
     metadata_json     TEXT,                -- JSON: match-explanation snapshot
+    is_test           INTEGER NOT NULL DEFAULT 0,  -- provenance: 0=live sourcing run, 1=test/fixture/seed (excluded from the demand teaser)
     created_at        TEXT NOT NULL
 );
 """
@@ -444,6 +445,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if col not in ri_existing:
             conn.execute(f"ALTER TABLE review_items ADD COLUMN {col} {coltype}")
             added.append(f"review_items.{col}")
+
+    # supplier_notifications provenance column (demand-teaser honesty: a test/
+    # fixture/seed row must be excludable from the live buyer-request count).
+    # Same idempotent ADD COLUMN: existing rows keep DEFAULT 0 (live). The two
+    # known bad rows (run_id in ('run-1','run-test')) are backfilled below.
+    sn_existing = {row[1] for row in conn.execute("PRAGMA table_info(supplier_notifications)").fetchall()}
+    if "is_test" not in sn_existing:
+        conn.execute("ALTER TABLE supplier_notifications ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
+        added.append("supplier_notifications.is_test")
+        # Backfill the known test artifacts (the dev DB rows that contaminated the
+        # teaser) so an existing DB is honest immediately, not just on new writes.
+        # Idempotent: only touches is_test=0 rows with those run_ids.
+        conn.execute(
+            "UPDATE supplier_notifications SET is_test = 1 "
+            "WHERE is_test = 0 AND run_id IN ('run-1', 'run-test')"
+        )
 
     if added:
         conn.commit()
@@ -1724,13 +1741,20 @@ def record_supplier_notification(
     threshold: str = "notify",
     metadata: Optional[dict] = None,
     notified_at: Optional[str] = None,
+    is_test: bool = False,
 ) -> Optional[str]:
     """Record one matched-request→notify event for an onboarded Tier 1 supplier.
 
     ``send_status`` mirrors SendResult.status ("stubbed" at the repo/test default —
     the EmailSender gate is OFF, so the notify layer records the event WITHOUT a live
     send). Returns the new row id, or None on flag-off / failure (fail-soft — never
-    raises into the sourcing pipeline). No-ops (None) when TIER1_V2 is off."""
+    raises into the sourcing pipeline). No-ops (None) when TIER1_V2 is off.
+
+    ``is_test`` marks the row's provenance: ``False`` (default) = a genuine live
+    sourcing-run notification; ``True`` = a test/fixture/seed artifact. The demand
+    teaser counts live rows only (``is_test = 0``), so test writes never inflate a
+    supplier's buyer-request count. The live notify layer never sets ``is_test`` —
+    only test/fixture writers do."""
     if _tier1_dormant():
         return None
     dom = _normalize_domain(supplier_domain) if supplier_domain else None
@@ -1740,15 +1764,15 @@ def record_supplier_notification(
     row = (
         str(uuid.uuid4()), run_id, dom, vendor_name, noun_class, notify_reason,
         now, send_status, message_id, threshold,
-        json.dumps(metadata) if metadata is not None else None, now,
+        json.dumps(metadata) if metadata is not None else None, 1 if is_test else 0, now,
     )
     try:
         with closing(_get_conn()) as conn:
             conn.execute(
                 """INSERT INTO supplier_notifications
                    (id, run_id, supplier_domain, vendor_name, noun_class, notify_reason,
-                    notified_at, send_status, message_id, threshold, metadata_json, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    notified_at, send_status, message_id, threshold, metadata_json, is_test, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 row,
             )
             conn.commit()
@@ -1788,6 +1812,9 @@ def get_supplier_notifications(
             for r in rows:
                 d = dict(r)
                 d["metadata"] = _decode_json_field(d.pop("metadata_json"), None)
+                # is_test may be absent on a row written before the migration
+                # populated it (defensive — defaults to live/0).
+                d["is_test"] = bool(d.get("is_test", 0))
                 out.append(d)
             return out
     except Exception as exc:

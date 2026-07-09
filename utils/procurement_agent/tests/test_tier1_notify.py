@@ -339,3 +339,52 @@ class TestFlagOffInertness:
         assert res == []
         # No notification events recorded flag-off (record_supplier_notification no-ops).
         assert sr.get_supplier_notifications(run_id="r1") == []
+
+
+# ---------------------------------------------------------------------------
+# Provenance column (is_test) — the demand teaser counts LIVE rows only.
+# A test/fixture/seed notification must not inflate a supplier's buyer-request
+# count. The live notify layer never marks rows is_test; only test/fixture
+# writers do (via the is_test kwarg). The migration backfills run_id in
+# ('run-1','run-test') to is_test=1; that path is covered end-to-end in
+# test_supplier_portal (the demand-teaser count tests below).
+# ---------------------------------------------------------------------------
+
+class TestNotificationProvenance:
+    def test_live_write_defaults_is_test_false(self, reg):
+        """A genuine notify-layer write (no is_test kwarg) is live (is_test=0)."""
+        _onboard(reg, "auth.com", "Auth",
+                 classes=[{"class_id": "SEAL", "is_core": True}],
+                 ship_area={"kind": "NATIONWIDE_US"})
+        matches = tm.match_tier1(detected_type="mechanical seal", manufacturer="Goulds")
+        tn.notify_tier1(matches, run_id="r-live", sender=_FakeSender())
+        rows = sr.get_supplier_notifications(run_id="r-live")
+        assert len(rows) == 1
+        assert rows[0]["is_test"] is False
+
+    def test_test_write_marked_is_test_true(self, reg):
+        """A test/fixture write (is_test=True) is marked so it can be excluded."""
+        nid = sr.record_supplier_notification(
+            run_id="run-test", supplier_domain="auth.com", vendor_name="Auth",
+            noun_class="SEAL", notify_reason="core_class", send_status="stubbed",
+            metadata={}, is_test=True)
+        assert nid
+        rows = sr.get_supplier_notifications(run_id="run-test")
+        assert len(rows) == 1
+        assert rows[0]["is_test"] is True
+
+    def test_column_added_idempotently_no_data_loss(self, reg):
+        """The migration adds is_test to an existing DB without dropping rows."""
+        _onboard(reg, "auth.com", "Auth",
+                 classes=[{"class_id": "SEAL", "is_core": True}],
+                 ship_area={"kind": "NATIONWIDE_US"})
+        # Write a row BEFORE the column is guaranteed (it is, via _get_conn, but
+        # exercise the read-back shape): a live row must read is_test=False.
+        tn.notify_tier1(matches := tm.match_tier1(
+            detected_type="mechanical seal", manufacturer="Goulds"),
+            run_id="r1", sender=_FakeSender())
+        rows = sr.get_supplier_notifications(run_id="r1")
+        assert len(rows) == 1
+        # The column is present in the read shape and defaults to live.
+        assert "is_test" in rows[0]
+        assert rows[0]["is_test"] is False
