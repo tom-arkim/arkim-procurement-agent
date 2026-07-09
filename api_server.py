@@ -28,6 +28,26 @@ def _env_truthy(value: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SUPPLIER_PORTAL_V1 — the supplier claim-portal feature flag (Night 6).
+# ---------------------------------------------------------------------------
+# The app's FIRST PUBLIC ROUTE gets its OWN independent kill switch — it does
+# NOT extend TIER1_V2 (the brief's REVIEW-ADD: the first public route gets its
+# own kill switch). The portal MAY DEPEND on TIER1_V2 data (the profile scope
+# + the supplier_notifications demand ledger), but the ROUTE'S EXISTENCE gates
+# on SUPPLIER_PORTAL_V1 alone. Flag unset/absent/falsy -> the public route
+# DOES NOT EXIST (response byte-identical to any unknown route — FastAPI 404
+# {"detail":"Not Found"}), proven by an inertness test. Read live from the env
+# so a test that sets it via monkeypatch.setenv is honored (mirrors TIER1_V2).
+SUPPLIER_PORTAL_V1: bool = _env_truthy(os.environ.get("SUPPLIER_PORTAL_V1"))
+
+
+def _portal_enabled() -> bool:
+    """Live check for the portal route gate (honors monkeypatched os.environ).
+    Used at every portal handler entry; flag-off -> 404 (the route is absent)."""
+    return _env_truthy(os.environ.get("SUPPLIER_PORTAL_V1"))
+
+
+# ---------------------------------------------------------------------------
 # DEMO_MODE — public no-login demo spine (procurement-dev.arkim.ai cold outreach)
 # ---------------------------------------------------------------------------
 # Guards active ONLY when env DEMO_MODE is truthy, all completely inert otherwise
@@ -77,6 +97,7 @@ import secrets
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Auth (ported Cognito identity). get_caller is an OPTIONAL dependency on the customer
@@ -97,6 +118,7 @@ from utils.procurement_agent.state.persistence import (
 from sqlalchemy import text
 from utils.procurement_agent.state.phases import Phase
 from utils.procurement_agent import tier1_matcher, tier1_notify
+from utils import claim_tokens  # Night 6 — supplier claim-portal token store (T1)
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -4536,9 +4558,352 @@ def admin_onboarding_reject(draft_id: str, role: str = Depends(require_admin)):
     return {"ok": True, "draft": out}
 
 
+# ---------------------------------------------------------------------------
+# Night 6 — Supplier claim-portal: admin "Generate claim link" (T1).
+# ---------------------------------------------------------------------------
+# A concierge-generated magic link for a single supplier. The admin picks a
+# supplier (by domain) and mints a token; the link is RETURNED to the concierge
+# (who sends it manually — the portal NEVER sends email, guardrail 4). The token
+# is single-supplier-scoped, expiring (7d default), regenerable; stored HASHED
+# at rest (see utils/claim_tokens.py). Admin-gated (require_admin) AND gated on
+# SUPPLIER_PORTAL_V1 (503 dormant when off — mirrors the onboarding fail-closed
+# pattern; NOT 404, because this is the admin surface, not the public route).
+# NOT on the DEMO_MODE allowlist (a public demo must not mint supplier claim
+# links).
+# ---------------------------------------------------------------------------
+
+def _require_portal_enabled():
+    """SUPPLIER_PORTAL_V1 must be on for the portal admin surface to be live.
+    Mirrors the require_admin / _require_onboarding_enabled fail-closed pattern:
+    flag off -> 503 (dormant), never 404-ish pretend-not-here on the ADMIN path
+    (the PUBLIC route returns 404 when flag-off — that is the inertness wall)."""
+    if not _portal_enabled():
+        raise HTTPException(status_code=503,
+                            detail="Supplier portal disabled (SUPPLIER_PORTAL_V1 off)")
+    return True
+
+
+class ClaimLinkRequest(BaseModel):
+    supplier_domain: str
+    expiry_days: Optional[int] = None  # default 7 (utils/claim_tokens._DEFAULT_EXPIRY_DAYS)
+
+
+@app.post("/api/admin/suppliers/claim-link", status_code=200)
+def admin_generate_claim_link(body: ClaimLinkRequest,
+                              role: str = Depends(require_admin)):
+    """Mint a claim-portal magic link for a supplier. Returns the link + its raw
+    token ONCE (the token is hashed at rest; this is the only time the raw token
+    leaves the server). Does NOT send email — the concierge sends the link
+    manually (guardrail 4: "Generate claim link" produces a link; it does not
+    send). 422 on an empty/invalid domain; 503 when the flag is off."""
+    _require_portal_enabled()
+    domain = (body.supplier_domain or "").strip()
+    if not domain:
+        raise HTTPException(status_code=422, detail="supplier_domain required")
+    # Confirm the supplier exists in the registry (the link is meaningless for
+    # an unknown supplier). Read-only lookup — no registry write.
+    from utils import supplier_registry
+    rec = supplier_registry.lookup_by_domain(domain)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    kwargs: dict = {}
+    if body.expiry_days is not None and body.expiry_days > 0:
+        kwargs["expiry_days"] = body.expiry_days
+    out = claim_tokens.generate_for(rec["domain"], **kwargs)
+    if out is None:
+        raise HTTPException(status_code=503,
+                            detail="Claim link could not be created (portal disabled or store failure)")
+    # The link path the concierge sends: /portal/<token>. The base is the
+    # frontend origin (the concierge prepends the deployed URL when sending).
+    return {
+        "ok": True,
+        "supplier_domain": out["supplier_domain"],
+        "supplier_name": rec.get("name"),
+        "token": out["token"],
+        "token_id": out["token_id"],
+        "expires_at": out["expires_at"],
+        "link_path": f"/portal/{out['token']}",
+    }
+
+
+@app.post("/api/admin/suppliers/claim-link/regenerate", status_code=200)
+def admin_regenerate_claim_link(body: ClaimLinkRequest,
+                                role: str = Depends(require_admin)):
+    """Regenerate a supplier's claim link — revokes every prior live token for
+    the supplier and mints a new one (the prior token is rejected from this
+    point on). Admin-gated + flag-gated. Returns the new link."""
+    _require_portal_enabled()
+    domain = (body.supplier_domain or "").strip()
+    if not domain:
+        raise HTTPException(status_code=422, detail="supplier_domain required")
+    from utils import supplier_registry
+    rec = supplier_registry.lookup_by_domain(domain)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    kwargs: dict = {}
+    if body.expiry_days is not None and body.expiry_days > 0:
+        kwargs["expiry_days"] = body.expiry_days
+    out = claim_tokens.regenerate(rec["domain"], **kwargs)
+    if out is None:
+        raise HTTPException(status_code=503,
+                            detail="Claim link could not be regenerated (portal disabled or store failure)")
+    return {
+        "ok": True,
+        "supplier_domain": out["supplier_domain"],
+        "supplier_name": rec.get("name"),
+        "token": out["token"],
+        "token_id": out["token_id"],
+        "expires_at": out["expires_at"],
+        "link_path": f"/portal/{out['token']}",
+    }
+
+
+@app.get("/api/admin/suppliers/{supplier_domain}/claim-tokens")
+def admin_list_claim_tokens(supplier_domain: str, role: str = Depends(require_admin)):
+    """List a supplier's claim tokens (metadata only — never the raw token or
+    hash). Admin/diagnostic surface for the concierge to see active/expired/
+    revoked tokens. Flag-gated."""
+    _require_portal_enabled()
+    from utils import supplier_registry
+    rec = supplier_registry.lookup_by_domain(supplier_domain)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    rows = claim_tokens.list_for_supplier(rec["domain"])
+    return {"count": len(rows), "supplier_domain": rec["domain"], "tokens": rows}
+
+
 def _url_scheme_ok(url: str) -> bool:
     try:
         from urllib.parse import urlparse
         return urlparse(url).scheme.lower() in ("http", "https")
     except Exception:
         return False
+
+
+
+# ===========================================================================
+# Night 6 - Supplier claim-portal: PUBLIC route (T2) - the app's FIRST PUBLIC
+# ROUTE. Security posture is the highest-risk part of this build.
+# ===========================================================================
+# Route prefix: /api/portal/{token}/... - a fresh, non-admin prefix. These
+# handlers do NOT declare Depends(require_admin); their ONLY auth is the claim
+# token (validated by utils.claim_tokens.validate_token, lookup-by-hash). The
+# admin-session/auth boundary is require_admin (I3): anything not declaring it
+# is public. A portal token never satisfies require_admin (asserted in T5).
+#
+# Flag gating (guardrail 3): SUPPLIER_PORTAL_V1 off -> these routes are ABSENT.
+# Implemented as a 404 raised at handler entry matching FastAPI's unknown-route
+# body ({"detail":"Not Found"}) so flag-off is byte-identical to an unknown
+# route (T5 inertness). The flag is read LIVE (_portal_enabled, honors
+# monkeypatched os.environ).
+#
+# Security (T1/T2/T5):
+#   - Token validated by hash, never string compare; raw token never logged.
+#   - Strict Referrer-Policy: no-referrer on every portal response (token kept
+#     out of downstream referrer headers).
+#   - NO session cookies issued (token-only auth; no session to hijack).
+#   - Uniform rejection: invalid / expired / reused-after-regeneration tokens
+#     all -> the SAME 404 (byte-identical to an unknown route), so no oracle
+#     distinguishes wrong from expired (T5). A 404 (not 401) is deliberate:
+#     the route must not confirm whether a token existed.
+#   - Rate-limit keyed on IP + token-prefix (T5) - see _portal_rate_check.
+#   - No admin surface reachable (no require_admin here; the property test
+#     proves a portal token reaches no /api/admin/* path).
+#
+# DEMO_MODE: the portal route is NOT on _DEMO_ALLOWLIST, so under DEMO_MODE the
+# allowlist middleware 403s it fail-closed (a public no-login demo must not
+# expose the supplier claim portal). The flag-off 404 below is the gate in
+# normal dev/prod.
+# ---------------------------------------------------------------------------
+
+# Rate-limit caps for the public portal route (in-process, mirrors the DEMO_MODE
+# _DemoRateCounter pattern). Keyed on (client IP, token-prefix) so an attacker
+# hammering garbage tokens from one IP is throttled, while a valid token (distinct
+# prefix) from the same IP is not penalized by the attacker's noise. Caps are
+# generous for a concierge-distributed link (a real supplier hits the route a
+# handful of times); tight enough to stop a token-guessing spray.
+_PORTAL_RATE_CAP_PER_BUCKET: int = _env_int("SUPPLIER_PORTAL_RATE_CAP", 20)
+_PORTAL_RATE_WINDOW_SEC: int = _env_int("SUPPLIER_PORTAL_RATE_WINDOW_SEC", 60)
+
+# A fixed-window limiter keyed on (ip, token_prefix): dict of bucket ->
+# [count, window_start]. Thread-safe via a lock (mirrors _DemoRateCounter). NOT
+# a sliding window - sufficient for a public route's anti-spray posture; a
+# production deploy would use Redis.
+_portal_rate_lock = threading.Lock()
+_portal_rate_buckets: Dict[tuple, list] = {}
+
+
+def _client_ip(request: Request) -> str:
+    """The client IP for rate-limiting. Trusts X-Forwarded-For's first hop only
+    when the request came through localhost (a dev proxy); otherwise the direct
+    client host. Conservative: a misconfigured proxy cannot spoof an arbitrary
+    IP to bypass the limiter unless it's the localhost dev proxy."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff and request.client and request.client.host in ("127.0.0.1", "localhost"):
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _portal_rate_check(request: Request, token: str) -> None:
+    """Raise 429 (with Retry-After) if the (IP, token-prefix) bucket has exceeded
+    the cap within the window. Inert when the cap is <= 0. The bucket key is
+    (ip, prefix) so a valid token (distinct prefix) is not throttled by an
+    attacker's garbage-token noise on the same IP."""
+    if _PORTAL_RATE_CAP_PER_BUCKET <= 0:
+        return
+    import time
+    ip = _client_ip(request)
+    prefix = (token or "")[:8]
+    bucket = (ip, prefix)
+    now = time.monotonic()
+    with _portal_rate_lock:
+        entry = _portal_rate_buckets.get(bucket)
+        if not entry or (now - entry[1]) >= _PORTAL_RATE_WINDOW_SEC:
+            entry = [0, now]
+            _portal_rate_buckets[bucket] = entry
+        entry[0] += 1
+        count = entry[0]
+    if count > _PORTAL_RATE_CAP_PER_BUCKET:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests.",
+            headers={"Retry-After": str(_PORTAL_RATE_WINDOW_SEC)},
+        )
+
+
+def _portal_flag_off_404():
+    """Raise the byte-identical-to-unknown-route 404 when SUPPLIER_PORTAL_V1 is
+    off. FastAPI's unknown-route body is {"detail":"Not Found"} - we match it
+    exactly so flag-off is indistinguishable from a route that never existed
+    (T5 inertness)."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _portal_reject_404():
+    """The uniform rejection for invalid / expired / reused tokens. A 404 with
+    FastAPI's unknown-route body - deliberately NOT 401, so the route does not
+    confirm whether a token existed (no oracle). Identical across all three
+    rejection cases (T5)."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _validate_portal_token(request: Request, token: str) -> dict:
+    """The shared portal-token gate. Returns the validated token row (with
+    supplier_domain) on success. On flag-off OR any token failure, raises a
+    404 byte-identical to an unknown route (flag-off = route absent; bad token
+    = uniform rejection). Applies the rate-limit BEFORE the token check so a
+    garbage-token spray is throttled regardless of validity."""
+    if not _portal_enabled():
+        _portal_flag_off_404()
+    _portal_rate_check(request, token)
+    row = claim_tokens.validate_token(token)
+    if not row:
+        _portal_reject_404()
+    return row
+
+
+def _portal_response_headers(headers: dict) -> dict:
+    """Strict security headers for every portal response (T2 [REVIEW-ADD])."""
+    headers["Referrer-Policy"] = "no-referrer"
+    # The token is in the path, not a query string, but a no-store cache-control
+    # keeps the token-bearing URL out of any shared/proxy cache.
+    headers["Cache-Control"] = "no-store"
+    return headers
+
+
+@app.get("/api/portal/{token}/profile")
+def portal_profile(token: str, request: Request):
+    """The public supplier claim page contract: the read-only demand teaser
+    (HERO, first element) + the editable profile (brands/classes/ship-area +
+    aftermarket disclosure). Token-validated; flag-gated inert. Never exposes
+    lifecycle / performance / other suppliers. Zero-state teaser -> honest
+    category/network framing (never a "0" hero, never a fabricated count)."""
+    row = _validate_portal_token(request, token)
+    from utils import supplier_portal
+    profile = supplier_portal.read_profile(row["supplier_domain"])
+    if profile is None:
+        # The token is valid but the supplier vanished (deleted mid-session) -
+        # uniform rejection (do not reveal the supplier existed).
+        _portal_reject_404()
+    teaser = supplier_portal.demand_teaser(row["supplier_domain"])
+    # HERO first in the contract (the research's demand-as-hero placement).
+    body = {
+        "teaser": teaser,
+        "supplier_domain": profile["supplier_domain"],
+        "name": profile["name"],
+        "brands": profile["brands"],
+        "classes": profile["classes"],
+        "ship_area": profile["ship_area"],
+        "aftermarket_disclosure": profile["aftermarket_disclosure"],
+    }
+    return JSONResponse(content=body, headers=_portal_response_headers({}))
+
+
+
+class PortalProposeRevisionRequest(BaseModel):
+    brands: Optional[List[dict]] = None
+    classes: Optional[List[dict]] = None
+    ship_area: Optional[dict] = None
+
+
+@app.post("/api/portal/{token}/propose-revision")
+def portal_propose_revision(token: str, body: PortalProposeRevisionRequest,
+                            request: Request):
+    """A supplier-proposed profile edit -> a PENDING revision (review_items
+    kind=supplier_revision) via Night 4's review machinery. NOTHING writes the
+    registry here - the concierge approve is the only writer (decision 1).
+    Returns the revision id + status. Token-validated; flag-gated inert. 422 on
+    a malformed brand relationship (the tri-state relationship is the
+    highest-value field and must be well-formed)."""
+    row = _validate_portal_token(request, token)
+    from utils import supplier_portal
+    revisions = {k: v for k, v in body.model_dump().items() if v is not None}
+    # Validate brand relationships up front (422, not a silent drop) - the
+    # tri-state relationship is the highest-value field and must be well-formed.
+    for b in (revisions.get("brands") or []):
+        rel = (b.get("relationship") or "").upper().strip()
+        from utils import supplier_registry
+        if rel and rel not in supplier_registry.BRAND_RELATIONSHIPS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid brand relationship: {rel}",
+            )
+    revision_id = supplier_portal.propose_revision(
+        row["supplier_domain"], revisions, proposed_by="supplier")
+    if revision_id is None:
+        _portal_reject_404()
+    return JSONResponse(
+        content={"ok": True, "revision_id": revision_id, "status": "pending"},
+        headers=_portal_response_headers({}),
+    )
+
+
+
+# ---------------------------------------------------------------------------
+# Night 6 - Concierge review of supplier-proposed revisions (T4, admin path).
+# Admin-gated + flag-gated. Approve applies via the four scope setters WITHOUT
+# a lifecycle drive (the supplier is already onboarded); reject discards.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/admin/portal/revisions/{revision_id}/approve")
+def admin_approve_revision(revision_id: str, role: str = Depends(require_admin)):
+    """Approve a supplier-proposed revision -> apply its scope to the registry
+    via the Night 4 setters (no lifecycle drive). 404 unknown revision; 409 on
+    a write failure. Admin-gated + SUPPLIER_PORTAL_V1-gated."""
+    _require_portal_enabled()
+    from utils import supplier_portal
+    record = supplier_portal.apply_revision(revision_id, set_by=role)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Revision not found or apply failed")
+    return {"ok": True, "supplier": record}
+
+
+@app.post("/api/admin/portal/revisions/{revision_id}/reject")
+def admin_reject_revision(revision_id: str, role: str = Depends(require_admin)):
+    """Reject a supplier-proposed revision - nothing is applied. 404 unknown."""
+    _require_portal_enabled()
+    from utils import supplier_portal
+    out = supplier_portal.reject_revision(revision_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+    return {"ok": True, "revision": out}
