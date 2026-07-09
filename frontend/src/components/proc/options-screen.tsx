@@ -545,7 +545,7 @@ function SourcingProgress() {
 
   return (
     <div className="proc-loading proc-loading-split">
-      <div className="pl-loader"><GoferLoader size={64} /></div>
+      <div className="pl-loader"><GoferLoader size={84} /></div>
       <div className="pl-body">
         <div className="pl-head">Finding your best options</div>
         <div className="pl-sub">{sub}</div>

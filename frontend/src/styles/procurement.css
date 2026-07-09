@@ -322,9 +322,13 @@
 .proc-loading .pl-head { font-size: 25px; font-weight: 700; letter-spacing: -0.01em; color: var(--text-strong); margin-top: 6px; }
 .proc-loading .pl-sub { max-width: 440px; font-family: var(--font-serif); font-style: italic; font-size: 15px; line-height: 1.55; color: var(--text); opacity: 0.86; }
 
-/* Sourcing wait — horizontal split: prominent loader LEFT, checklist RIGHT. */
+/* Sourcing wait — horizontal split: prominent loader LEFT, checklist RIGHT.
+   The loader is vertically centered against the step list so it reads as an
+   intentional pairing, not tucked in a corner. align-items:center on the split
+   already does the vertical centering; the loader cell just holds the larger
+   SVG (size is set in the component). */
 .proc-loading-split { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: center; text-align: left; gap: 30px; padding: 44px 16px; }
-.proc-loading-split .pl-loader { flex: none; display: inline-flex; }
+.proc-loading-split .pl-loader { flex: none; display: inline-flex; align-items: center; justify-content: center; }
 .proc-loading-split .pl-body { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .proc-loading-split .pl-head { margin-top: 0; }
 .proc-loading-split .pl-sub { text-align: left; margin-bottom: 4px; }
