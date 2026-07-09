@@ -28,6 +28,26 @@ def _env_truthy(value: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# SUPPLIER_PORTAL_V1 — the supplier claim-portal feature flag (Night 6).
+# ---------------------------------------------------------------------------
+# The app's FIRST PUBLIC ROUTE gets its OWN independent kill switch — it does
+# NOT extend TIER1_V2 (the brief's REVIEW-ADD: the first public route gets its
+# own kill switch). The portal MAY DEPEND on TIER1_V2 data (the profile scope
+# + the supplier_notifications demand ledger), but the ROUTE'S EXISTENCE gates
+# on SUPPLIER_PORTAL_V1 alone. Flag unset/absent/falsy -> the public route
+# DOES NOT EXIST (response byte-identical to any unknown route — FastAPI 404
+# {"detail":"Not Found"}), proven by an inertness test. Read live from the env
+# so a test that sets it via monkeypatch.setenv is honored (mirrors TIER1_V2).
+SUPPLIER_PORTAL_V1: bool = _env_truthy(os.environ.get("SUPPLIER_PORTAL_V1"))
+
+
+def _portal_enabled() -> bool:
+    """Live check for the portal route gate (honors monkeypatched os.environ).
+    Used at every portal handler entry; flag-off -> 404 (the route is absent)."""
+    return _env_truthy(os.environ.get("SUPPLIER_PORTAL_V1"))
+
+
+# ---------------------------------------------------------------------------
 # DEMO_MODE — public no-login demo spine (procurement-dev.arkim.ai cold outreach)
 # ---------------------------------------------------------------------------
 # Guards active ONLY when env DEMO_MODE is truthy, all completely inert otherwise
@@ -77,6 +97,7 @@ import secrets
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Auth (ported Cognito identity). get_caller is an OPTIONAL dependency on the customer
@@ -97,6 +118,7 @@ from utils.procurement_agent.state.persistence import (
 from sqlalchemy import text
 from utils.procurement_agent.state.phases import Phase
 from utils.procurement_agent import tier1_matcher, tier1_notify
+from utils import claim_tokens  # Night 6 — supplier claim-portal token store (T1)
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -4536,9 +4558,124 @@ def admin_onboarding_reject(draft_id: str, role: str = Depends(require_admin)):
     return {"ok": True, "draft": out}
 
 
+# ---------------------------------------------------------------------------
+# Night 6 — Supplier claim-portal: admin "Generate claim link" (T1).
+# ---------------------------------------------------------------------------
+# A concierge-generated magic link for a single supplier. The admin picks a
+# supplier (by domain) and mints a token; the link is RETURNED to the concierge
+# (who sends it manually — the portal NEVER sends email, guardrail 4). The token
+# is single-supplier-scoped, expiring (7d default), regenerable; stored HASHED
+# at rest (see utils/claim_tokens.py). Admin-gated (require_admin) AND gated on
+# SUPPLIER_PORTAL_V1 (503 dormant when off — mirrors the onboarding fail-closed
+# pattern; NOT 404, because this is the admin surface, not the public route).
+# NOT on the DEMO_MODE allowlist (a public demo must not mint supplier claim
+# links).
+# ---------------------------------------------------------------------------
+
+def _require_portal_enabled():
+    """SUPPLIER_PORTAL_V1 must be on for the portal admin surface to be live.
+    Mirrors the require_admin / _require_onboarding_enabled fail-closed pattern:
+    flag off -> 503 (dormant), never 404-ish pretend-not-here on the ADMIN path
+    (the PUBLIC route returns 404 when flag-off — that is the inertness wall)."""
+    if not _portal_enabled():
+        raise HTTPException(status_code=503,
+                            detail="Supplier portal disabled (SUPPLIER_PORTAL_V1 off)")
+    return True
+
+
+class ClaimLinkRequest(BaseModel):
+    supplier_domain: str
+    expiry_days: Optional[int] = None  # default 7 (utils/claim_tokens._DEFAULT_EXPIRY_DAYS)
+
+
+@app.post("/api/admin/suppliers/claim-link", status_code=200)
+def admin_generate_claim_link(body: ClaimLinkRequest,
+                              role: str = Depends(require_admin)):
+    """Mint a claim-portal magic link for a supplier. Returns the link + its raw
+    token ONCE (the token is hashed at rest; this is the only time the raw token
+    leaves the server). Does NOT send email — the concierge sends the link
+    manually (guardrail 4: "Generate claim link" produces a link; it does not
+    send). 422 on an empty/invalid domain; 503 when the flag is off."""
+    _require_portal_enabled()
+    domain = (body.supplier_domain or "").strip()
+    if not domain:
+        raise HTTPException(status_code=422, detail="supplier_domain required")
+    # Confirm the supplier exists in the registry (the link is meaningless for
+    # an unknown supplier). Read-only lookup — no registry write.
+    from utils import supplier_registry
+    rec = supplier_registry.lookup_by_domain(domain)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    kwargs: dict = {}
+    if body.expiry_days is not None and body.expiry_days > 0:
+        kwargs["expiry_days"] = body.expiry_days
+    out = claim_tokens.generate_for(rec["domain"], **kwargs)
+    if out is None:
+        raise HTTPException(status_code=503,
+                            detail="Claim link could not be created (portal disabled or store failure)")
+    # The link path the concierge sends: /portal/<token>. The base is the
+    # frontend origin (the concierge prepends the deployed URL when sending).
+    return {
+        "ok": True,
+        "supplier_domain": out["supplier_domain"],
+        "supplier_name": rec.get("name"),
+        "token": out["token"],
+        "token_id": out["token_id"],
+        "expires_at": out["expires_at"],
+        "link_path": f"/portal/{out['token']}",
+    }
+
+
+@app.post("/api/admin/suppliers/claim-link/regenerate", status_code=200)
+def admin_regenerate_claim_link(body: ClaimLinkRequest,
+                                role: str = Depends(require_admin)):
+    """Regenerate a supplier's claim link — revokes every prior live token for
+    the supplier and mints a new one (the prior token is rejected from this
+    point on). Admin-gated + flag-gated. Returns the new link."""
+    _require_portal_enabled()
+    domain = (body.supplier_domain or "").strip()
+    if not domain:
+        raise HTTPException(status_code=422, detail="supplier_domain required")
+    from utils import supplier_registry
+    rec = supplier_registry.lookup_by_domain(domain)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    kwargs: dict = {}
+    if body.expiry_days is not None and body.expiry_days > 0:
+        kwargs["expiry_days"] = body.expiry_days
+    out = claim_tokens.regenerate(rec["domain"], **kwargs)
+    if out is None:
+        raise HTTPException(status_code=503,
+                            detail="Claim link could not be regenerated (portal disabled or store failure)")
+    return {
+        "ok": True,
+        "supplier_domain": out["supplier_domain"],
+        "supplier_name": rec.get("name"),
+        "token": out["token"],
+        "token_id": out["token_id"],
+        "expires_at": out["expires_at"],
+        "link_path": f"/portal/{out['token']}",
+    }
+
+
+@app.get("/api/admin/suppliers/{supplier_domain}/claim-tokens")
+def admin_list_claim_tokens(supplier_domain: str, role: str = Depends(require_admin)):
+    """List a supplier's claim tokens (metadata only — never the raw token or
+    hash). Admin/diagnostic surface for the concierge to see active/expired/
+    revoked tokens. Flag-gated."""
+    _require_portal_enabled()
+    from utils import supplier_registry
+    rec = supplier_registry.lookup_by_domain(supplier_domain)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Supplier not found")
+    rows = claim_tokens.list_for_supplier(rec["domain"])
+    return {"count": len(rows), "supplier_domain": rec["domain"], "tokens": rows}
+
+
 def _url_scheme_ok(url: str) -> bool:
     try:
         from urllib.parse import urlparse
         return urlparse(url).scheme.lower() in ("http", "https")
     except Exception:
         return False
+
