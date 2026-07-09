@@ -409,3 +409,527 @@
 @media (prefers-reduced-motion: reduce) {
   .gofer [data-anim] { animation: none !important; }
 }
+
+/* ===========================================================================
+   Supplier claim-portal — PUBLIC customer surface (own palette)
+   -------------------------------------------------------------------------
+   The portal is a distinct customer-facing surface with a WARM OFF-WHITE
+   palette (per the portal build brief), separate from the internal app's dark
+   slate theme. Tokens are scoped to .portal-surface so nothing bleeds into the
+   internal app. Tailwind utilities are NOT used here — the portal renders raw
+   elements styled by these rules, so the surface stays self-contained and a
+   later visual pass can retune without touching Tailwind config.
+   =========================================================================== */
+.portal-surface {
+  /* Palette — single source (brief design direction) */
+  --portal-graphite: #26282B;   /* text, headings, primary */
+  --portal-slate:   #4E5A63;   /* secondary text, borders, chrome */
+  --portal-orange:  #F4581C;   /* the ONE action accent — used sparingly */
+  --portal-amber:   #E8A33D;   /* needs-review / pending state */
+  --portal-green:   #2E9E6B;   /* success / confirmed */
+  --portal-paper:   #F7F6F2;   /* background (warm off-white) */
+  --portal-ink:     #1A1D1F;   /* dark surfaces */
+  --portal-card:    #FFFFFF;
+  --portal-line:    #E2DFD7;   /* hairline on paper */
+  --portal-line-strong: #C9C5BB;
+
+  /* Layout */
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--portal-paper);
+  color: var(--portal-graphite);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Visible keyboard focus for the public surface (a11y). */
+  --portal-focus: 0 0 0 3px rgba(244, 88, 28, 0.35);
+}
+.portal-surface :focus-visible {
+  outline: none;
+  box-shadow: var(--portal-focus);
+  border-radius: 4px;
+}
+
+/* Header — minimal: brand mark + supplier name */
+.portal-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--portal-line);
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+.portal-brand {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-size: 14px;
+  color: var(--portal-graphite);
+}
+.portal-supplier {
+  font-size: 13px;
+  color: var(--portal-slate);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.portal-main {
+  flex: 1;
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 20px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.portal-footer {
+  max-width: 760px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 16px 20px 28px;
+  box-sizing: border-box;
+  font-size: 12px;
+  color: var(--portal-slate);
+  border-top: 1px solid var(--portal-line);
+}
+
+/* ---- Demand teaser — the HERO (first, most prominent) -------------------- */
+.portal-teaser {
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-radius: 10px;
+  padding: 28px 24px;
+  box-shadow: 0 1px 2px rgba(38, 40, 43, 0.04);
+}
+.portal-teaser--has-matches {
+  border-left: 4px solid var(--portal-orange);
+}
+.portal-teaser--zero {
+  border-left: 4px solid var(--portal-slate);
+}
+.portal-teaser-eyebrow {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  color: var(--portal-slate);
+  margin: 0 0 10px;
+}
+.portal-teaser-hero {
+  font-size: 24px;
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--portal-graphite);
+  margin: 0;
+}
+.portal-teaser-count {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  color: var(--portal-orange);
+  font-variant-numeric: tabular-nums;
+}
+/* Zero-state framing: same hero weight, no number (honesty carve-out). */
+.portal-teaser-framing {
+  font-size: 20px;
+  line-height: 1.35;
+  font-weight: 500;
+  color: var(--portal-graphite);
+}
+.portal-teaser-sub {
+  margin: 12px 0 0;
+  color: var(--portal-slate);
+  font-size: 14px;
+}
+
+/* ---- Loading ------------------------------------------------------------- */
+.portal-loading {
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+}
+.portal-loading-text {
+  color: var(--portal-slate);
+  font-size: 14px;
+  margin: 0;
+}
+
+/* ---- Rejection (uniform) ------------------------------------------------- */
+.portal-rejection {
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+}
+.portal-rejection-card {
+  max-width: 440px;
+  text-align: center;
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-radius: 10px;
+  padding: 32px 24px;
+}
+.portal-rejection-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--portal-graphite);
+}
+.portal-rejection-body {
+  margin: 0;
+  color: var(--portal-slate);
+  font-size: 15px;
+}
+
+/* ---- Submitted (amber pending, NOT green saved) -------------------------- */
+.portal-submitted {
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+}
+.portal-submitted-card {
+  max-width: 480px;
+  text-align: center;
+  background: var(--portal-card);
+  border: 1px solid var(--portal-amber);
+  border-left: 4px solid var(--portal-amber);
+  border-radius: 10px;
+  padding: 32px 24px;
+}
+.portal-submitted-eyebrow {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  color: var(--portal-amber);
+  margin: 0 0 8px;
+}
+.portal-submitted-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--portal-graphite);
+}
+.portal-submitted-body {
+  margin: 0;
+  color: var(--portal-slate);
+  font-size: 15px;
+}
+
+/* ---- Soft error (input preserved) ---------------------------------------- */
+.portal-soft-error {
+  background: rgba(232, 163, 61, 0.12);
+  border: 1px solid var(--portal-amber);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--portal-graphite);
+  font-size: 14px;
+}
+
+/* ---- Profile form -------------------------------------------------------- */
+.portal-form {
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-radius: 10px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.portal-form-eyebrow {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  color: var(--portal-slate);
+  margin: 0;
+}
+.portal-form-heading {
+  font-size: 20px;
+  font-weight: 600;
+  margin: 4px 0 0;
+  color: var(--portal-graphite);
+  letter-spacing: -0.01em;
+}
+.portal-form-sub {
+  margin: 6px 0 0;
+  color: var(--portal-slate);
+  font-size: 14px;
+}
+
+.portal-fieldset {
+  border: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.portal-legend {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--portal-graphite);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.portal-legend--centerpiece {
+  font-size: 16px;
+}
+.portal-legend-hint {
+  font-weight: 400;
+  font-size: 12.5px;
+  color: var(--portal-slate);
+}
+.portal-empty {
+  margin: 0;
+  font-size: 13.5px;
+  color: var(--portal-slate);
+  background: var(--portal-paper);
+  border: 1px dashed var(--portal-line-strong);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+/* Brand rows — tri-state relationship control (centerpiece) */
+.portal-brand-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.portal-brand-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--portal-line);
+  border-radius: 8px;
+  background: var(--portal-paper);
+}
+.portal-brand-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--portal-graphite);
+}
+.portal-rel-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.portal-rel-option {
+  flex: 1 1 auto;
+  min-width: 120px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13.5px;
+  color: var(--portal-graphite);
+  background: var(--portal-card);
+  min-height: 44px;          /* touch target ≥44px */
+  transition: border-color 0.12s, background 0.12s;
+}
+.portal-rel-option--checked {
+  border-color: var(--portal-orange);
+  background: rgba(244, 88, 28, 0.06);
+  color: var(--portal-graphite);
+}
+.portal-rel-option input {
+  accent-color: var(--portal-orange);
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* Classes */
+.portal-class-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.portal-class-row {
+  padding: 0;
+}
+.portal-core-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--portal-line);
+  border-radius: 6px;
+  background: var(--portal-paper);
+  cursor: pointer;
+  min-height: 44px;
+  font-size: 14px;
+}
+.portal-core-toggle input {
+  accent-color: var(--portal-orange);
+  width: 16px;
+  height: 16px;
+}
+.portal-class-name { color: var(--portal-graphite); }
+.portal-core-tag {
+  margin-left: auto;
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--portal-orange);
+  border: 1px solid var(--portal-orange);
+  border-radius: 3px;
+  padding: 1px 6px;
+}
+
+/* Ship area */
+.portal-ship-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.portal-ship-option {
+  flex: 1 1 auto;
+  min-width: 160px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  background: var(--portal-card);
+  font-size: 14px;
+  min-height: 44px;
+}
+.portal-ship-option--checked {
+  border-color: var(--portal-orange);
+  background: rgba(244, 88, 28, 0.06);
+}
+.portal-ship-option input {
+  accent-color: var(--portal-orange);
+  width: 16px;
+  height: 16px;
+}
+.portal-states-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 6px;
+  margin-top: 4px;
+}
+.portal-state-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 6px;
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  background: var(--portal-card);
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--portal-graphite);
+  min-height: 36px;
+}
+.portal-state-chip--on {
+  border-color: var(--portal-orange);
+  background: rgba(244, 88, 28, 0.08);
+  color: var(--portal-graphite);
+}
+.portal-state-chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  width: 0; height: 0;
+}
+
+/* Aftermarket disclosure */
+.portal-disclosure {
+  background: var(--portal-paper);
+  border: 1px solid var(--portal-line);
+  border-left: 3px solid var(--portal-amber);
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+.portal-disclosure-eyebrow {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10.5px;
+  color: var(--portal-amber);
+  margin: 0 0 4px;
+}
+.portal-disclosure-body {
+  margin: 0;
+  font-size: 13px;
+  color: var(--portal-slate);
+}
+
+/* Submit */
+.portal-form-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-start;
+}
+.portal-submit {
+  background: var(--portal-orange);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 6px;
+  padding: 14px 22px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  min-height: 44px;
+  transition: background 0.12s;
+}
+.portal-submit:hover { background: #d9440f; }
+.portal-submit:disabled { opacity: 0.6; cursor: default; }
+.portal-submit-note {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--portal-slate);
+}
+
+/* ---- Mobile legibility (~380px) ------------------------------------------ */
+@media (max-width: 560px) {
+  .portal-surface { font-size: 14.5px; }
+  .portal-main { padding: 16px; gap: 18px; }
+  .portal-teaser { padding: 20px 16px; }
+  .portal-teaser-hero { font-size: 20px; }
+  .portal-teaser-framing { font-size: 17px; }
+  .portal-form { padding: 18px 16px; gap: 20px; }
+  .portal-rel-option,
+  .portal-ship-option { min-width: unset; flex-basis: 100%; }
+  .portal-brand-row { padding: 10px; }
+}
+
+/* Respect reduced motion (the GoferLoader already freezes; keep portal
+   transitions quiet too). */
+@media (prefers-reduced-motion: reduce) {
+  .portal-surface *,
+  .portal-surface *::before,
+  .portal-surface *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
