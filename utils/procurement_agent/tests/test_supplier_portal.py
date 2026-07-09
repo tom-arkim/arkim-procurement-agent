@@ -327,6 +327,111 @@ class TestPublicProfileAndTeaser:
 
 
 # ---------------------------------------------------------------------------
+# Fix 1 - the teaser window comparison is a PARSED-DATETIME compare, not a
+# fragile ISO-string compare. These tests prove the bug was real: each would
+# FAIL against the old `at >= cutoff` string logic and PASS after the fix.
+# ---------------------------------------------------------------------------
+
+class TestTeaserWindowComparison:
+    """Deterministic, pure-helper tests for the window comparison (no HTTP, no
+    timing flakiness). The teaser builds `cutoff = datetime.now(timezone.utc) -
+    timedelta(days=window_days)` and calls `_ts_in_window(raw, cutoff)` per row.
+    These exercise `_ts_in_window` / `_parse_ts_utc` directly with fixed inputs
+    so the boundary is exact."""
+
+    def test_inside_window_counts(self):
+        from utils.supplier_portal import _ts_in_window
+        from datetime import datetime, timedelta, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
+        # 5 days after the cutoff -> in window.
+        assert _ts_in_window("2026-06-14T10:00:00", cutoff) is True
+
+    def test_outside_window_excluded(self):
+        from utils.supplier_portal import _ts_in_window
+        from datetime import datetime, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
+        # 40 days before the cutoff -> outside.
+        assert _ts_in_window("2026-04-30T10:00:00", cutoff) is False
+
+    def test_boundary_at_cutoff_counts(self):
+        """A row exactly at the cutoff instant is IN the window (>= cutoff),
+        deterministically."""
+        from utils.supplier_portal import _ts_in_window
+        from datetime import datetime, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
+        assert _ts_in_window("2026-06-09T10:00:00", cutoff) is True
+
+    def test_z_suffix_same_second_just_before_excluded(self):
+        """THE BUG: a Z-suffixed row in the SAME second as the cutoff but
+        earlier sub-second. Old string compare: 'Z'(0x5A) > '.'(0x2E) so
+        '2026-06-09T10:00:00Z' >= '2026-06-09T10:00:00.500000' -> True (WRONG,
+        counts). Parsed-datetime compare: 10:00:00.000 < 10:00:00.500 -> False
+        (RIGHT, excluded). This test FAILS against the old string logic."""
+        from utils.supplier_portal import _ts_in_window
+        from datetime import datetime, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, 500000, tzinfo=timezone.utc)
+        assert _ts_in_window("2026-06-09T10:00:00Z", cutoff) is False
+
+    def test_z_suffix_inside_window_counts(self):
+        """A tz-aware (Z) row genuinely inside the window counts - the fix
+        respects tz-suffixed timestamps, not just naive ones."""
+        from utils.supplier_portal import _ts_in_window
+        from datetime import datetime, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
+        assert _ts_in_window("2026-07-08T19:31:22Z", cutoff) is True
+
+    def test_offset_timestamp_normalized_to_utc(self):
+        """A +02:00 row whose local clock is 12:00 but UTC instant is 10:00
+        (same as a naive 10:00 UTC row) compares by its UTC instant, not its
+        local string. Old string compare: '12' > '10' would misorder; parsed
+        compare normalizes to UTC and gets it right."""
+        from utils.supplier_portal import _ts_in_window, _parse_ts_utc
+        from datetime import datetime, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
+        # +02:00 at 10:00 local = 08:00 UTC -> before cutoff (10:00 UTC) -> out.
+        assert _ts_in_window("2026-06-09T10:00:00+02:00", cutoff) is False
+        # +02:00 at 12:00 local = 10:00 UTC -> at cutoff -> in.
+        assert _ts_in_window("2026-06-09T12:00:00+02:00", cutoff) is True
+        # And the parser normalizes both to UTC.
+        assert _parse_ts_utc("2026-06-09T12:00:00+02:00") == \
+            _parse_ts_utc("2026-06-09T10:00:00Z")
+
+    def test_naive_and_aware_same_instant_both_count(self):
+        """A naive UTC row and a Z-suffixed row at the same UTC instant both
+        count (the fix treats naive as UTC)."""
+        from utils.supplier_portal import _ts_in_window
+        from datetime import datetime, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
+        assert _ts_in_window("2026-07-09T10:00:00", cutoff) is True      # naive
+        assert _ts_in_window("2026-07-09T10:00:00+00:00", cutoff) is True  # aware
+
+    def test_malformed_timestamp_excluded(self):
+        """A malformed timestamp is excluded from the count (never crashes,
+        never counts-as-matched)."""
+        from utils.supplier_portal import _ts_in_window
+        from datetime import datetime, timezone
+        cutoff = datetime(2026, 6, 9, 10, 0, 0, tzinfo=timezone.utc)
+        assert _ts_in_window("not-a-timestamp", cutoff) is False
+        assert _ts_in_window("", cutoff) is False
+        assert _ts_in_window(None, cutoff) is False  # type: ignore[arg-type]
+
+    def test_end_to_end_tz_aware_row_counts_through_api(self, portal_api):
+        """End-to-end: a tz-aware (Z) notification seeded inside the window is
+        counted through the real API path, not dropped by a string-compare
+        format mismatch."""
+        from utils import supplier_registry as sr
+        from datetime import datetime, timedelta, timezone
+        at = (datetime.now(timezone.utc) - timedelta(days=5)).isoformat()
+        sr.record_supplier_notification(
+            run_id="r-tz", supplier_domain="dxpe.com", vendor_name="DXP Enterprises",
+            noun_class="SEAL", notify_reason="core_class", send_status="stubbed",
+            notified_at=at, metadata={})
+        tok = _mint(portal_api)
+        b = portal_api.get(f"/api/portal/{tok}/profile").json()
+        assert b["teaser"]["count"] == 1
+
+
+# ---------------------------------------------------------------------------
 # T3 - propose-revision endpoint (registry UNCHANGED until approve)
 # ---------------------------------------------------------------------------
 

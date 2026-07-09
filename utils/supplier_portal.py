@@ -24,10 +24,14 @@ TIER1_V2-gated at the registry layer (returns [] when TIER1_V2 off).
 """
 from __future__ import annotations
 
+import logging
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from utils import supplier_registry as sr
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -121,17 +125,28 @@ def demand_teaser(supplier_domain: str,
     synthetic rows by construction - the sole writer is the live notify layer
     (``record_supplier_notification`` from ``tier1_notify.notify_tier1``). So
     the count is naturally honest: it counts real notify events. See
-    audit/NIGHT6_INVESTIGATION.md I4 for the dev-DB-hygiene caveat."""
+    audit/NIGHT6_INVESTIGATION.md I4 for the dev-DB-hygiene caveat.
+
+    Window comparison: timestamps are PARSED to timezone-aware UTC datetimes and
+    compared as datetimes (not ISO strings). The stored ``notified_at`` is naive
+    UTC (``datetime.utcnow().isoformat()``, no tz suffix, microsecond precision
+    - see ``record_supplier_notification``), but a future writer or a manual
+    insert could emit a tz-suffixed (``Z`` / ``+00:00`` / offset) or
+    different-precision string; a string compare would silently miscount those
+    (a ``Z``-suffixed row in the same second as the cutoff but earlier
+    sub-second sorts AFTER a naive microsecond cutoff, so string compare wrongly
+    counts it). Parsing makes the result correct regardless of string format.
+    A malformed/missing timestamp is excluded from the count (never crashes,
+    never counts-as-matched)."""
     if not _portal_enabled():
         return _zero_state()
     dom = sr._normalize_domain(supplier_domain)
     rows = sr.get_supplier_notifications(domain=dom)  # [] when TIER1_V2 off
-    # Window the count (rows are newest-first; notified_at is ISO UTC).
-    cutoff = _cutoff_iso(window_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     count = 0
     for r in rows:
-        at = (r.get("notified_at") or r.get("created_at") or "")
-        if at and at >= cutoff:
+        at = r.get("notified_at") or r.get("created_at") or ""
+        if _ts_in_window(at, cutoff):
             count += 1
     if count <= 0:
         return _zero_state(window_days=window_days)
@@ -143,9 +158,28 @@ def demand_teaser(supplier_domain: str,
     }
 
 
-def _cutoff_iso(window_days: int) -> str:
-    from datetime import datetime, timedelta
-    return (datetime.utcnow() - timedelta(days=window_days)).isoformat()
+def _parse_ts_utc(raw: str) -> Optional[datetime]:
+    """Parse a stored timestamp to a timezone-aware UTC datetime. A naive
+    timestamp (the repo default - ``datetime.utcnow().isoformat()``) is assumed
+    UTC. A tz-aware timestamp (``Z`` / ``+00:00`` / offset) is respected and
+    normalized to UTC. Returns None on a malformed/empty value so the caller can
+    exclude it from the count (never crashes, never counts-as-matched)."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _ts_in_window(raw: str, cutoff: datetime) -> bool:
+    """True iff ``raw`` parses to an instant at-or-after ``cutoff`` (both aware
+    UTC). False on a malformed/missing timestamp (excluded from the count)."""
+    ts = _parse_ts_utc(raw)
+    return ts is not None and ts >= cutoff
 
 
 def _zero_state(*, window_days: int = TEASER_WINDOW_DAYS_DEFAULT) -> dict:
