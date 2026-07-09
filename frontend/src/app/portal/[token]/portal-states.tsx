@@ -83,7 +83,7 @@ export function PortalSubmitted() {
         <h1 className="portal-submitted-title">Thanks — your rep will review and confirm these changes</h1>
         <p className="portal-submitted-body">
           Your edits are pending. Nothing changes on your profile until your {BRAND_NAME}{" "}
-          representative approves them. We'll be in touch if anything needs clarifying.
+          representative approves them. We&apos;ll be in touch if anything needs clarifying.
         </p>
       </div>
     </div>

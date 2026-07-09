@@ -16,6 +16,12 @@
  */
 
 import { Fragment, useCallback, useEffect, useState } from "react";
+import {
+  ClaimLinkPanel,
+  PortalRevisionsView,
+  type ClaimLink,
+  type FetchResult as PortalFetchResult,
+} from "./portal-admin";
 
 const API_BASE =
   typeof process !== "undefined" && process.env.NEXT_PUBLIC_API_URL
@@ -26,11 +32,13 @@ const TOKEN_KEY = "arkim_admin_token";
 
 type Tab =
   | "runs" | "suppliers" | "sent-messages" | "review-queue" | "orders" | "prices"
-  | "unmatched-replies" | "fulfilment" | "labeling" | "onboarding";
+  | "unmatched-replies" | "fulfilment" | "labeling" | "onboarding"
+  | "portal-revisions";
 
-// `labeling` (Night 2) and `onboarding` (Night 4) have no `path`/`listKey`
-// (they render their own dedicated views, not the generic table). TABS still
-// lists them so the tab chips appear; the render branch special-cases them.
+// `labeling` (Night 2), `onboarding` (Night 4), and `portal-revisions` (Night 6)
+// have no `path`/`listKey` (they render their own dedicated views, not the
+// generic table). TABS still lists them so the tab chips appear; the render
+// branch special-cases them.
 const TABS: { id: Tab; label: string; path: string; listKey: string }[] = [
   { id: "runs", label: "Runs", path: "/runs", listKey: "runs" },
   { id: "suppliers", label: "Suppliers", path: "/suppliers", listKey: "suppliers" },
@@ -42,6 +50,7 @@ const TABS: { id: Tab; label: string; path: string; listKey: string }[] = [
   { id: "prices", label: "Prices", path: "/prices", listKey: "prices" },
   { id: "labeling", label: "Labeling", path: "", listKey: "" },
   { id: "onboarding", label: "Onboarding", path: "", listKey: "" },
+  { id: "portal-revisions", label: "Portal Revisions", path: "", listKey: "" },
 ];
 
 type FetchResult = { ok: boolean; status: number; body: unknown };
@@ -138,6 +147,18 @@ export default function AdminInspectorPage() {
     name: string; vertical: string; shipAreaKind: string;
   }>({ name: "", vertical: "", shipAreaKind: "" });
 
+  // Night 6 — Supplier claim-portal admin controls.
+  // Claim-link (T4): the raw token is returned ONCE and never again (hashed at
+  // rest). `claimLink` holds the show-once result; it is cleared on tab switch
+  // so the link is never left visible on a stale screen.
+  const [claimLink, setClaimLink] = useState<ClaimLink | null>(null);
+  const [claimMsg, setClaimMsg] = useState<string>("");
+  const [claimBusy, setClaimBusy] = useState<boolean>(false);
+  const [linkCopied, setLinkCopied] = useState<boolean>(false);
+  // Portal revisions (T5): the pending supplier-proposed revisions queue.
+  const [revRows, setRevRows] = useState<Record<string, unknown>[]>([]);
+  const [revMsg, setRevMsg] = useState<string>("");
+
   useEffect(() => {
     const saved = typeof window !== "undefined" ? window.localStorage.getItem(TOKEN_KEY) : null;
     if (saved) setToken(saved);
@@ -158,6 +179,18 @@ export default function AdminInspectorPage() {
         const r = await fetchAdmin("/onboarding/drafts", token);
         setResult(r);
         if (r.ok) setOnbDrafts(((r.body as Record<string, unknown>)?.drafts as Record<string, unknown>[]) || []);
+      } else if (def.id === "portal-revisions") {
+        // Portal revisions tab (Night 6 T5) — the pending supplier-proposed
+        // revisions live in review_items kind="supplier_revision". The existing
+        // /review-queue endpoint returns all review_items except unmatched_reply,
+        // so it already includes supplier_revision rows; filter client-side.
+        setClaimLink(null); // never leave a show-once link visible on tab switch
+        const r = await fetchAdmin("/review-queue", token);
+        setResult(r);
+        if (r.ok) {
+          const all = ((r.body as Record<string, unknown>)?.review_items as Record<string, unknown>[]) || [];
+          setRevRows(all.filter((row) => row["kind"] === "supplier_revision"));
+        }
       } else {
         setResult(await fetchAdmin(def.path, token));
       }
@@ -169,6 +202,12 @@ export default function AdminInspectorPage() {
   useEffect(() => {
     if (token) load(tab);
   }, [token, tab, load]);
+
+  // Clear the show-once claim link whenever we leave the suppliers tab, so a
+  // raw token is never left visible on a stale screen.
+  useEffect(() => {
+    if (tab !== "suppliers") setClaimLink(null);
+  }, [tab]);
 
   function saveToken() {
     window.localStorage.setItem(TOKEN_KEY, tokenInput.trim());
@@ -350,6 +389,93 @@ export default function AdminInspectorPage() {
     }
   }
 
+  // --- Claim link (Night 6 T4) --------------------------------------------
+  // Mint a show-once claim link for a supplier. The raw token is returned ONLY
+  // here; render it once with a copy button + expiry + a "you won't see this
+  // again" note. Regenerate revokes the prior token and mints a new one.
+  async function generateClaimLink(domain: string) {
+    if (!domain || claimBusy) return;
+    setClaimBusy(true);
+    setClaimMsg("");
+    setLinkCopied(false);
+    const r = await postAdmin("/suppliers/claim-link", token, { supplier_domain: domain });
+    setClaimBusy(false);
+    if (r.ok) {
+      setClaimLink(r.body as ClaimLink);
+      setClaimMsg("");
+    } else {
+      // 503 = SUPPLIER_PORTAL_V1 off (dormant); 404 = unknown supplier; 422 = bad domain.
+      const detail = (r.body as { detail?: unknown } | undefined)?.detail;
+      setClaimMsg(
+        `Claim link failed (HTTP ${r.status})${typeof detail === "string" ? `: ${detail}` : ""}`,
+      );
+      setClaimLink(null);
+    }
+  }
+
+  async function regenerateClaimLink(domain: string) {
+    if (!domain || claimBusy || !claimLink) return;
+    setClaimBusy(true);
+    setClaimMsg("");
+    setLinkCopied(false);
+    const r = await postAdmin("/suppliers/claim-link/regenerate", token, { supplier_domain: domain });
+    setClaimBusy(false);
+    if (r.ok) {
+      setClaimLink(r.body as ClaimLink);
+    } else {
+      const detail = (r.body as { detail?: unknown } | undefined)?.detail;
+      setClaimMsg(
+        `Regenerate failed (HTTP ${r.status})${typeof detail === "string" ? `: ${detail}` : ""}`,
+      );
+    }
+  }
+
+  async function copyClaimLink() {
+    if (!claimLink) return;
+    // Build the full URL from the current origin + the link_path the backend
+    // returned. The link_path is "/portal/<token>"; the token never leaves the
+    // admin's clipboard except by this explicit copy action.
+    const full = `${typeof window !== "undefined" ? window.location.origin : ""}${claimLink.link_path}`;
+    try {
+      await navigator.clipboard.writeText(full);
+      setLinkCopied(true);
+    } catch {
+      setClaimMsg("Copy failed — select the link text and copy manually.");
+    }
+  }
+
+  // --- Portal revision review (Night 6 T5) ---------------------------------
+  async function approveRevision(id: string) {
+    const r = await postAdmin(`/portal/revisions/${id}/approve`, token);
+    if (r.ok) {
+      setRevMsg(`Revision ${id.slice(0, 8)} approved → applied to the registry.`);
+      refreshRevisions();
+    } else {
+      const detail = (r.body as { detail?: unknown } | undefined)?.detail;
+      setRevMsg(`Approve failed (HTTP ${r.status})${typeof detail === "string" ? `: ${detail}` : ""}`);
+    }
+  }
+
+  async function rejectRevision(id: string) {
+    const r = await postAdmin(`/portal/revisions/${id}/reject`, token);
+    if (r.ok) {
+      setRevMsg(`Revision ${id.slice(0, 8)} rejected (nothing applied).`);
+      refreshRevisions();
+    } else {
+      const detail = (r.body as { detail?: unknown } | undefined)?.detail;
+      setRevMsg(`Reject failed (HTTP ${r.status})${typeof detail === "string" ? `: ${detail}` : ""}`);
+    }
+  }
+
+  async function refreshRevisions() {
+    const r = await fetchAdmin("/review-queue", token);
+    if (r.ok) {
+      const all = ((r.body as Record<string, unknown>)?.review_items as Record<string, unknown>[]) || [];
+      setRevRows(all.filter((row) => row["kind"] === "supplier_revision"));
+      setResult(r);
+    }
+  }
+
   // Token gate (UI-side convenience; the API is the real gate).
   if (!token) {
     return (
@@ -456,6 +582,34 @@ export default function AdminInspectorPage() {
           />
         )}
 
+        {tab === "portal-revisions" && (
+          <PortalRevisionsView
+            rows={revRows}
+            msg={revMsg}
+            result={result as PortalFetchResult | null}
+            onApprove={approveRevision}
+            onReject={rejectRevision}
+            onRefresh={refreshRevisions}
+          />
+        )}
+
+        {/* Claim-link show-once panel (suppliers tab only). The raw token is
+            displayed exactly here, once; it is never re-fetchable. */}
+        {tab === "suppliers" && (claimLink || claimMsg) && (
+          <div className="mb-4 rounded border border-amber-line bg-amber-tint p-3 text-[12px]">
+            {claimLink && (
+              <ClaimLinkPanel
+                link={claimLink}
+                copied={linkCopied}
+                busy={claimBusy}
+                onCopy={copyClaimLink}
+                onRegenerate={() => regenerateClaimLink(claimLink.supplier_domain)}
+              />
+            )}
+            {claimMsg && <p className="mt-2 text-amber-fg">{claimMsg}</p>}
+          </div>
+        )}
+
         {result && !result.ok && (
           <div className="rounded border border-red-fg/40 bg-bg-3 p-4 text-red-fg">
             <p className="font-medium">HTTP {result.status}</p>
@@ -470,7 +624,7 @@ export default function AdminInspectorPage() {
           </div>
         )}
 
-        {result?.ok && tab !== "labeling" && (
+        {result?.ok && tab !== "labeling" && tab !== "onboarding" && tab !== "portal-revisions" && (
           <>
             <p className="text-fg-4 mb-2">
               {typeof body?.count === "number" ? body.count : rows.length} record(s)
@@ -488,7 +642,7 @@ export default function AdminInspectorPage() {
                         {c}
                       </th>
                     ))}
-                    {(tab === "unmatched-replies" || tab === "fulfilment") && (
+                    {(tab === "unmatched-replies" || tab === "fulfilment" || tab === "suppliers") && (
                       <th className="py-1 pr-3 font-normal">action</th>
                     )}
                   </tr>
@@ -551,10 +705,22 @@ export default function AdminInspectorPage() {
                             </div>
                           </td>
                         )}
+                        {tab === "suppliers" && (
+                          <td className="py-1 pr-3" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              className="rounded border border-hr-2 px-2 py-0.5 text-fg-2 hover:bg-bg-4 whitespace-nowrap"
+                              onClick={() => generateClaimLink(String(row.domain ?? ""))}
+                              disabled={claimBusy}
+                              title="Mint a supplier claim-portal link (shown once)"
+                            >
+                              Claim link
+                            </button>
+                          </td>
+                        )}
                       </tr>
                       {expanded === i && (
                         <tr key={`${i}-raw`} className="bg-bg-3">
-                          <td colSpan={cols.length + 1 + (tab === "unmatched-replies" || tab === "fulfilment" ? 1 : 0)} className="p-3">
+                          <td colSpan={cols.length + 1 + (tab === "unmatched-replies" || tab === "fulfilment" || tab === "suppliers" ? 1 : 0)} className="p-3">
                             <pre className="whitespace-pre-wrap text-[10.5px] text-fg-2">
                               {JSON.stringify(row, null, 2)}
                             </pre>

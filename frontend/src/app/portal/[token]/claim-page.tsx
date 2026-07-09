@@ -16,7 +16,7 @@
  * sent to a third party. See page.tsx security notes.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BRAND_NAME } from "@/lib/brand";
 import {
   getPortalProfile,
