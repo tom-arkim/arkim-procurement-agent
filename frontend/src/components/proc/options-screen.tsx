@@ -16,7 +16,8 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useRunLive, useOrderNow, useOrders, useGroup, useDemoMode } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
-import { ProcHead, ArkimLoader, procMoney } from "./proc-ui";
+import { ProcHead, procMoney } from "./proc-ui";
+import { GoferLoader } from "@/components/ui/gofer-loader";
 import { useProcToast } from "./proc-shell";
 import { QuotesSection } from "./quotes-section";
 import { OrderSection } from "./order-section";
@@ -498,7 +499,7 @@ function BasketStrip({ groupId, activeRunId }: { groupId: string; activeRunId: s
 function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin?: boolean; loud?: boolean }) {
   return (
     <div className="proc-working">
-      {spin ? <ArkimLoader size={36} /> : <ProcIcon name={loud ? "alert" : "box"} size={20} color={loud ? "var(--st-overdue)" : "var(--muted)"} />}
+      {spin ? <GoferLoader size={36} /> : <ProcIcon name={loud ? "alert" : "box"} size={20} color={loud ? "var(--st-overdue)" : "var(--muted)"} />}
       <div>
         <div className="w-t">{label}</div>
         {sub && <div className="w-s">{sub}</div>}
@@ -544,7 +545,7 @@ function SourcingProgress() {
 
   return (
     <div className="proc-loading proc-loading-split">
-      <div className="pl-loader"><ArkimLoader size={64} /></div>
+      <div className="pl-loader"><GoferLoader size={64} /></div>
       <div className="pl-body">
         <div className="pl-head">Finding your best options</div>
         <div className="pl-sub">{sub}</div>

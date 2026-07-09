@@ -2,7 +2,6 @@
 
 import { type ReactNode } from "react";
 import { ProcIcon } from "./proc-icon";
-import { ArkimMark } from "./arkim-mark";
 
 // Thousands-separated, 2-decimal currency: $13,528.89 (not $13528.89). Keeps cents —
 // a price is a price — and groups so large figures read cleanly.
@@ -57,17 +56,6 @@ export function ChevLoader({ size = 20 }: { size?: number }) {
       <i />
       <i />
       <i />
-    </span>
-  );
-}
-
-/** Brand loader — the real Arkim mark (ArkimMark) with blue light cascading down it:
- *  its shapes light in sequence top→bottom. The animation lives in the
- *  `.proc-arkloader` CSS (it wraps the static mark, not baked into the component). */
-export function ArkimLoader({ size = 34 }: { size?: number }) {
-  return (
-    <span className="proc-arkloader" style={{ width: size, height: size }} aria-hidden="true">
-      <ArkimMark size={size} />
     </span>
   );
 }

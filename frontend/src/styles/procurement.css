@@ -582,19 +582,3 @@
 .proc-chevstack i:nth-child(3) { animation-delay: 0.28s; }
 .proc-chevstack i:nth-child(4) { animation-delay: 0.42s; }
 @keyframes proc-chev { 0%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
-
-/* ---- Arkim brand loader: the real mark (ArkimMark) with cascading blue light ----
-   The mark sits white; each shape lights up blue in turn (top -> bottom, the source
-   shapes are ordered top->bottom) as the cascade passes. The animation wraps the
-   static ArkimMark here, not baked into the component. */
-.proc-arkloader { display: inline-flex; flex: none; }
-.proc-arkloader svg { display: block; overflow: visible; }
-.proc-arkloader svg > * { fill: var(--text-strong); animation: proc-ark 1.5s ease-in-out infinite; }
-.proc-arkloader svg > *:nth-child(1) { animation-delay: 0s; }
-.proc-arkloader svg > *:nth-child(2) { animation-delay: 0.18s; }
-.proc-arkloader svg > *:nth-child(3) { animation-delay: 0.36s; }
-.proc-arkloader svg > *:nth-child(4) { animation-delay: 0.54s; }
-@keyframes proc-ark { 0%, 100% { fill: var(--text-strong); } 42% { fill: var(--accent); } }
-@media (prefers-reduced-motion: reduce) {
-  .proc-arkloader svg > * { animation: none; fill: var(--text-strong); }
-}

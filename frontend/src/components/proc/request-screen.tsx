@@ -18,7 +18,8 @@ import { createRun, sendMessage, confirmIntake, uploadNameplate, seedAssetSpecs 
 import { useRun } from "@/lib/queries";
 import { queryKeys, apiErrorMessage, ApiError } from "@/lib/query-client";
 import { ProcIcon } from "./proc-icon";
-import { ProcHead, ArkimLoader } from "./proc-ui";
+import { ProcHead } from "./proc-ui";
+import { GoferLoader } from "@/components/ui/gofer-loader";
 import { useProcToast } from "./proc-shell";
 import type { AssetSpecs } from "@/types";
 
@@ -343,7 +344,7 @@ export function RequestScreen() {
       {/* WORKING */}
       {stage === "working" && (
         <div className="proc-loading">
-          <ArkimLoader size={52} />
+          <GoferLoader size={52} />
           <div className="pl-head">{file ? "Reading the nameplate" : "Identifying part"}</div>
           <div className="pl-sub">{file ? "Pulling the part details from your photo." : "Checking service records and manuals."}</div>
         </div>
