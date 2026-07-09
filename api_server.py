@@ -4876,3 +4876,34 @@ def portal_propose_revision(token: str, body: PortalProposeRevisionRequest,
         content={"ok": True, "revision_id": revision_id, "status": "pending"},
         headers=_portal_response_headers({}),
     )
+
+
+
+# ---------------------------------------------------------------------------
+# Night 6 - Concierge review of supplier-proposed revisions (T4, admin path).
+# Admin-gated + flag-gated. Approve applies via the four scope setters WITHOUT
+# a lifecycle drive (the supplier is already onboarded); reject discards.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/admin/portal/revisions/{revision_id}/approve")
+def admin_approve_revision(revision_id: str, role: str = Depends(require_admin)):
+    """Approve a supplier-proposed revision -> apply its scope to the registry
+    via the Night 4 setters (no lifecycle drive). 404 unknown revision; 409 on
+    a write failure. Admin-gated + SUPPLIER_PORTAL_V1-gated."""
+    _require_portal_enabled()
+    from utils import supplier_portal
+    record = supplier_portal.apply_revision(revision_id, set_by=role)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Revision not found or apply failed")
+    return {"ok": True, "supplier": record}
+
+
+@app.post("/api/admin/portal/revisions/{revision_id}/reject")
+def admin_reject_revision(revision_id: str, role: str = Depends(require_admin)):
+    """Reject a supplier-proposed revision - nothing is applied. 404 unknown."""
+    _require_portal_enabled()
+    from utils import supplier_portal
+    out = supplier_portal.reject_revision(revision_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="Revision not found")
+    return {"ok": True, "revision": out}

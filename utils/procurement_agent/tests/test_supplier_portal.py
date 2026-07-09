@@ -375,3 +375,77 @@ class TestProposeRevision:
                             json={"brands": [
                                 {"brand_id": "Goulds", "relationship": "BOGUS"}]})
         assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# T4 - concierge review of a supplier-proposed revision
+# ---------------------------------------------------------------------------
+
+class TestConciergeReviewRevision:
+    def test_revision_surfaces_in_review_queue(self, portal_api):
+        tok = _mint(portal_api)
+        portal_api.post(f"/api/portal/{tok}/propose-revision",
+                        json={"brands": [
+                            {"brand_id": "Goulds", "relationship": "CARRIES"}]})
+        q = portal_api.get("/api/admin/review-queue",
+                           headers=_auth(portal_api._token)).json()
+        revisions = [r for r in q["review_items"] if r.get("kind") == "supplier_revision"]
+        assert len(revisions) == 1
+        assert revisions[0]["status"] == "needs_human_review"
+        assert revisions[0]["supplier_domain"] == "dxpe.com"
+
+    def test_approve_applies_revision_to_registry(self, portal_api):
+        from utils import supplier_registry as sr
+        tok = _mint(portal_api)
+        portal_api.post(f"/api/portal/{tok}/propose-revision",
+                        json={"brands": [
+                            {"brand_id": "Goulds", "relationship": "CARRIES"}]})
+        q = portal_api.get("/api/admin/review-queue",
+                           headers=_auth(portal_api._token)).json()
+        rid = [r for r in q["review_items"] if r.get("kind") == "supplier_revision"][0]["id"]
+        r = portal_api.post(f"/api/admin/portal/revisions/{rid}/approve",
+                            headers=_auth(portal_api._token))
+        assert r.status_code == 200
+        # The registry now reflects the approved revision.
+        brands = sr.get_supplier_brands("dxpe.com")
+        assert [b for b in brands if b["brand_id"] == "Goulds"][0]["relationship"] == "CARRIES"
+
+    def test_approve_no_lifecycle_drive(self, portal_api):
+        """A revision approve re-applies scope but does NOT re-drive the
+        lifecycle (the supplier is already onboarded - approve_draft drives
+        discovered->onboarded; the revision path must not)."""
+        from utils import supplier_registry as sr
+        tok = _mint(portal_api)
+        before_lc = sr.get_tier1_lifecycle("dxpe.com")
+        assert before_lc == "onboarded"
+        portal_api.post(f"/api/portal/{tok}/propose-revision",
+                        json={"brands": [
+                            {"brand_id": "Goulds", "relationship": "CARRIES"}]})
+        q = portal_api.get("/api/admin/review-queue",
+                           headers=_auth(portal_api._token)).json()
+        rid = [r for r in q["review_items"] if r.get("kind") == "supplier_revision"][0]["id"]
+        portal_api.post(f"/api/admin/portal/revisions/{rid}/approve",
+                        headers=_auth(portal_api._token))
+        after_lc = sr.get_tier1_lifecycle("dxpe.com")
+        assert after_lc == "onboarded"  # unchanged
+
+    def test_reject_discards_revision(self, portal_api):
+        from utils import supplier_registry as sr
+        tok = _mint(portal_api)
+        portal_api.post(f"/api/portal/{tok}/propose-revision",
+                        json={"brands": [
+                            {"brand_id": "Goulds", "relationship": "CARRIES"}]})
+        q = portal_api.get("/api/admin/review-queue",
+                           headers=_auth(portal_api._token)).json()
+        rid = [r for r in q["review_items"] if r.get("kind") == "supplier_revision"][0]["id"]
+        r = portal_api.post(f"/api/admin/portal/revisions/{rid}/reject",
+                            headers=_auth(portal_api._token))
+        assert r.status_code == 200
+        # Registry unchanged.
+        brands = sr.get_supplier_brands("dxpe.com")
+        assert [b for b in brands if b["brand_id"] == "Goulds"][0]["relationship"] == "AUTHORIZED"
+        # The revision is marked rejected.
+        q2 = portal_api.get("/api/admin/review-queue",
+                            headers=_auth(portal_api._token)).json()
+        rev = [r for r in q2["review_items"] if r["id"] == rid][0]
+        assert rev["status"] == "rejected"

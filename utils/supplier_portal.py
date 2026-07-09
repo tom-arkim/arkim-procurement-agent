@@ -207,3 +207,108 @@ def propose_revision(supplier_domain: str, revisions: dict,
     except Exception as exc:
         print(f"[SupplierPortal] propose_revision failed for {dom!r}: {exc}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Concierge apply/reject (T4) - the ONLY writer, via Night 4's scope setters
+# ---------------------------------------------------------------------------
+
+REVISION_STATUS_CONFIRMED = "confirmed"
+REVISION_STATUS_REJECTED = "rejected"
+
+
+def apply_revision(revision_id: str, *, set_by: Optional[str] = None) -> Optional[dict]:
+    """Approve a supplier-proposed revision: apply its proposed scope to the
+    registry via the four full-replace scope setters (set_supplier_classes /
+    _brands / _territory / _verticals) - WITHOUT the lifecycle drive (the
+    supplier is already onboarded; re-driving is idempotent but semantically
+    wrong for a profile edit). Marks the review item ``confirmed``. Returns the
+    updated supplier record, or None on flag-off / missing revision / wrong
+    kind / write failure (fail-soft). Double-approve idempotent (mirrors
+    concierge.approve_draft)."""
+    if not _portal_enabled():
+        return None
+    try:
+        row = sr.get_review_item(revision_id)
+        if not row or row.get("kind") != REVISION_KIND:
+            return None
+        payload = row.get("payload") or {}
+        domain = (row.get("supplier_domain") or payload.get("domain") or "").strip()
+        if not domain:
+            return None
+        record = _apply_scope_no_lifecycle(domain, payload, set_by=set_by)
+        if record is None:
+            return None
+        sr.set_review_item_status(revision_id, REVISION_STATUS_CONFIRMED)
+        return record
+    except Exception as exc:
+        print(f"[SupplierPortal] apply_revision failed for {revision_id!r}: {exc}")
+        return None
+
+
+def reject_revision(revision_id: str) -> Optional[dict]:
+    """Reject a supplier-proposed revision - nothing is applied to the registry.
+    Marks the review item ``rejected``. Returns the updated view, or None on
+    flag-off / missing / wrong kind."""
+    if not _portal_enabled():
+        return None
+    try:
+        row = sr.get_review_item(revision_id)
+        if not row or row.get("kind") != REVISION_KIND:
+            return None
+        if row.get("status") == REVISION_STATUS_CONFIRMED:
+            return row  # already applied - reject is a no-op refusal
+        sr.set_review_item_status(revision_id, REVISION_STATUS_REJECTED)
+        return sr.get_review_item(revision_id)
+    except Exception as exc:
+        print(f"[SupplierPortal] reject_revision failed for {revision_id!r}: {exc}")
+        return None
+
+
+def _apply_scope_no_lifecycle(domain: str, payload: dict,
+                              *, set_by: Optional[str] = None) -> Optional[dict]:
+    """Apply the proposed scope via the four setters WITHOUT driving the
+    lifecycle (mirrors concierge._apply_scope_to_registry minus the lifecycle
+    drive). Brand relationships + class_ids are validated/canonicalized so a
+    supplier can't write a malformed scope (the approve is still the gate)."""
+    try:
+        sid = sr._ensure_supplier_row(domain, name=payload.get("name"))
+        if not sid:
+            return None
+        # Classes.
+        classes = [
+            {"class_id": (c.get("class_id") or "").upper().strip(),
+             "is_core": bool(c.get("is_core")),
+             "confidence": c.get("confidence", 0.8),
+             "source": sr.SCOPE_SOURCE_MANUAL}
+            for c in (payload.get("classes") or [])
+            if (c.get("class_id") or "").strip()
+        ]
+        if classes:
+            ok = sr.set_supplier_classes(domain, classes, set_by=set_by)
+            if not ok:
+                return None
+        # Brands (tri-state relationship - validated against BRAND_RELATIONSHIPS).
+        brands = [
+            {"brand_id": (b.get("brand_id") or "").strip(),
+             "relationship": (b.get("relationship") or "").upper().strip(),
+             "confidence": b.get("confidence", 0.9)}
+            for b in (payload.get("brands") or [])
+            if (b.get("brand_id") or "").strip()
+            and (b.get("relationship") or "").upper().strip() in sr.BRAND_RELATIONSHIPS
+        ]
+        if brands:
+            ok = sr.set_supplier_brands(domain, brands, set_by=set_by)
+            if not ok:
+                return None
+        # Territory.
+        ship = payload.get("ship_area")
+        if isinstance(ship, dict) and ship.get("kind") in (
+                sr.SHIP_AREA_NATIONWIDE_US, "STATES"):
+            ok = sr.set_supplier_territory(domain, ship, set_by=set_by)
+            if not ok:
+                return None
+        return sr.lookup_by_domain(domain)
+    except Exception as exc:
+        print(f"[SupplierPortal] _apply_scope_no_lifecycle failed for {domain!r}: {exc}")
+        return None
