@@ -10,7 +10,7 @@ import { QuotesComparison } from "@/components/arkim/comparison/quotes-compariso
 import { OrderPanel } from "@/components/arkim/orders/order-panel";
 import { Dot } from "@/components/ui/pill";
 import { Warn } from "@/components/ui/icons";
-import { useArkimStore } from "@/store";
+import { useGoferStore } from "@/store";
 import { BRAND_NAME } from "@/lib/brand";
 import type { SourcingRunDetail } from "@/types";
 
@@ -21,7 +21,7 @@ interface SourcingViewProps {
 
 export function SourcingView({ run, className }: SourcingViewProps) {
   const results = run.sourcing_results;
-  const setTier3Selection = useArkimStore((s) => s.setTier3Selection);
+  const setTier3Selection = useGoferStore((s) => s.setTier3Selection);
   const initialized = useRef(false);
 
   // Pre-select top 3 Tier 3 vendors by suitability on first results load.

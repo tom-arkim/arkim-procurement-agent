@@ -8,7 +8,7 @@ import { PnMatch, MatchBar } from "@/components/ui/match";
 import { External, Clock, Dollar } from "@/components/ui/icons";
 import { LeadTime } from "./lead-time";
 import { useSelectCandidate, useRequestConfirmation } from "@/lib/queries";
-import { useArkimStore } from "@/store";
+import { useGoferStore } from "@/store";
 import { BRAND_NAME } from "@/lib/brand";
 import type { Candidate } from "@/types";
 
@@ -38,8 +38,8 @@ interface VendorCardProps {
 export function VendorCard({ candidate, runId, className }: VendorCardProps) {
   const select = useSelectCandidate(runId);
   const requestConfirmation = useRequestConfirmation(runId);
-  const markTier1ConfirmSent = useArkimStore((s) => s.markTier1ConfirmSent);
-  const confirmSentAt = useArkimStore((s) => s.tier1ConfirmSentAt[runId]?.[candidate.id]);
+  const markTier1ConfirmSent = useGoferStore((s) => s.markTier1ConfirmSent);
+  const confirmSentAt = useGoferStore((s) => s.tier1ConfirmSentAt[runId]?.[candidate.id]);
 
   const [showBuyModal, setShowBuyModal] = useState(false);
 

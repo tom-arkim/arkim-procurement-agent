@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Send, Plus, Package } from "@/components/ui/icons";
 import { MessageBubble, TypingIndicator } from "./message-bubble";
-import { useArkimStore } from "@/store";
+import { useGoferStore } from "@/store";
 import { useSendMessage, useUploadNameplate } from "@/lib/queries";
 import type { ChatMessage } from "@/types";
 
@@ -27,9 +27,9 @@ export function ChatPanel({ runId, messages, className }: ChatPanelProps) {
   const pendingBaseRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
 
-  const chatDraft = useArkimStore((s) => s.chatDraft);
-  const setChatDraft = useArkimStore((s) => s.setChatDraft);
-  const pushToast = useArkimStore((s) => s.pushToast);
+  const chatDraft = useGoferStore((s) => s.chatDraft);
+  const setChatDraft = useGoferStore((s) => s.setChatDraft);
+  const pushToast = useGoferStore((s) => s.pushToast);
 
   const sendMsg = useSendMessage(runId);
   const uploadFile = useUploadNameplate(runId);

@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Send } from "@/components/ui/icons";
-import { useArkimStore, selectSelectedCount } from "@/store";
+import { useGoferStore, selectSelectedCount } from "@/store";
 import { useInitiateOutreach } from "@/lib/queries";
 import { BRAND_NAME } from "@/lib/brand";
 
@@ -11,10 +11,10 @@ interface StickyActionBarProps {
 }
 
 export function StickyActionBar({ runId }: StickyActionBarProps) {
-  const count = useArkimStore(selectSelectedCount(runId));
-  const selection = useArkimStore((s) => s.tier3Selection[runId] ?? new Set<string>());
-  const pushToast = useArkimStore((s) => s.pushToast);
-  const clearTier3Selection = useArkimStore((s) => s.clearTier3Selection);
+  const count = useGoferStore(selectSelectedCount(runId));
+  const selection = useGoferStore((s) => s.tier3Selection[runId] ?? new Set<string>());
+  const pushToast = useGoferStore((s) => s.pushToast);
+  const clearTier3Selection = useGoferStore((s) => s.clearTier3Selection);
   const outreach = useInitiateOutreach(runId);
 
   if (count === 0) return null;

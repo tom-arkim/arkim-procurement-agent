@@ -3,15 +3,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { X, CheckCircle, Warn } from "@/components/ui/icons";
-import { useArkimStore } from "@/store";
+import { useGoferStore } from "@/store";
 import type { Toast, ToastTone } from "@/store";
 
 const AUTO_DISMISS_MS = 4000;
 const MAX_VISIBLE = 5;
 
 export function ToastStack() {
-  const toasts = useArkimStore((s) => s.toasts);
-  const dismissToast = useArkimStore((s) => s.dismissToast);
+  const toasts = useGoferStore((s) => s.toasts);
+  const dismissToast = useGoferStore((s) => s.dismissToast);
 
   // Evict oldest when queue exceeds max
   useEffect(() => {
@@ -46,7 +46,7 @@ const ICON_COLOR: Record<ToastTone, string> = {
 };
 
 function ToastItem({ toast }: { toast: Toast }) {
-  const dismissToast = useArkimStore((s) => s.dismissToast);
+  const dismissToast = useGoferStore((s) => s.dismissToast);
   const [leaving, setLeaving] = useState(false);
 
   const dismiss = useCallback(() => {

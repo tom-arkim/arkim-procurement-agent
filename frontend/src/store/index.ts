@@ -37,7 +37,7 @@ export interface Toast {
 // State shape
 // ---------------------------------------------------------------------------
 
-interface ArkimState {
+interface GoferState {
   // --- Asset spec panel ---
   assetSpecsExpanded: boolean;
   toggleAssetSpecs: () => void;
@@ -76,7 +76,7 @@ interface ArkimState {
 // Store
 // ---------------------------------------------------------------------------
 
-export const useArkimStore = create<ArkimState>()(
+export const useGoferStore = create<GoferState>()(
   immer((set) => ({
     // Asset specs panel
     assetSpecsExpanded: true,
@@ -155,8 +155,8 @@ export const useArkimStore = create<ArkimState>()(
 // Convenience selectors
 // ---------------------------------------------------------------------------
 
-export const selectTier3Selection = (runId: string) => (s: ArkimState) =>
+export const selectTier3Selection = (runId: string) => (s: GoferState) =>
   s.tier3Selection[runId] ?? new Set<string>();
 
-export const selectSelectedCount = (runId: string) => (s: ArkimState) =>
+export const selectSelectedCount = (runId: string) => (s: GoferState) =>
   (s.tier3Selection[runId] ?? new Set()).size;

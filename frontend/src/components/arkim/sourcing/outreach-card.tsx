@@ -5,7 +5,7 @@ import { MatchBar } from "@/components/ui/match";
 import { Clock } from "@/components/ui/icons";
 import { LeadTime } from "./lead-time";
 import { Pill } from "@/components/ui/pill";
-import { useArkimStore } from "@/store";
+import { useGoferStore } from "@/store";
 import type { Candidate } from "@/types";
 
 interface OutreachCardProps {
@@ -17,8 +17,8 @@ interface OutreachCardProps {
 }
 
 export function OutreachCard({ candidate, runId, sentAt, className }: OutreachCardProps) {
-  const toggle = useArkimStore((s) => s.toggleTier3Vendor);
-  const selection = useArkimStore((s) => s.tier3Selection[runId] ?? new Set<string>());
+  const toggle = useGoferStore((s) => s.toggleTier3Vendor);
+  const selection = useGoferStore((s) => s.tier3Selection[runId] ?? new Set<string>());
   const selected = selection.has(candidate.id);
   const hasSent = Boolean(sentAt);
 

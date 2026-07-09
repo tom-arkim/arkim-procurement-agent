@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { cn } from "@/lib/utils";
 import { useOpenFromPending, useRejectSubmission } from "@/lib/queries";
-import { useArkimStore } from "@/store";
+import { useGoferStore } from "@/store";
 import { Button } from "@/components/ui/button";
 import { Pill } from "@/components/ui/pill";
 import { PhaseBar } from "@/components/ui/phase";
@@ -27,7 +27,7 @@ export function PendingIntakeView({
   className?: string;
 }) {
   const router = useRouter();
-  const pushToast = useArkimStore((s) => s.pushToast);
+  const pushToast = useGoferStore((s) => s.pushToast);
 
   const handoff = run.maintenance_handoff as HandoffShape | undefined;
   const context = handoff?.context;
