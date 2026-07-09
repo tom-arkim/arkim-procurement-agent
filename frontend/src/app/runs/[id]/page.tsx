@@ -2,11 +2,11 @@
 
 import { use } from "react";
 import { useRunLive } from "@/lib/queries";
-import { RunSummaryBar } from "@/components/arkim/run-summary-bar";
-import { ChatPanel } from "@/components/arkim/intake/chat-panel";
-import { SpecPanel } from "@/components/arkim/intake/spec-panel";
-import { SourcingView } from "@/components/arkim/sourcing/sourcing-view";
-import { PendingIntakeView } from "@/components/arkim/pending-intake-view";
+import { RunSummaryBar } from "@/components/gofer/run-summary-bar";
+import { ChatPanel } from "@/components/gofer/intake/chat-panel";
+import { SpecPanel } from "@/components/gofer/intake/spec-panel";
+import { SourcingView } from "@/components/gofer/sourcing/sourcing-view";
+import { PendingIntakeView } from "@/components/gofer/pending-intake-view";
 import { PhaseBar } from "@/components/ui/phase";
 import { Pill } from "@/components/ui/pill";
 import { Dot } from "@/components/ui/pill";

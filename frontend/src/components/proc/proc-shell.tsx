@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useRouter, usePathname } from "next/navigation";
 import { ProcIcon, type ProcIconName } from "./proc-icon";
 import { ProcToast } from "./proc-ui";
-import { GoferMark } from "./arkim-mark";
+import { GoferMark } from "./gofer-mark";
 import { PROC_TENANT, PRIMARY_SITE } from "@/lib/proc-config";
 import { BRAND_NAME } from "@/lib/brand";
 import { useEvents } from "@/lib/queries";

@@ -10,9 +10,9 @@ import { PnMatch, CompatBadge, MatchScore, MatchBar } from "@/components/ui/matc
 import { PhaseBar } from "@/components/ui/phase";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "@/components/ui/card";
 import { ConfidenceIndicator } from "@/components/ui/confidence-indicator";
-import { TierHeader } from "@/components/arkim/tier-header";
-import { RunSummaryBar } from "@/components/arkim/run-summary-bar";
-import { AssetPanel } from "@/components/arkim/asset-panel";
+import { TierHeader } from "@/components/gofer/tier-header";
+import { RunSummaryBar } from "@/components/gofer/run-summary-bar";
+import { AssetPanel } from "@/components/gofer/asset-panel";
 import {
   ArrowRight, Check, X, ChevronDown, ChevronRight, Search, Filter,
   Send, Copy, History, Edit, External, Warn, Stack, Pin, Plus,

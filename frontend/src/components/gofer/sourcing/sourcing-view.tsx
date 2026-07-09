@@ -2,12 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { TierHeader } from "@/components/arkim/tier-header";
-import { VendorCard } from "@/components/arkim/sourcing/vendor-card";
-import { OutreachCard } from "@/components/arkim/sourcing/outreach-card";
-import { StickyActionBar } from "@/components/arkim/sourcing/sticky-action-bar";
-import { QuotesComparison } from "@/components/arkim/comparison/quotes-comparison";
-import { OrderPanel } from "@/components/arkim/orders/order-panel";
+import { TierHeader } from "@/components/gofer/tier-header";
+import { VendorCard } from "@/components/gofer/sourcing/vendor-card";
+import { OutreachCard } from "@/components/gofer/sourcing/outreach-card";
+import { StickyActionBar } from "@/components/gofer/sourcing/sticky-action-bar";
+import { QuotesComparison } from "@/components/gofer/comparison/quotes-comparison";
+import { OrderPanel } from "@/components/gofer/orders/order-panel";
 import { Dot } from "@/components/ui/pill";
 import { Warn } from "@/components/ui/icons";
 import { useGoferStore } from "@/store";
