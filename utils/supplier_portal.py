@@ -239,7 +239,7 @@ def propose_revision(supplier_domain: str, revisions: dict,
         )
         return item_id
     except Exception as exc:
-        print(f"[SupplierPortal] propose_revision failed for {dom!r}: {exc}")
+        log.error("[SupplierPortal] propose_revision failed for %r: %s", dom, exc)
         return None
 
 
@@ -276,7 +276,7 @@ def apply_revision(revision_id: str, *, set_by: Optional[str] = None) -> Optiona
         sr.set_review_item_status(revision_id, REVISION_STATUS_CONFIRMED)
         return record
     except Exception as exc:
-        print(f"[SupplierPortal] apply_revision failed for {revision_id!r}: {exc}")
+        log.error("[SupplierPortal] apply_revision failed for %r: %s", revision_id, exc)
         return None
 
 
@@ -295,7 +295,7 @@ def reject_revision(revision_id: str) -> Optional[dict]:
         sr.set_review_item_status(revision_id, REVISION_STATUS_REJECTED)
         return sr.get_review_item(revision_id)
     except Exception as exc:
-        print(f"[SupplierPortal] reject_revision failed for {revision_id!r}: {exc}")
+        log.error("[SupplierPortal] reject_revision failed for %r: %s", revision_id, exc)
         return None
 
 
@@ -344,5 +344,6 @@ def _apply_scope_no_lifecycle(domain: str, payload: dict,
                 return None
         return sr.lookup_by_domain(domain)
     except Exception as exc:
-        print(f"[SupplierPortal] _apply_scope_no_lifecycle failed for {domain!r}: {exc}")
+        log.error("[SupplierPortal] _apply_scope_no_lifecycle failed for %r: %s",
+                  domain, exc)
         return None
