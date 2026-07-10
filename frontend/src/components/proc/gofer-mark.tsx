@@ -1,17 +1,18 @@
 import { type CSSProperties } from "react";
+import Image from "next/image";
 
 /**
- * GoferMark — the Gofer logo mark, geometry taken VERBATIM from the source
- * vector (frontend/public/arkim-mark.svg): the top bar + three descending arrow
- * bands. The dark background rect from the source asset is omitted (transparent),
- * and fill is driven by `currentColor` so the same component serves both uses:
- *   - static top brand (inherits the brand text colour)
- *   - the loader, which wraps this and animates a blue cascade over the shapes.
+ * GoferMark — the Gofer brand mark shown in the top-left header next to the
+ * "gofer" wordmark.
  *
- * Shapes are listed top -> bottom (top bar, upper, middle, bottom band) so a
- * :nth-child cascade in the loader flows downward. Coordinates are unchanged from
- * the source — only document order differs (the shapes do not overlap), so the
- * rendered mark is identical to the source.
+ * INTERIM: this renders a raster stand-in logo (a white geometric gopher face
+ * on an orange rounded square, `public/gofer-mark.webp`, 256px downscaled from a
+ * 1024px source). It is a placeholder pending the real vector logo — when that
+ * arrives, swap the asset out here and every call site is updated at once (the
+ * component is the single seam, so keep it as the wrapper).
+ *
+ * Explicit width/height (= `size`) reserve the box so there's no layout shift on
+ * load. Uses next/image to match the repo convention (and its ESLint rule).
  */
 export function GoferMark({
   size = 32,
@@ -23,20 +24,14 @@ export function GoferMark({
   style?: CSSProperties;
 }) {
   return (
-    <svg
-      className={className}
-      style={style}
-      viewBox="0 0 500 500"
+    <Image
+      src="/gofer-mark.webp"
+      alt="Gofer"
       width={size}
       height={size}
-      fill="currentColor"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path d="M290.86,124.05h-25.6v17.56h-25.6v-17.56H98.88l36.87,46.84h233.41l36.87-46.84h-115.18Z" />
-      <polygon points="316.45 270.07 348.45 238.07 316.45 206.08 188.47 206.08 188.47 206.08 188.47 174.08 156.47 206.08 188.47 238.07 316.45 238.07 316.45 238.07 316.45 270.07" />
-      <polygon points="335.65 305.26 303.66 273.27 201.27 273.27 201.27 241.27 169.27 273.27 201.27 305.26 303.66 305.26 303.66 337.26 335.65 305.26" />
-      <polygon points="278.06 404.45 310.05 372.45 278.06 340.46 226.87 340.46 226.87 340.46 226.87 308.46 194.87 340.46 226.87 372.45 278.06 372.45 278.06 372.45 278.06 404.45" />
-    </svg>
+      className={className}
+      style={style}
+      priority
+    />
   );
 }
