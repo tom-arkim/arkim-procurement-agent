@@ -73,7 +73,16 @@ class PartTypeProfile:
         is being established (used as documented reference; the question-flow
         engine tonight uses q2_template for the batched clarification).
       - q2_template: the batched highest-entropy BLOCKING question, asked verbatim
-        (no LLM phrasing call) when identity is absent and the type is known.
+        (no LLM phrasing call) when identity is absent and the type is known. For
+        an ANCHORED component this combines a PARENT-identity clause (the parent
+        make/model) with a COMPONENT-dims clause; the parent clause is only
+        legitimate when the parent is NOT already known — see q2_component_clause.
+      - q2_component_clause: ANCHORED types only — the COMPONENT-dimensions half
+        of the q2 (shaft size / cartridge-vs-component / single-vs-double / ...),
+        asked when the parent identity is ALREADY captured in `_component_of` so
+        the intake leads with the genuinely-undetermined component dims instead
+        of re-asking the parent (the Goulds-3196 over-clarification fix). Empty
+        for DIRECT types (their q2_template is asked verbatim, no split).
       - blocking_attrs: the attributes that must be captured before sourcing.
       - refinement_attrs: nice-to-haves that refine but do not block.
       - variant_selecting_attrs: the subset of blocking_attrs that selects a
@@ -96,6 +105,7 @@ class PartTypeProfile:
     configurable: bool
     identity_anchor_question: str
     q2_template: str
+    q2_component_clause: str = ""   # ANCHORED types: dims half, asked when parent known
     blocking_attrs: List[str] = field(default_factory=list)
     refinement_attrs: List[str] = field(default_factory=list)
     variant_selecting_attrs: List[str] = field(default_factory=list)
@@ -156,6 +166,16 @@ _PROFILES: Dict[str, PartTypeProfile] = {
         q2_template=(
             "What pump make/model is it on, and any old-part code? If visible: "
             "shaft size, and is it a cartridge or component seal, single or double?"
+        ),
+        # The component-dims half of the q2, asked when the parent identity is
+        # ALREADY captured in `_component_of` (Goulds-3196 over-clarification fix).
+        # Leads with the genuinely-undetermined component dims (shaft_size /
+        # cartridge-vs-component / single-vs-double — the registry blocking_attrs
+        # this clause phrases), then the old-part code (a COMPONENT identifier,
+        # not the parent). No parent-identity ask, no "is it OEM?".
+        q2_component_clause=(
+            "What's the shaft size, and is it a cartridge or component seal, "
+            "single or double? An old-part code helps too, if visible."
         ),
         blocking_attrs=[
             "shaft_size",
@@ -344,6 +364,55 @@ def is_known_type(part_type: Optional[str]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# ANCHORED-component clarification helper — the parent-already-known case.
+# ---------------------------------------------------------------------------
+# When an ANCHORED component's parent identity is already captured in
+# `_component_of` (the Goulds-3196 case), the intake must NOT re-ask the
+# parent (the q2_template's first clause); it leads with the genuinely-
+# undetermined component dims (the profile's q2_component_clause). A confidence
+# floor guards a low-confidence parent capture so an uncertain one still asks.
+# DIRECT types and the no-parent ANCHORED case keep the verbatim q2_template.
+ANCHORED_PARENT_KNOWN_CONF = 60  # classifier "reasonably clear" floor (see §_CLASSIFIER_SYSTEM)
+
+
+def is_anchored_parent_known(specs: dict) -> bool:
+    """True when an ANCHORED component's parent identity is already captured at
+    reasonable confidence — the condition under which the parent-identity half
+    of the q2_template is suppressed. Returns False for DIRECT types, for an
+    ANCHORED type with no `_component_of`, or when the classification confidence
+    is below the floor (an uncertain parent capture should still be asked for)."""
+    part_type = specs.get("_classified_type")
+    if not isinstance(part_type, str) or not part_type:
+        return False
+    profile = get_profile(part_type)
+    if profile.regime != REGIME_ANCHORED:
+        return False
+    component_of = specs.get("_component_of")
+    if not isinstance(component_of, str) or not component_of.strip():
+        return False
+    try:
+        conf = int(float(specs.get("_classified_confidence") or 0))
+    except (TypeError, ValueError):
+        conf = 0
+    return conf >= ANCHORED_PARENT_KNOWN_CONF
+
+
+def anchored_component_question(specs: dict) -> Optional[str]:
+    """The clarification question for an ANCHORED component whose parent is
+    already known: a short parent acknowledgement (so the user sees their
+    stated parent was captured) followed by the profile's component-dims clause.
+    Returns None when the parent is NOT known (caller falls back to the
+    verbatim q2_template so the parent ask still fires). Never raises."""
+    if not is_anchored_parent_known(specs):
+        return None
+    profile = get_profile(specs.get("_classified_type"))
+    if not profile.q2_component_clause:
+        return None
+    parent = (specs.get("_component_of") or "").strip()
+    return f"For the {parent}: {profile.q2_component_clause}"
+
+
 # variant_selecting_attr -> real AssetSpecs field mapping
 # ---------------------------------------------------------------------------
 # A `variant_selecting_attr` is a registry-side label; the actual AssetSpecs
