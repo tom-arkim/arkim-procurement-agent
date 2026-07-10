@@ -1159,17 +1159,34 @@ class IntakeAgent:
         # the never-re-ask ledger prevents repeats without colliding with real
         # spec fields (it is `_-prefixed -> filtered from context/display).
         if _intake_type_aware():
-            from utils.procurement_agent.part_type_registry import get_profile, is_known_type
+            from utils.procurement_agent.part_type_registry import (
+                get_profile, is_known_type, anchored_component_question,
+            )
             classified_type = merged.get("_classified_type")
             if (is_known_type(classified_type)
                     and not _has_identity(merged)
                     and "_q2_asked" not in asked):
                 profile = get_profile(classified_type)
                 if profile.q2_template:
+                    # ANCHORED component whose parent identity is already
+                    # captured in `_component_of` (Goulds-3196 case): the
+                    # q2_template's first clause asks for the parent, which is
+                    # already known. Suppress the parent-identity half and lead
+                    # with the genuinely-undetermined component dims instead —
+                    # ask the RIGHT question, do not skip clarification (the
+                    # blocked_need_either bar above is unchanged; this turn
+                    # still returns a question, never a commit). DIRECT types
+                    # and the no-parent ANCHORED case fall through to the
+                    # verbatim q2_template (parent ask still fires when the
+                    # parent was NOT stated). anchored_component_question
+                    # returns None unless the parent is known at reasonable
+                    # confidence, so the verbatim template is the safe default.
+                    anchored_q = anchored_component_question(merged)
+                    question = anchored_q if anchored_q else profile.q2_template
                     asked.append("_q2_asked")
                     merged["_asked_fields"] = asked
                     merged["_intake_turns"] = this_turn
-                    return profile.q2_template, None
+                    return question, None
 
         # Fix #1 — identity-first opener: first clarification turn + no part identity.
         if prior_turns == 0 and not _has_identity(merged):
