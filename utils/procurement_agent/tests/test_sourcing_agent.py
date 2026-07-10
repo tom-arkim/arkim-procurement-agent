@@ -23,6 +23,26 @@ from utils.procurement_agent.agents.sourcing_agent import (
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _isolate_tier1_catalog_path(monkeypatch):
+    """Force the Night-5 registry-backed Tier-1 path (TIER1_V2) OFF so these
+    catalog-path unit tests exercise ONLY the patched JSON catalog.
+
+    Without this, a live data/supplier_registry.sqlite holding a real onboarded
+    supplier (e.g. DXP Enterprises, onboarded this week) makes the matcher path
+    (tier1_matcher.tier1_v2_active() reads supplier_registry.TIER1_V2 live)
+    return that supplier and override the temp fixture catalog — a
+    TEST-ISOLATION gap, not a production bug (the registry returning an
+    onboarded supplier is correct behavior). These catalog-path tests were
+    always meant to test the JSON path in isolation; they passed only while the
+    registry was empty. The TIER1_V2 live path has its own dedicated tests
+    (test_tier1_matcher / test_tier1_runtime_live); this file is the JSON-catalog
+    path in isolation. Mirrors the existing monkeypatch idiom in
+    test_supplier_scope / test_tier1_matcher (setattr supplier_registry.TIER1_V2).
+    """
+    from utils import supplier_registry
+    monkeypatch.setattr(supplier_registry, "TIER1_V2", False)
+
 _CATALOG = {
     "suppliers": [
         {
