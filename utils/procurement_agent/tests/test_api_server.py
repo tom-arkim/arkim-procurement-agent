@@ -72,6 +72,57 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(api_server, "_SessionFactory", TestSession)
     monkeypatch.setattr(api_server, "_messages", {})  # isolate in-memory chat store
 
+    # Force the module-level DEMO_MODE flag False. It's read once at import
+    # (api_server:84); if api_server was first imported under DEMO_MODE=1 — e.g.
+    # by test_demo_mode running first in the same session, which reload()s the
+    # module under DEMO_MODE=true — the attr stays True for the rest of the
+    # session and the allowlist middleware + /api/health `demo_mode` field reflect
+    # the demo spine (test_health asserts `demo_mode: False`; create_run would 422
+    # without X-Session-Id). Mirrors the same guard in test_run_capture_live's
+    # `api` fixture. The plain app here is always built DEMO_MODE-off, so this is
+    # a no-op in the normal case and only protects against the leaked-True case.
+    monkeypatch.setattr(api_server, "DEMO_MODE", False)
+
+    # Pin the flywheel flags ON and reset their process-global failure counters
+    # so test_health's `capture_failures: 0, label_failures: 0` assertion holds
+    # regardless of import order or what ran earlier.
+    #
+    # RUN_CAPTURE is read once at import in utils/run_capture.py:61 and
+    # utils/run_labels.py:70. .env is loaded by api_server.load_dotenv() ABOVE —
+    # NOT by pytest itself — so if run_capture was imported earlier in the
+    # session WITHOUT api_server (e.g. test_run_capture collected/run first, in a
+    # plain `uv run pytest` with no shell RUN_CAPTURE), the flag bound at import
+    # is False and stays False (the module is cached in sys.modules), so
+    # /api/health omits the capture_failures/label_failures keys entirely and
+    # test_health fails with missing keys. The flywheel fields are part of the
+    # health contract (committed in 3e66c71); pin the module attrs True here so
+    # the contract holds independent of which module was imported first.
+    #
+    # The counters (run_capture._capture_failures:116, run_labels._label_failures
+    # :118) are module-level accumulators that other files' fail-soft tests
+    # deliberately increment and only reset at *setup* (not teardown) — so a
+    # polluter that ran last (test_run_capture::test_forced_write_failure_*,
+    # test_run_labels::test_read_failure_is_fail_soft,
+    # test_run_capture_live::test_health_flag_on_reflects_failures) leaks a
+    # non-zero count into this session, making test_health order-dependent
+    # (green in alphabetical order, fails under --lf / reverse / any reorder).
+    # Resetting to 0 here restores the fresh-process state test_health asserts.
+    from utils import run_capture as _rc, run_labels as _rl
+    monkeypatch.setattr(_rc, "RUN_CAPTURE", True)
+    monkeypatch.setattr(_rl, "RUN_CAPTURE", True)
+    # Pin the capture/label stores at tmp_path too: with the flags ON, the live
+    # request path (create_run, /messages, confirm-intake) emits capture rows —
+    # point them at the throwaway tmp DB so this file never writes the real
+    # data/run_capture.sqlite / data/run_labels.sqlite (mirrors the cap_on /
+    # label_api fixture isolation). No test here reads these stores; this is
+    # purely to keep the flag-ON path from polluting dev data.
+    monkeypatch.setattr(_rc, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(_rc, "_DB_PATH", str(tmp_path / "run_capture.sqlite"))
+    monkeypatch.setattr(_rl, "_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(_rl, "_DB_PATH", str(tmp_path / "run_labels.sqlite"))
+    _rc.reset_failures()
+    _rl.reset_failures()
+
     client = TestClient(api_server.app)
     client._api_server = api_server  # expose module for per-test mocking
     return client
