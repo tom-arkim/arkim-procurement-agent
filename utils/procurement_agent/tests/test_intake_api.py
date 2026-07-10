@@ -185,6 +185,36 @@ class TestIntakeFlagOff:
         assert resp.status_code == 404
         assert resp.json() == {"detail": "Not Found"}
 
+    def test_flag_off_404_byte_identical_to_unknown_route(self, api, monkeypatch):
+        """Flag-off intake 404 is byte-identical to FastAPI's unknown-route 404
+        (status + body), so flag-off is indistinguishable from a route that
+        never existed (no oracle, no leakage) — mirrors the portal inertness."""
+        monkeypatch.setenv("INTAKE_CHANNELS_V1", "0")
+        intake_resp = api.post("/api/intake/email", json=_email_payload())
+        unknown_resp = api.post("/api/this-route-does-not-exist", json={})
+        assert intake_resp.status_code == unknown_resp.status_code == 404
+        assert intake_resp.json() == unknown_resp.json() == {"detail": "Not Found"}
+
+    def test_flag_off_leaves_zero_runs(self, api, monkeypatch):
+        """Flag-off intake never births a run row (no DB leakage)."""
+        monkeypatch.setenv("INTAKE_CHANNELS_V1", "0")
+        api.post("/api/intake/email", json=_email_payload())
+        assert api.get("/api/runs").json() == []
+
+    def test_flag_off_leaves_zero_held_events(self, api, monkeypatch, tmp_path):
+        """Flag-off intake never holds an event (no held-event row leakage)."""
+        import utils.intake_channels as ic
+        monkeypatch.setattr(ic, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(ic, "_DB_PATH", str(tmp_path / "intake_channels.sqlite"))
+        monkeypatch.setenv("INTAKE_CHANNELS_V1", "0")
+        api.post("/api/intake/email", json=_email_payload(
+            sender="stranger@bayfoods.com"))  # would be held if flag on
+        # The store DDL is created lazily on first connection; open via the
+        # module so the table exists even when flag-off short-circuited the write.
+        with ic._get_conn() as conn:
+            n = conn.execute("SELECT COUNT(*) FROM intake_held_events").fetchone()[0]
+        assert n == 0
+
 
 # ---------------------------------------------------------------------------
 # T2 / T5 — the email→event→sourcing-run flow (live-faithful, real API).
@@ -306,6 +336,32 @@ class TestIntakeSafeRejection:
         resp = api.post("/api/intake/email", json=_email_payload(
             to="procurement@arkim.ai"))
         assert resp.json()["status"] == "TENANT_UNKNOWN"
+
+    def test_garbage_inbound_no_run_no_pipeline(self, intake_api, monkeypatch):
+        """Malformed/garbage inbound is safely rejected — nothing enters the
+        pipeline (no run, no held event, no parse). A valid tenant address but
+        an empty body AND no attachments ⇒ REJECTED_MALFORMED at the consumer."""
+        api = intake_api
+        import utils.intake_channels as ic
+        # A known sender with an empty message → validate() rejects (no text,
+        # no attachments). No run, no parse call.
+        ic.add_known_sender("bayfoods", "plant@bayfoods.com", is_test=True)
+        parsed = []
+        monkeypatch.setattr(ic, "parse_event_to_specs",
+                            lambda *a, **k: parsed.append(1) or {})
+        resp = api.post("/api/intake/email", json=_email_payload(
+            body="   ", attachments=[]))
+        body = resp.json()
+        assert body["status"] in ("REJECTED_MALFORMED", "NEEDS_CLARIFICATION")
+        assert body["run_id"] is None
+        assert parsed == []  # the parser was never invoked (validate() rejected)
+
+    def test_safe_rejection_leaves_no_run_row(self, intake_api, monkeypatch):
+        """A safe-rejection outcome (TENANT_UNKNOWN / REJECTED) leaves no run."""
+        api = intake_api
+        api.post("/api/intake/email", json=_email_payload(
+            to="intake+nonexistent@arkim.ai"))
+        assert api.get("/api/runs").json() == []
 
 
 # ---------------------------------------------------------------------------
