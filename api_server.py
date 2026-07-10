@@ -5192,3 +5192,128 @@ def intake_confirm_sender(token: str, request: Request, background_tasks: Backgr
         "reason": outcome.reason,
         "clarify_attrs": outcome.clarify_attrs,
     }
+
+
+
+class IntakeSmsInbound(BaseModel):
+    """An inbound SMS/MMS webhook payload (contract-stub — T3). The adapter
+    accepts the normalized envelope; a live path would receive a Twilio webhook
+    and map it to this shape. Tenant resolution is from the inbound number
+    (number→tenant map, same shape as email plus-addressing).
+
+    `from_number` -- the sender (customer side, E.164).
+    `to_number`   -- the tenant's dedicated inbound number (tenant signal).
+    `body`        -- the SMS text.
+    `media`       -- MMS media (base64-encoded images, same shape as email
+                     attachments — carried through to the IntakeAgent, I4).
+    `message_sid` -- the provider message id (channel metadata)."""
+    from_number: str = Field(..., alias="from")
+    to_number: str = Field(..., alias="to")
+    body: str = ""
+    media: List[Dict[str, Any]] = Field(default_factory=list)
+    message_sid: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/api/intake/sms")
+def intake_sms(body: IntakeSmsInbound, request: Request, background_tasks: BackgroundTasks):
+    """The SMS adapter (contract-stub, T3) -- inbound SMS/MMS -> tenant
+    resolution (number->tenant map) -> sender check -> parse -> intake event ->
+    consumer -> sourcing run (or NEEDS_CLARIFICATION / confirm / safe reject).
+    Same consumer, same seam, same gates as the email adapter. MMS media
+    carried through to the IntakeAgent (I4). Flag-gated: off -> 404.
+
+    Thin on purpose: the point is the CONTRACT (every channel produces the same
+    IntakeEvent + feeds the same consumer), not the channel. Live SMS
+    provisioning (Twilio creds, webhook auth) is out of scope; the reply is
+    recorded, not sent (no SMS transport exists yet)."""
+    _require_intake_enabled()
+    tenant_key = intake_channels.resolve_tenant_from_number(body.to_number)
+    if tenant_key is None:
+        return {"status": "TENANT_UNKNOWN", "run_id": None,
+                "detail": f"no tenant for number {body.to_number!r}"}
+
+    event = intake_channels.IntakeEvent(
+        tenant_key=tenant_key,
+        channel=intake_channels.IntakeChannel.SMS,
+        sender=body.from_number,
+        text_body=body.body or "",
+        attachments=_attachments_from_payload(body.media),
+        channel_metadata={"message_sid": body.message_sid, "to": body.to_number},
+    )
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_intake_event(
+        event,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }
+
+
+class IntakeVoiceInbound(BaseModel):
+    """An inbound voice webhook payload (contract-stub -- T3). Voice = a
+    transcript + metadata, NOT the conversational agent (explicitly out of
+    scope). The transcript is the text the parser proposes specs from; the
+    caller's number is the sender; the tenant's inbound number resolves the
+    tenant.
+
+    `from_number`  -- the caller (customer side, E.164).
+    `to_number`    -- the tenant's dedicated inbound number (tenant signal).
+    `transcript`   -- the call transcript (the text body for parsing).
+    `call_sid`     -- the provider call id (channel metadata).
+    `recording_url`-- optional recording ref (channel metadata, not fetched)."""
+    from_number: str = Field(..., alias="from")
+    to_number: str = Field(..., alias="to")
+    transcript: str = ""
+    call_sid: Optional[str] = None
+    recording_url: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/api/intake/voice")
+def intake_voice(body: IntakeVoiceInbound, request: Request, background_tasks: BackgroundTasks):
+    """The voice adapter (contract-stub, T3) -- inbound call transcript + metadata
+    -> tenant resolution (number->tenant) -> sender check -> parse -> intake event
+    -> consumer -> sourcing run (or NEEDS_CLARIFICATION / confirm / safe reject).
+    Same consumer, same seam, same gates. The CONVERSATIONAL voice agent is
+    explicitly out of scope; this is a transcript-in, structured-request-out
+    contract stub. Flag-gated: off -> 404. Thin on purpose (the contract, not
+    the channel)."""
+    _require_intake_enabled()
+    tenant_key = intake_channels.resolve_tenant_from_number(body.to_number)
+    if tenant_key is None:
+        return {"status": "TENANT_UNKNOWN", "run_id": None,
+                "detail": f"no tenant for number {body.to_number!r}"}
+
+    event = intake_channels.IntakeEvent(
+        tenant_key=tenant_key,
+        channel=intake_channels.IntakeChannel.VOICE,
+        sender=body.from_number,
+        text_body=body.transcript or "",
+        attachments=[],  # voice carries no image attachments (transcript only)
+        channel_metadata={"call_sid": body.call_sid, "to": body.to_number,
+                          "recording_url": body.recording_url},
+    )
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_intake_event(
+        event,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }

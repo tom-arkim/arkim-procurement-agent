@@ -172,13 +172,16 @@ class TestIntakeFlagOff:
 
     def test_sms_endpoint_absent_when_flag_off(self, api, monkeypatch):
         monkeypatch.setenv("INTAKE_CHANNELS_V1", "0")
-        resp = api.post("/api/intake/sms", json={})
+        # A well-formed body so a 422 (validation) can't mask the flag-off 404.
+        resp = api.post("/api/intake/sms", json={
+            "to": "+15555550100", "from": "+15555550111", "body": "hi"})
         assert resp.status_code == 404
         assert resp.json() == {"detail": "Not Found"}
 
     def test_voice_endpoint_absent_when_flag_off(self, api, monkeypatch):
         monkeypatch.setenv("INTAKE_CHANNELS_V1", "0")
-        resp = api.post("/api/intake/voice", json={})
+        resp = api.post("/api/intake/voice", json={
+            "to": "+15555550100", "from": "+15555550111", "transcript": "hi"})
         assert resp.status_code == 404
         assert resp.json() == {"detail": "Not Found"}
 
@@ -376,3 +379,143 @@ class TestIntakeNoOrderPath:
         assert orders in ([], {"orders": []}, {"items": []}) or (
             isinstance(orders, dict) and not orders.get("orders"))
         assert touches == [], f"intake reached order surface: {touches}"
+
+
+# ---------------------------------------------------------------------------
+# T3 — SMS + voice contract-stubs: same intake event, same consumer, same seam.
+# ---------------------------------------------------------------------------
+
+class TestSmsVoiceContractStubs:
+    def _enable_number_tenant(self, monkeypatch):
+        """Map an inbound number to the demo tenant for SMS/voice tests."""
+        import utils.intake_channels as ic
+        monkeypatch.setattr(ic, "_NUMBER_TENANT_MAP", {"+15555550100": "bayfoods"})
+
+    def test_sms_known_sender_fires_run(self, intake_api, monkeypatch):
+        api = intake_api
+        self._enable_number_tenant(monkeypatch)
+        monkeypatch.setattr(api._api_server, "_run_sourcing_background",
+                            lambda *a, **k: None)
+        _mock_intake_sufficient(monkeypatch, api)
+        # Register the SMS sender as known for the tenant (sender = phone number).
+        import utils.intake_channels as ic
+        ic.add_known_sender("bayfoods", "+15555550111", is_test=True)
+
+        resp = api.post("/api/intake/sms", json={
+            "to": "+15555550100", "from": "+15555550111",
+            "body": "Goulds 3196 5HP pump", "message_sid": "SMxxx",
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "RUN_CREATED"
+        assert body["run_id"]
+        detail = api.get(f"/api/runs/{body['run_id']}").json()
+        assert detail["phase"] == "sourcing"
+
+    def test_sms_mms_media_carried_to_intake_agent(self, intake_api, monkeypatch):
+        api = intake_api
+        self._enable_number_tenant(monkeypatch)
+        monkeypatch.setattr(api._api_server, "_run_sourcing_background",
+                            lambda *a, **k: None)
+        agent = _mock_intake_sufficient(monkeypatch, api)
+        import utils.intake_channels as ic
+        ic.add_known_sender("bayfoods", "+15555550111", is_test=True)
+
+        resp = api.post("/api/intake/sms", json={
+            "to": "+15555550100", "from": "+15555550111", "body": "see photo",
+            "media": [_png_attachment_b64()],
+        })
+        assert resp.json()["status"] == "RUN_CREATED"
+        # MMS media reached the IntakeAgent images kwarg (I4).
+        call = agent.run.call_args
+        assert len(call.args[1]["images"]) == 1
+
+    def test_sms_unknown_sender_confirm_step(self, intake_api, monkeypatch):
+        api = intake_api
+        self._enable_number_tenant(monkeypatch)
+        _mock_intake_sufficient(monkeypatch, api)
+        resp = api.post("/api/intake/sms", json={
+            "to": "+15555550100", "from": "+15555550199", "body": "hi",
+        })
+        assert resp.json()["status"] == "UNKNOWN_SENDER_CONFIRM_SENT"
+        assert resp.json()["run_id"] is None
+
+    def test_sms_no_tenant_for_number(self, intake_api, monkeypatch):
+        api = intake_api
+        self._enable_number_tenant(monkeypatch)
+        resp = api.post("/api/intake/sms", json={
+            "to": "+19999990000", "from": "+15555550111", "body": "hi",
+        })
+        assert resp.json()["status"] == "TENANT_UNKNOWN"
+        assert resp.json()["run_id"] is None
+
+    def test_voice_transcript_known_caller_fires_run(self, intake_api, monkeypatch):
+        api = intake_api
+        self._enable_number_tenant(monkeypatch)
+        monkeypatch.setattr(api._api_server, "_run_sourcing_background",
+                            lambda *a, **k: None)
+        _mock_intake_sufficient(monkeypatch, api)
+        import utils.intake_channels as ic
+        ic.add_known_sender("bayfoods", "+15555550111", is_test=True)
+
+        resp = api.post("/api/intake/voice", json={
+            "to": "+15555550100", "from": "+15555550111",
+            "transcript": "I need a Goulds 3196 5HP pump",
+            "call_sid": "CAxxx", "recording_url": "https://rec/x",
+        })
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "RUN_CREATED"
+        detail = api.get(f"/api/runs/{body['run_id']}").json()
+        assert detail["phase"] == "sourcing"
+
+    def test_voice_ambiguous_transcript_needs_clarification(self, intake_api, monkeypatch):
+        api = intake_api
+        self._enable_number_tenant(monkeypatch)
+        _mock_intake_insufficient(monkeypatch, api, follow_up="Which model?")
+        import utils.intake_channels as ic
+        ic.add_known_sender("bayfoods", "+15555550111", is_test=True)
+        resp = api.post("/api/intake/voice", json={
+            "to": "+15555550100", "from": "+15555550111",
+            "transcript": "need a pump",
+        })
+        assert resp.json()["status"] == "NEEDS_CLARIFICATION"
+        assert resp.json()["run_id"] is None
+
+    def test_sms_and_voice_produce_same_event_contract(self, intake_api, monkeypatch):
+        """The point of T3: both channels produce the SAME intake event shape
+        and feed the SAME consumer. Assert the consumer sees channel=SMS vs
+        channel=VOICE and otherwise the same contract."""
+        api = intake_api
+        self._enable_number_tenant(monkeypatch)
+        monkeypatch.setattr(api._api_server, "_run_sourcing_background",
+                            lambda *a, **k: None)
+        seen = {}
+        import utils.intake_channels as ic
+        ic.add_known_sender("bayfoods", "+15555550111", is_test=True)
+        real_consume = ic.consume_intake_event
+
+        def _spy(event, **kw):
+            seen["channel"] = event.channel
+            seen["tenant_key"] = event.tenant_key
+            seen["sender"] = event.sender
+            seen["text_body"] = event.text_body
+            return real_consume(event, **kw)
+        monkeypatch.setattr(ic, "consume_intake_event", _spy)
+        _mock_intake_sufficient(monkeypatch, api)
+
+        api.post("/api/intake/sms", json={
+            "to": "+15555550100", "from": "+15555550111", "body": "Goulds 3196"})
+        assert seen["channel"] == ic.IntakeChannel.SMS
+        assert seen["tenant_key"] == "bayfoods"
+        assert seen["sender"] == "+15555550111"
+        assert seen["text_body"] == "Goulds 3196"
+
+        api.post("/api/intake/voice", json={
+            "to": "+15555550100", "from": "+15555550111",
+            "transcript": "Goulds 3196"})
+        assert seen["channel"] == ic.IntakeChannel.VOICE
+        # Same tenant + sender + body contract; only the channel differs.
+        assert seen["tenant_key"] == "bayfoods"
+        assert seen["sender"] == "+15555550111"
+        assert seen["text_body"] == "Goulds 3196"

@@ -263,6 +263,42 @@ def tenant_lookup(tenant_key: str) -> Optional[Dict[str, str]]:
     return get_tenant_map().get(tenant_key.strip().lower())
 
 
+# SMS/voice: number -> tenant_key mapping (same shape as email plus-addressing,
+# decision 2). Fixture-overridable. Production would back this from a
+# number-provisioning table; the mapping is the address→tenant resolution for
+# telephony channels, kept in the same spirit (identity encoded in the address).
+_NUMBER_TENANT_MAP: Dict[str, str] = {
+    # Default demo tenant — a tenant's dedicated inbound SMS/voice number.
+    "+15555550100": "bayfoods",
+}
+
+
+def get_number_tenant_map() -> Dict[str, str]:
+    """The live number→tenant map (tests monkeypatch _NUMBER_TENANT_MAP)."""
+    return _NUMBER_TENANT_MAP
+
+
+def resolve_tenant_from_number(number: str) -> Optional[str]:
+    """Resolve a tenant_key from an inbound SMS/voice number. Returns the
+    tenant_key or None when the number maps to no tenant. Pure + testable.
+
+    Mirrors resolve_tenant_from_address: the inbound number is the tenant
+    signal for telephony channels (a tenant's dedicated number). E.164
+    normalized (strip whitespace/dashes; keep the leading +)."""
+    if not number:
+        return None
+    n = "".join(number.split())            # collapse internal spaces
+    n = n.replace("-", "").replace("(", "").replace(")", "")
+    n = n.strip()
+    if not n:
+        return None
+    key = get_number_tenant_map().get(n)
+    if not key:
+        # Try without a leading "+" (some webhooks deliver the bare number).
+        key = get_number_tenant_map().get(n.lstrip("+"))
+    return key or None
+
+
 # ---------------------------------------------------------------------------
 # Standalone provenance store — known senders + held unknown-sender events.
 # Mirrors claim_tokens: own sqlite file, token hashed at rest, is_test marking,
