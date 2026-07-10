@@ -850,3 +850,59 @@ In the admin inspector (`/admin`), token-gated as the rest of that surface.
 - **Referrer policy:** set once via the page `metadata.referrer = "no-referrer"`
   export (the single source); no inline body `<meta>`. The API also sets it
   server-side.
+
+---
+
+## Multi-channel intake (Night 8 — INTAKE_CHANNELS_V1)
+
+Requests are born in email, texts, and phone calls — not in the app. The
+channel-agnostic intake spine (`utils/intake_channels.py`) is a transport into
+the EXISTING intake pipeline, never a parallel pipeline, never an auto-purchase
+trigger. **All intake surface is flag-gated (`INTAKE_CHANNELS_V1`, default OFF):
+flag off ⇒ the intake endpoints do not exist (404 byte-identical to an unknown
+route).**
+
+- **One normalized intake event.** Every channel adapter (email / SMS / voice)
+  produces one `IntakeEvent` (tenant, channel, sender + verification, text body,
+  photo attachments, channel metadata, received_at); ONE consumer feeds it into
+  the existing seam (`confirm_intake` → `_run_sourcing_background`) and fires the
+  sourcing run exactly as an in-app request does. Same flags, same gates. An
+  intake-fired run is indistinguishable from an in-app run except its tenant is
+  attributed from the channel address (not the Caller).
+- **Per-tenant addressing (I3 — plus-addressing).** Email uses
+  `intake+<tenant-key>@arkim.ai` (the plus-local-part is the tenant signal —
+  mirrors the claim-token tenant-keying pattern: identity encoded in the
+  address, one credential set, scales without per-tenant provisioning; Gmail
+  supports RFC 5233 subaddressing natively). SMS/voice use a number→tenant map
+  (same shape). A bare `intake@` or unknown number ⇒ TENANT_UNKNOWN (no run).
+- **Unknown-sender defence.** A sender not recognized for the tenant is held +
+  sent a stubbed "confirm this came from your plant" reply (token hashed at
+  rest, `is_test=1`); no sourcing run is created from an unverified stranger.
+  Known senders flow straight through. A sender known to tenant A is NOT known
+  to tenant B (cross-tenant isolation; the address resolves the tenant).
+- **Parser honesty (propose-don't-invent).** The parser runs the EXISTING
+  `IntakeAgent` over the message text + photo attachments (the same extractor
+  the in-app intake chat / upload path uses). Ambiguous / underdetermined
+  messages land as NEEDS_CLARIFICATION with a stubbed clarifying reply — never a
+  confidently-wrong request entering sourcing. A family-variant block (the
+  existing `confirm_intake` guard) ⇒ NEEDS_CLARIFICATION naming the missing
+  attrs. The existing intake clarification logic is fed AS IT IS (not fixed).
+- **Attachments (I4).** A nameplate photo in an email/MMS flows from the
+  attachment bytes directly into the `IntakeAgent` `images` kwarg — the same
+  image-handling the in-app upload path uses (no disk I/O).
+- **Replies.** Inbound gets a stubbed ack / clarify / confirm reply via
+  `email_sender` under the `EMAIL_SEND_ENABLED` double-gate — zero live sends
+  (the conftest safety net forces the gate off; SMS/voice record replies, no
+  transport exists yet).
+- **Auto-order is explicitly out.** Nothing in the intake surface places,
+  approves, or advances an order — the consumer calls only `fire_sourcing_run`
+  (run creation + the confirm-intake→sourcing transition) + the reply sink. The
+  no-order property is pinned by a test that instruments `orders.create_order` /
+  `place_order` and asserts they are never reached across every consumer
+  outcome.
+- **Intake vs RFQ-reply separation.** Inbound intake mail is keyed on the
+  `intake+<tenant>@` `To` address, which the RFQ reply path
+  (`inbox_reader.fetch_replies`, which reads `procurement@` with NO recipient
+  filter) never targets as an outbound; the live path would use a distinct
+  intake mailbox/label. The adapter only processes intake-addressed mail, so
+  cross-stream is structurally impossible at the adapter boundary.
