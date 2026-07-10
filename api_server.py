@@ -5012,3 +5012,183 @@ def admin_reject_revision(revision_id: str, role: str = Depends(require_admin)):
     if out is None:
         raise HTTPException(status_code=404, detail="Revision not found")
     return {"ok": True, "revision": out}
+
+
+# ===========================================================================
+# Night 8 — Multi-channel intake surface (INTAKE_CHANNELS_V1-gated).
+# ===========================================================================
+# The channel-agnostic intake endpoints: the email adapter (fully working in
+# tests) + SMS/voice contract-stubs (T3) + the unknown-sender confirm step.
+# Every endpoint feeds the SAME single intake consumer (utils/intake_channels)
+# which maps a valid event into the existing intake pipeline seam and fires the
+# sourcing run exactly as an in-app request does. A transport, never a parallel
+# pipeline, never an auto-purchase trigger (the no-order property is pinned in
+# test_intake_channels + test_api_server).
+#
+# Flag gating (guardrail 3): INTAKE_CHANNELS_V1 off -> these routes are ABSENT
+# (404 byte-identical to an unknown route -- {"detail":"Not Found"}), proven by
+# an inertness test. The flag is read LIVE (_intake_enabled, honors monkey-
+# patched os.environ).
+#
+# DEMO_MODE: the intake routes are NOT on _DEMO_ALLOWLIST, so under DEMO_MODE
+# the allowlist middleware 403s them fail-closed (a public no-login demo must
+# not accept inbound intake -- it's a tenant feature, not a demo feature). The
+# flag-off 404 below is the gate in normal dev/prod.
+#
+# Zero live sends: the ack/clarify/confirm replies go through the email_sender
+# GmailSender, stubbed under the EMAIL_SEND_ENABLED double-gate (conftest
+# forces it off) -- never a live send. SMS/voice stubs record replies, no
+# transport (no SMS sender exists; live SMS provisioning is out of scope).
+# ---------------------------------------------------------------------------
+
+
+def _intake_flag_off_404():
+    """Raise the byte-identical-to-unknown-route 404 when INTAKE_CHANNELS_V1 is
+    off (mirrors the portal's flag-off inertness)."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _require_intake_enabled():
+    """The shared intake-route gate. Flag-off -> 404 (route absent). Called at
+    every intake handler entry."""
+    if not _intake_enabled():
+        _intake_flag_off_404()
+
+
+def _intake_reply_sink(reply):
+    """The reply sink wired into the consumer: send the reply via the
+    email_sender GmailSender (stubbed under the EMAIL_SEND_ENABLED double-gate)
+    and record the SendResult. Never a live send in tests/without creds."""
+    from utils.email_sender import EmailMessage, GmailSender
+    msg = EmailMessage(
+        to=[reply.to],
+        subject=reply.subject,
+        body=reply.body,
+        metadata={"intake_kind": reply.kind, **reply.metadata},
+    )
+    sender = GmailSender()
+    try:
+        result = sender.send(msg)
+        print(f"[Intake] reply ({reply.kind}) -> {reply.to}: {result.status}")
+    except Exception as exc:
+        # Fail-soft: a reply send failure never raises into the intake path.
+        print(f"[Intake] reply send failed ({reply.kind}): {exc}")
+
+
+class IntakeEmailInbound(BaseModel):
+    """An inbound email payload delivered to the intake adapter (mocked
+    transport per I2 patterns). The adapter accepts the parsed envelope so the
+    build exercises the real consumer + firer; a live path would feed raw RFC822
+    through utils.inbox_reader._parse_reply first (the MIME parser is reused).
+
+    `to` -- the intake address carrying the tenant (intake+<tenant>@arkim.ai).
+    `from_address` -- the sender (customer side).
+    `body` -- the plain-text body.
+    `attachments` -- base64-encoded nameplate photos (filename, content_type, data_b64).
+    `message_id` -- the RFC822 Message-ID (channel metadata, for correlation)."""
+    to: str
+    from_address: str = Field(..., alias="from")
+    body: str = ""
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    message_id: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+def _attachments_from_payload(items):
+    """Decode base64 attachment payloads into IntakeAttachment (raw bytes -- the
+    same image-handling the in-app upload path uses, I4). Fail-soft per item."""
+    import base64 as _b64
+    out = []
+    for it in items or []:
+        try:
+            data = _b64.b64decode(it.get("data_b64") or "")
+            if not data:
+                continue
+            out.append(intake_channels.IntakeAttachment(
+                filename=it.get("filename") or "attachment",
+                content_type=it.get("content_type") or "application/octet-stream",
+                data=data,
+            ))
+        except Exception as exc:
+            print(f"[Intake] attachment decode failed: {exc}")
+    return out
+
+
+@app.post("/api/intake/email")
+def intake_email(body: IntakeEmailInbound, request: Request, background_tasks: BackgroundTasks):
+    """The email adapter -- inbound email -> tenant resolution (per-tenant
+    plus-address) -> sender check -> parse to proposed specs (propose-don't-
+    invent) -> intake event -> consumer -> sourcing run (or NEEDS_CLARIFICATION
+    / confirm step / safe reject). Attachments (nameplate photos) carried
+    through to the IntakeAgent (I4). Stubbed ack + clarify + confirm replies
+    under the send double-gate. Flag-gated: off -> 404 byte-identical to an
+    unknown route.
+
+    The intake mail is kept cleanly separate from RFQ-reply mail: this adapter
+    keys on the `to` address (intake+<tenant>@arkim.ai) which the RFQ reply path
+    (inbox_reader.fetch_replies, which reads procurement@ with NO recipient
+    filter) never targets as an outbound -- and the live path would use a
+    distinct intake mailbox/label. The adapter only processes intake-addressed
+    mail, so cross-stream is structurally impossible at the adapter boundary."""
+    _require_intake_enabled()
+
+    # Tenant resolution from the to-address (I3 plus-addressing). An address
+    # that resolves to no tenant -> TENANT_UNKNOWN (no run, safe).
+    tenant_key = intake_channels.resolve_tenant_from_address(body.to)
+    if tenant_key is None:
+        return {"status": "TENANT_UNKNOWN", "run_id": None,
+                "detail": f"no tenant for address {body.to!r}"}
+
+    event = intake_channels.IntakeEvent(
+        tenant_key=tenant_key,
+        channel=intake_channels.IntakeChannel.EMAIL,
+        sender=body.from_address,
+        text_body=body.body or "",
+        attachments=_attachments_from_payload(body.attachments),
+        channel_metadata={"message_id": body.message_id, "to": body.to},
+    )
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_intake_event(
+        event,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }
+
+
+@app.post("/api/intake/confirm/{token}")
+def intake_confirm_sender(token: str, request: Request, background_tasks: BackgroundTasks):
+    """The unknown-sender confirm step. A held event advances to a CONFIRMED
+    sender and the consumer re-runs (parse -> fire sourcing run, or
+    NEEDS_CLARIFICATION). A bad/reused token -> 404 byte-identical to an unknown
+    route (no oracle -- mirrors the supplier portal's uniform rejection). Flag-
+    gated: off -> 404."""
+    _require_intake_enabled()
+    payload = intake_channels.consume_held(token)
+    if payload is None:
+        # Uniform rejection: invalid / reused / expired all look identical.
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_confirmed_event(
+        payload,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }
