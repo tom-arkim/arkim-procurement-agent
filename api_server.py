@@ -48,6 +48,20 @@ def _portal_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# INTAKE_CHANNELS_V1 — the channel-agnostic intake surface flag (Night 8).
+# ---------------------------------------------------------------------------
+# Independent kill switch for the multi-channel intake endpoints (email adapter
+# + SMS/voice contract-stubs + the unknown-sender confirm step). Flag off ⇒
+# the intake routes DO NOT EXIST (byte-identical 404 {"detail":"Not Found"},
+# matching FastAPI's unknown-route body — proven by an inertness test), and the
+# intake_channels store/decision functions no-op (defense-in-depth). Read live
+# so a monkeypatched os.environ is honored (mirrors SUPPLIER_PORTAL_V1).
+def _intake_enabled() -> bool:
+    """Live check for the intake route gate (honors monkeypatched os.environ)."""
+    return _env_truthy(os.environ.get("INTAKE_CHANNELS_V1"))
+
+
+# ---------------------------------------------------------------------------
 # DEMO_MODE — public no-login demo spine (procurement-dev.arkim.ai cold outreach)
 # ---------------------------------------------------------------------------
 # Guards active ONLY when env DEMO_MODE is truthy, all completely inert otherwise
@@ -119,6 +133,7 @@ from sqlalchemy import text
 from utils.procurement_agent.state.phases import Phase
 from utils.procurement_agent import tier1_matcher, tier1_notify
 from utils import claim_tokens  # Night 6 — supplier claim-portal token store (T1)
+from utils import intake_channels  # Night 8 — channel-agnostic intake spine
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -2702,35 +2717,125 @@ def confirm_intake(
                     },
                 )
 
-        if exact_only:
-            specs_dict["exact_only"] = True
-        if open_family:
-            # Honest open-family commit: the user explicitly chose to source the
-            # family as-is rather than confirm a variant. Recorded (not silent) so
-            # sourcing + the UI can flag the run as family-open / spec-based.
-            specs_dict["spec_based_sourcing"] = True
-            specs_dict["family_open_commit"] = True
-        if exact_only or open_family:
-            run.asset_specs_json = json.dumps(specs_dict)
-        urgency_factor = run.urgency_factor
-        warranty_status = run.warranty_status
-        run.inventory_result_json = json.dumps({
-            "status": "no_data",
-            "message": "Inventory agent not yet connected (Phase 5).",
-        })
-        run.current_phase = Phase.SOURCING.value
-        run.updated_at = datetime.now(timezone.utc)
-        session.commit()
+        urgency_factor, warranty_status = _commit_intake_to_sourcing(
+            session, run, specs_dict, exact_only=exact_only, open_family=open_family,
+            background_tasks=background_tasks,
+        )
 
-    background_tasks.add_task(
-        _run_sourcing_background, run_id, specs_dict, urgency_factor, warranty_status
-    )
     # Night 1 — capture the confirm-intake user action (RUN_CAPTURE-gated, fail-soft).
     _run_capture.capture_user_action(
         run_id, "confirm_intake",
         detail={"exact_only": exact_only, "open_family": open_family},
     )
     return {"run_id": run_id, "phase": Phase.SOURCING.value}
+
+
+def _commit_intake_to_sourcing(
+    session,
+    run: SourcingRunORM,
+    specs_dict: Dict[str, Any],
+    *,
+    exact_only: bool = False,
+    open_family: bool = False,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> tuple:
+    """The intake → sourcing transition — the SINGLE load-bearing mutation both
+    the in-app ``confirm_intake`` path and the Night 8 channel-agnostic intake
+    consumer fire. Factored out of confirm_intake so the intake consumer reuses
+    the EXACT same transition (a transport, never a parallel pipeline).
+
+    Writes the inventory stub, applies the exact_only / open_family honesty
+    flags to the specs, advances ``current_phase`` to SOURCING, commits, then
+    schedules ``_run_sourcing_background`` (when background_tasks is provided).
+    Returns ``(urgency_factor, warranty_status)`` so callers can pass them to
+    the background task (confirm_intake schedules itself; the intake consumer
+    lets this helper schedule).
+
+    The family-variant binding guard is NOT here — it is a pre-gate each caller
+    runs (confirm_intake raises 422; the intake consumer replies
+    NEEDS_CLARIFICATION). This helper assumes the family guard already passed.
+    NEVER places/approves/advances an order — sourcing only (auto-order is out).
+    """
+    if exact_only:
+        specs_dict["exact_only"] = True
+    if open_family:
+        # Honest open-family commit: the user explicitly chose to source the
+        # family as-is rather than confirm a variant. Recorded (not silent) so
+        # sourcing + the UI can flag the run as family-open / spec-based.
+        specs_dict["spec_based_sourcing"] = True
+        specs_dict["family_open_commit"] = True
+    if exact_only or open_family:
+        run.asset_specs_json = json.dumps(specs_dict)
+    urgency_factor = run.urgency_factor
+    warranty_status = run.warranty_status
+    run.inventory_result_json = json.dumps({
+        "status": "no_data",
+        "message": "Inventory agent not yet connected (Phase 5).",
+    })
+    run.current_phase = Phase.SOURCING.value
+    run.updated_at = datetime.now(timezone.utc)
+    session.commit()
+
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _run_sourcing_background, run.id, specs_dict, urgency_factor, warranty_status
+        )
+    return urgency_factor, warranty_status
+
+
+def _fire_sourcing_run_for_intake(
+    specs_dict: Dict[str, Any],
+    tenant_key: str,
+    *,
+    background_tasks: Optional[BackgroundTasks] = None,
+    is_test: bool = True,
+) -> Optional[str]:
+    """The injected ``fire_sourcing_run`` for the intake consumer — creates a
+    sourcing run (Phase.INTAKE) attributed to the resolved tenant, seeds the
+    parser's proposed specs, and fires ``_commit_intake_to_sourcing`` (the same
+    transition in-app confirm_intake uses) → Phase.SOURCING + the background
+    sourcing task. Returns the run_id, or None on a missing tenant / store error.
+
+    This is the EXISTING pipeline seam (I1) the channel-agnostic consumer feeds:
+    create_run (bare, tenant-stamped) → seed specs → confirm-intake transition.
+    Same flags, same gates as an in-app request. NEVER places/approves/advances
+    an order — sourcing only (auto-order is explicitly out, Night 8).
+
+    ``is_test`` marks the run's provenance — the intake surface is exercised
+    under the suite's TestClient, so runs it births carry the test marker until
+    a live intake path exists (the run ORM has no is_test column; provenance is
+    carried via the company_id stamp + the intake_channels held/known-sender
+    rows which DO carry is_test=1). A real intake path would set is_test=False.
+    """
+    tenant = intake_channels.tenant_lookup(tenant_key)
+    if tenant is None:
+        return None
+    now = datetime.now(timezone.utc)
+    run = SourcingRunORM(
+        id=str(uuid.uuid4()),
+        facility_id=tenant["facility_id"],
+        company_id=tenant["company_id"],
+        group_id=None,
+        current_phase=Phase.INTAKE.value,
+        urgency_factor=0.3,
+        warranty_status="unknown",
+        asset_specs_json=json.dumps(specs_dict),
+        initiated_at=now,
+        updated_at=now,
+    )
+    try:
+        with _SessionFactory() as session:
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            _commit_intake_to_sourcing(
+                session, run, specs_dict, exact_only=False, open_family=False,
+                background_tasks=background_tasks,
+            )
+        return run.id
+    except Exception as exc:
+        print(f"[Intake] _fire_sourcing_run_for_intake failed: {exc}")
+        return None
 
 
 @app.post("/api/runs/{run_id}/outreach")
