@@ -48,6 +48,20 @@ def _portal_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# INTAKE_CHANNELS_V1 — the channel-agnostic intake surface flag (Night 8).
+# ---------------------------------------------------------------------------
+# Independent kill switch for the multi-channel intake endpoints (email adapter
+# + SMS/voice contract-stubs + the unknown-sender confirm step). Flag off ⇒
+# the intake routes DO NOT EXIST (byte-identical 404 {"detail":"Not Found"},
+# matching FastAPI's unknown-route body — proven by an inertness test), and the
+# intake_channels store/decision functions no-op (defense-in-depth). Read live
+# so a monkeypatched os.environ is honored (mirrors SUPPLIER_PORTAL_V1).
+def _intake_enabled() -> bool:
+    """Live check for the intake route gate (honors monkeypatched os.environ)."""
+    return _env_truthy(os.environ.get("INTAKE_CHANNELS_V1"))
+
+
+# ---------------------------------------------------------------------------
 # DEMO_MODE — public no-login demo spine (procurement-dev.arkim.ai cold outreach)
 # ---------------------------------------------------------------------------
 # Guards active ONLY when env DEMO_MODE is truthy, all completely inert otherwise
@@ -119,6 +133,7 @@ from sqlalchemy import text
 from utils.procurement_agent.state.phases import Phase
 from utils.procurement_agent import tier1_matcher, tier1_notify
 from utils import claim_tokens  # Night 6 — supplier claim-portal token store (T1)
+from utils import intake_channels  # Night 8 — channel-agnostic intake spine
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -2702,35 +2717,125 @@ def confirm_intake(
                     },
                 )
 
-        if exact_only:
-            specs_dict["exact_only"] = True
-        if open_family:
-            # Honest open-family commit: the user explicitly chose to source the
-            # family as-is rather than confirm a variant. Recorded (not silent) so
-            # sourcing + the UI can flag the run as family-open / spec-based.
-            specs_dict["spec_based_sourcing"] = True
-            specs_dict["family_open_commit"] = True
-        if exact_only or open_family:
-            run.asset_specs_json = json.dumps(specs_dict)
-        urgency_factor = run.urgency_factor
-        warranty_status = run.warranty_status
-        run.inventory_result_json = json.dumps({
-            "status": "no_data",
-            "message": "Inventory agent not yet connected (Phase 5).",
-        })
-        run.current_phase = Phase.SOURCING.value
-        run.updated_at = datetime.now(timezone.utc)
-        session.commit()
+        urgency_factor, warranty_status = _commit_intake_to_sourcing(
+            session, run, specs_dict, exact_only=exact_only, open_family=open_family,
+            background_tasks=background_tasks,
+        )
 
-    background_tasks.add_task(
-        _run_sourcing_background, run_id, specs_dict, urgency_factor, warranty_status
-    )
     # Night 1 — capture the confirm-intake user action (RUN_CAPTURE-gated, fail-soft).
     _run_capture.capture_user_action(
         run_id, "confirm_intake",
         detail={"exact_only": exact_only, "open_family": open_family},
     )
     return {"run_id": run_id, "phase": Phase.SOURCING.value}
+
+
+def _commit_intake_to_sourcing(
+    session,
+    run: SourcingRunORM,
+    specs_dict: Dict[str, Any],
+    *,
+    exact_only: bool = False,
+    open_family: bool = False,
+    background_tasks: Optional[BackgroundTasks] = None,
+) -> tuple:
+    """The intake → sourcing transition — the SINGLE load-bearing mutation both
+    the in-app ``confirm_intake`` path and the Night 8 channel-agnostic intake
+    consumer fire. Factored out of confirm_intake so the intake consumer reuses
+    the EXACT same transition (a transport, never a parallel pipeline).
+
+    Writes the inventory stub, applies the exact_only / open_family honesty
+    flags to the specs, advances ``current_phase`` to SOURCING, commits, then
+    schedules ``_run_sourcing_background`` (when background_tasks is provided).
+    Returns ``(urgency_factor, warranty_status)`` so callers can pass them to
+    the background task (confirm_intake schedules itself; the intake consumer
+    lets this helper schedule).
+
+    The family-variant binding guard is NOT here — it is a pre-gate each caller
+    runs (confirm_intake raises 422; the intake consumer replies
+    NEEDS_CLARIFICATION). This helper assumes the family guard already passed.
+    NEVER places/approves/advances an order — sourcing only (auto-order is out).
+    """
+    if exact_only:
+        specs_dict["exact_only"] = True
+    if open_family:
+        # Honest open-family commit: the user explicitly chose to source the
+        # family as-is rather than confirm a variant. Recorded (not silent) so
+        # sourcing + the UI can flag the run as family-open / spec-based.
+        specs_dict["spec_based_sourcing"] = True
+        specs_dict["family_open_commit"] = True
+    if exact_only or open_family:
+        run.asset_specs_json = json.dumps(specs_dict)
+    urgency_factor = run.urgency_factor
+    warranty_status = run.warranty_status
+    run.inventory_result_json = json.dumps({
+        "status": "no_data",
+        "message": "Inventory agent not yet connected (Phase 5).",
+    })
+    run.current_phase = Phase.SOURCING.value
+    run.updated_at = datetime.now(timezone.utc)
+    session.commit()
+
+    if background_tasks is not None:
+        background_tasks.add_task(
+            _run_sourcing_background, run.id, specs_dict, urgency_factor, warranty_status
+        )
+    return urgency_factor, warranty_status
+
+
+def _fire_sourcing_run_for_intake(
+    specs_dict: Dict[str, Any],
+    tenant_key: str,
+    *,
+    background_tasks: Optional[BackgroundTasks] = None,
+    is_test: bool = True,
+) -> Optional[str]:
+    """The injected ``fire_sourcing_run`` for the intake consumer — creates a
+    sourcing run (Phase.INTAKE) attributed to the resolved tenant, seeds the
+    parser's proposed specs, and fires ``_commit_intake_to_sourcing`` (the same
+    transition in-app confirm_intake uses) → Phase.SOURCING + the background
+    sourcing task. Returns the run_id, or None on a missing tenant / store error.
+
+    This is the EXISTING pipeline seam (I1) the channel-agnostic consumer feeds:
+    create_run (bare, tenant-stamped) → seed specs → confirm-intake transition.
+    Same flags, same gates as an in-app request. NEVER places/approves/advances
+    an order — sourcing only (auto-order is explicitly out, Night 8).
+
+    ``is_test`` marks the run's provenance — the intake surface is exercised
+    under the suite's TestClient, so runs it births carry the test marker until
+    a live intake path exists (the run ORM has no is_test column; provenance is
+    carried via the company_id stamp + the intake_channels held/known-sender
+    rows which DO carry is_test=1). A real intake path would set is_test=False.
+    """
+    tenant = intake_channels.tenant_lookup(tenant_key)
+    if tenant is None:
+        return None
+    now = datetime.now(timezone.utc)
+    run = SourcingRunORM(
+        id=str(uuid.uuid4()),
+        facility_id=tenant["facility_id"],
+        company_id=tenant["company_id"],
+        group_id=None,
+        current_phase=Phase.INTAKE.value,
+        urgency_factor=0.3,
+        warranty_status="unknown",
+        asset_specs_json=json.dumps(specs_dict),
+        initiated_at=now,
+        updated_at=now,
+    )
+    try:
+        with _SessionFactory() as session:
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            _commit_intake_to_sourcing(
+                session, run, specs_dict, exact_only=False, open_family=False,
+                background_tasks=background_tasks,
+            )
+        return run.id
+    except Exception as exc:
+        print(f"[Intake] _fire_sourcing_run_for_intake failed: {exc}")
+        return None
 
 
 @app.post("/api/runs/{run_id}/outreach")
@@ -4907,3 +5012,308 @@ def admin_reject_revision(revision_id: str, role: str = Depends(require_admin)):
     if out is None:
         raise HTTPException(status_code=404, detail="Revision not found")
     return {"ok": True, "revision": out}
+
+
+# ===========================================================================
+# Night 8 — Multi-channel intake surface (INTAKE_CHANNELS_V1-gated).
+# ===========================================================================
+# The channel-agnostic intake endpoints: the email adapter (fully working in
+# tests) + SMS/voice contract-stubs (T3) + the unknown-sender confirm step.
+# Every endpoint feeds the SAME single intake consumer (utils/intake_channels)
+# which maps a valid event into the existing intake pipeline seam and fires the
+# sourcing run exactly as an in-app request does. A transport, never a parallel
+# pipeline, never an auto-purchase trigger (the no-order property is pinned in
+# test_intake_channels + test_api_server).
+#
+# Flag gating (guardrail 3): INTAKE_CHANNELS_V1 off -> these routes are ABSENT
+# (404 byte-identical to an unknown route -- {"detail":"Not Found"}), proven by
+# an inertness test. The flag is read LIVE (_intake_enabled, honors monkey-
+# patched os.environ).
+#
+# DEMO_MODE: the intake routes are NOT on _DEMO_ALLOWLIST, so under DEMO_MODE
+# the allowlist middleware 403s them fail-closed (a public no-login demo must
+# not accept inbound intake -- it's a tenant feature, not a demo feature). The
+# flag-off 404 below is the gate in normal dev/prod.
+#
+# Zero live sends: the ack/clarify/confirm replies go through the email_sender
+# GmailSender, stubbed under the EMAIL_SEND_ENABLED double-gate (conftest
+# forces it off) -- never a live send. SMS/voice stubs record replies, no
+# transport (no SMS sender exists; live SMS provisioning is out of scope).
+# ---------------------------------------------------------------------------
+
+
+def _intake_flag_off_404():
+    """Raise the byte-identical-to-unknown-route 404 when INTAKE_CHANNELS_V1 is
+    off (mirrors the portal's flag-off inertness)."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _require_intake_enabled():
+    """The shared intake-route gate. Flag-off -> 404 (route absent). Called at
+    every intake handler entry."""
+    if not _intake_enabled():
+        _intake_flag_off_404()
+
+
+def _intake_reply_sink(reply):
+    """The reply sink wired into the consumer: send the reply via the
+    email_sender GmailSender (stubbed under the EMAIL_SEND_ENABLED double-gate)
+    and record the SendResult. Never a live send in tests/without creds."""
+    from utils.email_sender import EmailMessage, GmailSender
+    msg = EmailMessage(
+        to=[reply.to],
+        subject=reply.subject,
+        body=reply.body,
+        metadata={"intake_kind": reply.kind, **reply.metadata},
+    )
+    sender = GmailSender()
+    try:
+        result = sender.send(msg)
+        print(f"[Intake] reply ({reply.kind}) -> {reply.to}: {result.status}")
+    except Exception as exc:
+        # Fail-soft: a reply send failure never raises into the intake path.
+        print(f"[Intake] reply send failed ({reply.kind}): {exc}")
+
+
+class IntakeEmailInbound(BaseModel):
+    """An inbound email payload delivered to the intake adapter (mocked
+    transport per I2 patterns). The adapter accepts the parsed envelope so the
+    build exercises the real consumer + firer; a live path would feed raw RFC822
+    through utils.inbox_reader._parse_reply first (the MIME parser is reused).
+
+    `to` -- the intake address carrying the tenant (intake+<tenant>@arkim.ai).
+    `from_address` -- the sender (customer side).
+    `body` -- the plain-text body.
+    `attachments` -- base64-encoded nameplate photos (filename, content_type, data_b64).
+    `message_id` -- the RFC822 Message-ID (channel metadata, for correlation)."""
+    to: str
+    from_address: str = Field(..., alias="from")
+    body: str = ""
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    message_id: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+def _attachments_from_payload(items):
+    """Decode base64 attachment payloads into IntakeAttachment (raw bytes -- the
+    same image-handling the in-app upload path uses, I4). Fail-soft per item."""
+    import base64 as _b64
+    out = []
+    for it in items or []:
+        try:
+            data = _b64.b64decode(it.get("data_b64") or "")
+            if not data:
+                continue
+            out.append(intake_channels.IntakeAttachment(
+                filename=it.get("filename") or "attachment",
+                content_type=it.get("content_type") or "application/octet-stream",
+                data=data,
+            ))
+        except Exception as exc:
+            print(f"[Intake] attachment decode failed: {exc}")
+    return out
+
+
+@app.post("/api/intake/email")
+def intake_email(body: IntakeEmailInbound, request: Request, background_tasks: BackgroundTasks):
+    """The email adapter -- inbound email -> tenant resolution (per-tenant
+    plus-address) -> sender check -> parse to proposed specs (propose-don't-
+    invent) -> intake event -> consumer -> sourcing run (or NEEDS_CLARIFICATION
+    / confirm step / safe reject). Attachments (nameplate photos) carried
+    through to the IntakeAgent (I4). Stubbed ack + clarify + confirm replies
+    under the send double-gate. Flag-gated: off -> 404 byte-identical to an
+    unknown route.
+
+    The intake mail is kept cleanly separate from RFQ-reply mail: this adapter
+    keys on the `to` address (intake+<tenant>@arkim.ai) which the RFQ reply path
+    (inbox_reader.fetch_replies, which reads procurement@ with NO recipient
+    filter) never targets as an outbound -- and the live path would use a
+    distinct intake mailbox/label. The adapter only processes intake-addressed
+    mail, so cross-stream is structurally impossible at the adapter boundary."""
+    _require_intake_enabled()
+
+    # Tenant resolution from the to-address (I3 plus-addressing). An address
+    # that resolves to no tenant -> TENANT_UNKNOWN (no run, safe).
+    tenant_key = intake_channels.resolve_tenant_from_address(body.to)
+    if tenant_key is None:
+        return {"status": "TENANT_UNKNOWN", "run_id": None,
+                "detail": f"no tenant for address {body.to!r}"}
+
+    event = intake_channels.IntakeEvent(
+        tenant_key=tenant_key,
+        channel=intake_channels.IntakeChannel.EMAIL,
+        sender=body.from_address,
+        text_body=body.body or "",
+        attachments=_attachments_from_payload(body.attachments),
+        channel_metadata={"message_id": body.message_id, "to": body.to},
+    )
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_intake_event(
+        event,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }
+
+
+@app.post("/api/intake/confirm/{token}")
+def intake_confirm_sender(token: str, request: Request, background_tasks: BackgroundTasks):
+    """The unknown-sender confirm step. A held event advances to a CONFIRMED
+    sender and the consumer re-runs (parse -> fire sourcing run, or
+    NEEDS_CLARIFICATION). A bad/reused token -> 404 byte-identical to an unknown
+    route (no oracle -- mirrors the supplier portal's uniform rejection). Flag-
+    gated: off -> 404."""
+    _require_intake_enabled()
+    payload = intake_channels.consume_held(token)
+    if payload is None:
+        # Uniform rejection: invalid / reused / expired all look identical.
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_confirmed_event(
+        payload,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }
+
+
+
+class IntakeSmsInbound(BaseModel):
+    """An inbound SMS/MMS webhook payload (contract-stub — T3). The adapter
+    accepts the normalized envelope; a live path would receive a Twilio webhook
+    and map it to this shape. Tenant resolution is from the inbound number
+    (number→tenant map, same shape as email plus-addressing).
+
+    `from_number` -- the sender (customer side, E.164).
+    `to_number`   -- the tenant's dedicated inbound number (tenant signal).
+    `body`        -- the SMS text.
+    `media`       -- MMS media (base64-encoded images, same shape as email
+                     attachments — carried through to the IntakeAgent, I4).
+    `message_sid` -- the provider message id (channel metadata)."""
+    from_number: str = Field(..., alias="from")
+    to_number: str = Field(..., alias="to")
+    body: str = ""
+    media: List[Dict[str, Any]] = Field(default_factory=list)
+    message_sid: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/api/intake/sms")
+def intake_sms(body: IntakeSmsInbound, request: Request, background_tasks: BackgroundTasks):
+    """The SMS adapter (contract-stub, T3) -- inbound SMS/MMS -> tenant
+    resolution (number->tenant map) -> sender check -> parse -> intake event ->
+    consumer -> sourcing run (or NEEDS_CLARIFICATION / confirm / safe reject).
+    Same consumer, same seam, same gates as the email adapter. MMS media
+    carried through to the IntakeAgent (I4). Flag-gated: off -> 404.
+
+    Thin on purpose: the point is the CONTRACT (every channel produces the same
+    IntakeEvent + feeds the same consumer), not the channel. Live SMS
+    provisioning (Twilio creds, webhook auth) is out of scope; the reply is
+    recorded, not sent (no SMS transport exists yet)."""
+    _require_intake_enabled()
+    tenant_key = intake_channels.resolve_tenant_from_number(body.to_number)
+    if tenant_key is None:
+        return {"status": "TENANT_UNKNOWN", "run_id": None,
+                "detail": f"no tenant for number {body.to_number!r}"}
+
+    event = intake_channels.IntakeEvent(
+        tenant_key=tenant_key,
+        channel=intake_channels.IntakeChannel.SMS,
+        sender=body.from_number,
+        text_body=body.body or "",
+        attachments=_attachments_from_payload(body.media),
+        channel_metadata={"message_sid": body.message_sid, "to": body.to_number},
+    )
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_intake_event(
+        event,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }
+
+
+class IntakeVoiceInbound(BaseModel):
+    """An inbound voice webhook payload (contract-stub -- T3). Voice = a
+    transcript + metadata, NOT the conversational agent (explicitly out of
+    scope). The transcript is the text the parser proposes specs from; the
+    caller's number is the sender; the tenant's inbound number resolves the
+    tenant.
+
+    `from_number`  -- the caller (customer side, E.164).
+    `to_number`    -- the tenant's dedicated inbound number (tenant signal).
+    `transcript`   -- the call transcript (the text body for parsing).
+    `call_sid`     -- the provider call id (channel metadata).
+    `recording_url`-- optional recording ref (channel metadata, not fetched)."""
+    from_number: str = Field(..., alias="from")
+    to_number: str = Field(..., alias="to")
+    transcript: str = ""
+    call_sid: Optional[str] = None
+    recording_url: Optional[str] = None
+
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/api/intake/voice")
+def intake_voice(body: IntakeVoiceInbound, request: Request, background_tasks: BackgroundTasks):
+    """The voice adapter (contract-stub, T3) -- inbound call transcript + metadata
+    -> tenant resolution (number->tenant) -> sender check -> parse -> intake event
+    -> consumer -> sourcing run (or NEEDS_CLARIFICATION / confirm / safe reject).
+    Same consumer, same seam, same gates. The CONVERSATIONAL voice agent is
+    explicitly out of scope; this is a transcript-in, structured-request-out
+    contract stub. Flag-gated: off -> 404. Thin on purpose (the contract, not
+    the channel)."""
+    _require_intake_enabled()
+    tenant_key = intake_channels.resolve_tenant_from_number(body.to_number)
+    if tenant_key is None:
+        return {"status": "TENANT_UNKNOWN", "run_id": None,
+                "detail": f"no tenant for number {body.to_number!r}"}
+
+    event = intake_channels.IntakeEvent(
+        tenant_key=tenant_key,
+        channel=intake_channels.IntakeChannel.VOICE,
+        sender=body.from_number,
+        text_body=body.transcript or "",
+        attachments=[],  # voice carries no image attachments (transcript only)
+        channel_metadata={"call_sid": body.call_sid, "to": body.to_number,
+                          "recording_url": body.recording_url},
+    )
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    outcome = intake_channels.consume_intake_event(
+        event,
+        fire_sourcing_run=lambda specs, tk: _fire_sourcing_run_for_intake(
+            specs, tk, background_tasks=background_tasks, is_test=True),
+        reply_sink=_intake_reply_sink,
+        anthropic_api_key=api_key,
+    )
+    return {
+        "status": outcome.status.value,
+        "run_id": outcome.run_id,
+        "reason": outcome.reason,
+        "clarify_attrs": outcome.clarify_attrs,
+    }
