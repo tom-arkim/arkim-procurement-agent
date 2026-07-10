@@ -25,6 +25,28 @@ import pytest
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _reset_capture_counter_after_each():
+    """Stop this file leaking the process-global capture failure counter.
+
+    `run_capture._capture_failures` (utils/run_capture.py:116) is a module-level
+    accumulator that the fail-soft tests below deliberately increment. The `cap`
+    / `cap_off` fixtures reset it at *setup*, but NOT at teardown — so a test
+    that forces write failures (e.g. TestFailSoft::test_forced_write_failure_*)
+    leaves the counter non-zero for the rest of the session. A later test in
+    another file that reads the counter — notably
+    test_api_server.py::TestStaticEndpoints::test_health, which asserts
+    `/api/health` returns `capture_failures: 0` — then fails with
+    `capture_failures: N != 0` if this file ran first (order-dependent flake;
+    green in alphabetical order where test_api_server runs first, fails under
+    --lf / reverse / any reorder). Reset at teardown so no test here can leak
+    the counter, regardless of order. Test-only; no production code touched.
+    """
+    yield
+    import utils.run_capture as rc
+    rc.reset_failures()
+
+
 @pytest.fixture
 def cap(monkeypatch, tmp_path):
     """Isolated run_capture module: flag ON, DB in tmp_path, failures reset."""
