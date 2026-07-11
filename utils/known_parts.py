@@ -44,6 +44,28 @@ _DB_PATH = os.path.join(os.path.dirname(__file__), "known_parts.json")
 # treatment). Tunable. The durable supplier edge is NOT subject to this — it's long-lived.
 PRICE_TTL_DAYS: int = 30
 
+# RANKING_BANDS_V1 (spec §6) — vendor-edge freshness: under the flag, a vendor edge is
+# a TTL'd HINT, not an answer. An edge older than this (or written by an older/absent
+# matcher version) is stale: it never short-circuits discovery. Configurable via env
+# KNOWN_PARTS_EDGE_TTL_DAYS (read at call time). Flag OFF: edges are not TTL'd at all
+# (legacy behavior, byte-identical).
+EDGE_TTL_DAYS: int = 7
+
+
+def _edge_ttl_days() -> int:
+    """Effective vendor-edge TTL (days). Env-overridable; falls back to the default
+    on a missing/invalid value."""
+    try:
+        return int(os.environ.get("KNOWN_PARTS_EDGE_TTL_DAYS") or EDGE_TTL_DAYS)
+    except (TypeError, ValueError):
+        return EDGE_TTL_DAYS
+
+
+def _ranking_bands_on() -> bool:
+    """Live read of the RANKING_BANDS_V1 flag (lazy import avoids cycles)."""
+    from utils.procurement_agent.ranking_bands import ranking_bands_active
+    return ranking_bands_active()
+
 # Part-number tokens that are not real PNs — a key built on these would collide across
 # unrelated parts, so caching is disabled for them (canonical_part_key returns "").
 _NULL_PN_TOKENS = {"", "UNKNOWNPN", "UNKNOWN", "NA", "TBD", "NONE", "NONE0"}
@@ -147,15 +169,27 @@ def _price_of(c: dict) -> Optional[float]:
 def upsert_edges(part_key: str, candidates: list[dict]) -> int:
     """Write/update the supplier edges discovered for a part. Durable fields are set on
     first write and kept (first_seen); volatile price is refreshed when present. Edges
-    dedupe by domain (HARD REQ 2). No-op on an empty key. Returns edges written."""
+    dedupe by domain (HARD REQ 2). No-op on an empty key. Returns edges written.
+
+    RANKING_BANDS_V1 write gate (spec §6): under the flag, ONLY Band A/B candidates
+    are written back as edges — mock/seeded cards and Band C (ask-and-see) are NEVER
+    cached (fossilized mock cards are how the frozen-verdict defect started), and an
+    un-banded candidate in a banded run earns no edge either. Written edges are
+    stamped with the current matcher version so a version bump invalidates them
+    (identity — the part_key entry — stays). Flag OFF: byte-identical legacy writes."""
     if not part_key or not candidates:
         return 0
+    bands_on = _ranking_bands_on()
+    if bands_on:
+        from utils.procurement_agent.ranking_bands import MATCHER_VERSION
     db = _load()
     entry = db.setdefault(part_key, {"edges": {}, "updated_at": _now()})
     edges = entry["edges"]
     now = _now()
     written = 0
     for c in candidates:
+        if bands_on and (c.get("is_mock") or c.get("band") not in ("A", "B")):
+            continue  # quality gate on write: only earned evidence enters the cache
         url = c.get("source_url") or c.get("url")
         name = c.get("vendor_name") or c.get("vendorName")
         eid = _edge_id(url, name)
@@ -181,6 +215,11 @@ def upsert_edges(part_key: str, candidates: list[dict]) -> int:
             "price_date":       now if price is not None else prior.get("price_date"),
             "lead_days":        c.get("lead_time_days") if c.get("lead_time_days") is not None else prior.get("lead_days"),
         }
+        if bands_on:
+            # Verdict provenance (spec §6): matcher-version stamp — a bump marks
+            # this edge stale; absent (legacy / flag-off-written) edges read as
+            # stale under the flag without any data migration.
+            edges[eid]["matcher_version"] = MATCHER_VERSION
         written += 1
     entry["updated_at"] = now
     _save(db)
@@ -191,12 +230,24 @@ def get_edges(part_key: str, price_ttl_days: int = PRICE_TTL_DAYS) -> list[dict]
     """Return the durable supplier edges for a part (stable order). Each edge ALWAYS
     comes back regardless of price age; the price carries `price_stale` (True when a
     real price is older than the TTL) so the caller can flag it unverified rather than
-    show a stale price as current. Empty list for an unknown/blank key."""
+    show a stale price as current. Empty list for an unknown/blank key.
+
+    RANKING_BANDS_V1 (spec §6): under the flag each edge additionally carries
+    `edge_stale` — True when the edge outlived the edge TTL, predates the current
+    matcher version, or was migrated to a stale hint. Stale edges are HINTS: the
+    cache-first read must not serve them as answers (fresh discovery runs instead).
+    Flag OFF: no `edge_stale` key (byte-identical legacy shape)."""
     if not part_key:
         return []
     entry = _load().get(part_key)
     if not entry:
         return []
+    bands_on = _ranking_bands_on()
+    if bands_on:
+        from utils.procurement_agent.ranking_bands import MATCHER_VERSION as current_version
+        edge_cutoff = datetime.now(timezone.utc) - timedelta(days=_edge_ttl_days())
+    else:
+        current_version, edge_cutoff = 0, None
     cutoff = datetime.now(timezone.utc) - timedelta(days=price_ttl_days)
     out: list[dict] = []
     for edge in entry.get("edges", {}).values():
@@ -216,10 +267,55 @@ def get_edges(part_key: str, price_ttl_days: int = PRICE_TTL_DAYS) -> list[dict]
             except (ValueError, TypeError):
                 stale = True
         e["price_stale"] = bool(edge.get("price") is not None and stale)
+        if bands_on:
+            e["edge_stale"] = _edge_is_stale(edge, current_version, edge_cutoff)
         out.append(e)
     # Stable order: best suitability first, then supplier id — deterministic across reads.
     out.sort(key=lambda e: (-(e.get("suitability") or 0.0), e.get("supplier_id") or ""))
     return out
+
+
+def _edge_is_stale(edge: dict, current_version: int, edge_cutoff: datetime) -> bool:
+    """RANKING_BANDS_V1 vendor-edge staleness (spec §6). Stale when ANY of:
+      - matcher version absent or older than current (a frozen cache never
+        outlives an improved matcher; legacy edges have no stamp → stale),
+      - explicitly migrated to a stale hint (stale_hint=True),
+      - last_seen older than the edge TTL (or unparseable/absent).
+    A stale edge is a HINT: it may seed discovery but never short-circuits it."""
+    if edge.get("stale_hint"):
+        return True
+    version = edge.get("matcher_version")
+    if not isinstance(version, int) or version < current_version:
+        return True
+    try:
+        seen = datetime.fromisoformat(edge.get("last_seen"))
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    return seen < edge_cutoff
+
+
+def migrate_vendor_edges_stale_hint() -> int:
+    """One-time migration (spec §6): mark every existing vendor edge an explicit
+    stale HINT (stale_hint=True); part-key identity entries are retained untouched.
+    Returns the number of edges marked. Idempotent.
+
+    NOTE: under RANKING_BANDS_V1 this is belt-and-suspenders — edges without a
+    matcher_version stamp already read as stale (see _edge_is_stale), so the live
+    store needs no data edit for the policy to hold. This function exists so the
+    migration is explicit, auditable CODE (tested on tmp fixtures), never a hand
+    edit of utils/known_parts.json."""
+    db = _load()
+    marked = 0
+    for entry in db.values():
+        for edge in (entry.get("edges") or {}).values():
+            if not edge.get("matcher_version") and not edge.get("stale_hint"):
+                edge["stale_hint"] = True
+                marked += 1
+    if marked:
+        _save(db)
+    return marked
 
 
 def all_entries() -> dict:

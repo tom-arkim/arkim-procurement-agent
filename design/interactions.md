@@ -906,3 +906,36 @@ route).**
   filter) never targets as an outbound; the live path would use a distinct
   intake mailbox/label. The adapter only processes intake-addressed mail, so
   cross-stream is structurally impossible at the adapter boundary.
+
+---
+
+## Evidence-banded ranking (Night 9 - RANKING_BANDS_V1)
+
+Sourcing candidates are ranked by EVIDENCE BAND first (spec: RANKING_BANDS_SPEC.md).
+**All of it is flag-gated (`RANKING_BANDS_V1`, default OFF): flag off => ranking,
+scores, floor, cache behavior, and API responses are byte-identical to before.**
+
+- **Bands.** A = confirmed part (exact/canonical found-PN + real URL, or an
+  onboarded supplier's explicit quote confirmation). B = probable fit (compatible
+  /aftermarket PN, part-referencing listing). C = ask-and-see (class match, brand-
+  intelligence seeds, capability pivots). Ordering is A > B > C absolutely;
+  onboarded wins only WITHIN a band; evidence quality then TCA break ties.
+- **Floor re-scope.** The suitability floor applies only within Band B and only
+  to candidates without found-PN evidence. Band A is never floor-rejected; Band C
+  is capped in count (top-N by evidence quality, onboarded always included).
+- **Honest scores.** Seeded/mock candidates carry NO suitability/confidence
+  numbers - provenance strings only. confidence_score is evidence-derived;
+  0 means nothing verified and implies Band C.
+- **API response (flag-on runs only; keyed on the result's `ranking_bands:v1`
+  marker).** `sourcing_results` additionally carries `findings[]` (Band A/B cards
+  with `band`, `evidenceQuality`, `isMock` - contract: never true) and
+  `outreachTargets{suppliers[{vendorName, onboarded, provenance}], requestedCount}`
+  (the Band-C block: onboarded supplier named first, no numbers). Legacy
+  tier1/2/3 arrays are unchanged. Outreach-block UI rendering is a follow-up task.
+- **Confirmation promotion.** A Band-C supplier whose confirmed quote carries a
+  price is promoted to Band A (top, if onboarded) at read time - the card shows
+  the quoted price and leaves the outreach block.
+- **Cache honesty.** known_parts vendor edges are TTL'd hints (7d default,
+  `KNOWN_PARTS_EDGE_TTL_DAYS`) stamped with a matcher version; only TTL-fresh,
+  current-version edges short-circuit discovery. Only Band A/B edges are ever
+  written back; mocks/Band C never. Part-key identity persists indefinitely.

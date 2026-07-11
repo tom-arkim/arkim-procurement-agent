@@ -343,7 +343,7 @@ def _events_for(run_id: str) -> list[Dict[str, Any]]:
     with _get_conn() as conn:
         rows = conn.execute(
             "SELECT event_type, payload_json FROM run_events "
-            "WHERE run_id = ? ORDER BY ts ASC",
+            "WHERE run_id = ? ORDER BY ts ASC, rowid ASC",
             (run_id,),
         ).fetchall()
     return [{"event_type": r[0], "payload": json.loads(r[1])} for r in rows]
@@ -443,7 +443,7 @@ def read_all_events() -> list[Dict[str, Any]]:
     with _get_conn() as conn:
         rows = conn.execute(
             "SELECT event_id, run_id, ts, source_tag, event_type, payload_json "
-            "FROM run_events ORDER BY ts ASC"
+            "FROM run_events ORDER BY ts ASC, rowid ASC"
         ).fetchall()
     return [
         {

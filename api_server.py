@@ -883,7 +883,13 @@ def _transform_option(opt: dict, tier: int, idx: int, quote: Optional[dict] = No
         # A 0/absent score is "no confidence signal" (e.g. the Tier 2 lane doesn't populate
         # it), NOT low confidence — those rows are not flagged here (their price honesty is
         # handled by priceVerified/limited_price_data).
-        "priceUnverified":       price is not None and 0 < float(opt.get("confidence_score") or 0) < _PRICE_CONFIDENCE_FLOOR,
+        # RANKING_BANDS_V1 cache path: an explicit price_stale flag also marks the
+        # price unverified (the band pass replaces the legacy 1.0-confidence stale
+        # marker with evidence-derived confidence, so the flag carries the signal).
+        # Flag-off candidates never carry price_stale — behavior unchanged.
+        "priceUnverified":       price is not None and (
+                                     0 < float(opt.get("confidence_score") or 0) < _PRICE_CONFIDENCE_FLOOR
+                                     or bool(opt.get("price_stale"))),
         # Real stock signal only when the listing actually reported in-stock; else omitted
         # (no fabricated stock). Wires the previously-dead frontend `stock` read.
         "stock":                 "In stock" if opt.get("in_stock") is True else None,
@@ -1025,20 +1031,72 @@ def _transform_sourcing_results(raw: dict, quote_index: Optional[dict] = None) -
                 continue
             out.append(_transform_option(o, n, i, quote=_resolve_quote(o, quote_index)))
         return out
-    return {
+    result = {
         "tier1":               _tier("tier_1", 1),
         "tier2":               _tier("tier_2", 2),
         "tier3":               _tier("tier_3", 3),
         "warrantyBanner":      raw.get("warranty_banner"),
         "tier3CapabilityPivot": raw.get("tier3_capability_pivot", False),
     }
+    # RANKING_BANDS_V1 (spec §7) — a BANDED raw result additionally distinguishes
+    # findings (Band A/B cards, banded order) from outreachTargets (the Band-C
+    # ask-and-see block: onboarded supplier named first, capped seeds, provenance
+    # strings, NO numbers). Keyed off the result's own ranking_bands:v1 marker
+    # (not the live env) so a stored flag-off run never grows these keys —
+    # flag-off responses stay byte-identical. Fail-soft: a builder error degrades
+    # to the legacy shape.
+    if "ranking_bands:v1" in (raw.get("filters_applied") or []):
+        try:
+            from utils.procurement_agent.ranking_bands import (
+                banded_findings, is_onboarded, outreach_targets,
+                promote_confirmed, provenance_for,
+            )
+            # T4 — band mobility (spec §3): a Band-C candidate whose CONFIRMED
+            # quote carries a real price is promoted to Band A at read time (the
+            # quote arrives after sourcing results were persisted, so promotion
+            # is computed per read from the live quote index — "at that moment").
+            # Being onboarded, a promoted supplier tops Band A (onboarded-first).
+            # Mutates only this request's parsed copy; nothing is written back.
+            for _tier_key in ("tier_1", "tier_2", "tier_3"):
+                for _o in (raw.get(_tier_key) or {}).get("results") or []:
+                    if _o.get("band") == "C" and not _o.get("rejection_reason"):
+                        _q = _resolve_quote(_o, quote_index)
+                        if _q and (_q.get("payload") or {}).get("unit_price") is not None:
+                            promote_confirmed(_o)
+            result["findings"] = [
+                {
+                    **_transform_option(o, n, i, quote=_resolve_quote(o, quote_index)),
+                    "band":            o.get("band"),
+                    "evidenceQuality": o.get("evidence_quality"),
+                    "isMock":          bool(o.get("is_mock")),  # contract: always False here
+                }
+                for o, n, i in banded_findings(raw)
+            ]
+            result["outreachTargets"] = {
+                "suppliers": [
+                    {
+                        "vendorName": c.get("vendor_name"),
+                        "onboarded":  is_onboarded(c),
+                        "provenance": c.get("provenance") or provenance_for(c),
+                    }
+                    for c in outreach_targets(raw)
+                ],
+            }
+            result["outreachTargets"]["requestedCount"] = \
+                len(result["outreachTargets"]["suppliers"])
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "findings/outreach build failed (legacy shape kept): %s", exc)
+    return result
 
 
 # ---------------------------------------------------------------------------
 # Background sourcing task
 # ---------------------------------------------------------------------------
 
-def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = None) -> dict:
+def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = None,
+                              banded: bool = False) -> dict:
     """Reconstruct the SourcingAgent result shape from cached known_parts edges, so a
     cache hit flows through the same transform/persist path without re-discovery.
 
@@ -1097,6 +1155,12 @@ def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = N
             "lead_time_days":    e.get("lead_days") or 5,
             "from_cache":        True,
         }
+        if banded:
+            # RANKING_BANDS_V1 cache path: carry the explicit stale-price flag so
+            # priceUnverified survives the band pass (which replaces
+            # confidence_score — the legacy 1.0-confidence stale marker — with
+            # evidence-derived confidence). Flag-off cands never grow this key.
+            cand["price_stale"] = bool(e.get("price_stale"))
         # Fix B1 — drop cached edges already carrying a rejection_reason, and
         # apply the suitability floor to the rest (same threshold as live runs).
         if e.get("rejection_reason"):
@@ -1171,6 +1235,20 @@ def _run_sourcing_background(
             specs_dict.get("manufacturer"), specs_dict.get("part_number"))
         if part_key and not specs_dict.get("exact_only"):
             edges = known_parts.get_edges(part_key)
+            # RANKING_BANDS_V1 (spec §6): vendor edges are TTL'd HINTS, not answers.
+            # Only TTL-fresh, current-matcher-version edges may short-circuit
+            # discovery (TTL-fresh re-verification); a stale/invalidated edge set
+            # is treated as a MISS so fresh Tier-2/3 discovery runs — a frozen
+            # verdict is never replayed. Flag OFF: edges carry no edge_stale key
+            # and the legacy always-serve behavior is byte-identical.
+            from utils.procurement_agent.ranking_bands import ranking_bands_active
+            _bands_on = ranking_bands_active()
+            if edges and _bands_on:
+                fresh = [e for e in edges if not e.get("edge_stale")]
+                if not fresh:
+                    log.info("[%s] known_parts edges stale/invalidated (%d) — running fresh discovery",
+                             run_id, len(edges))
+                edges = fresh
             if edges:
                 # T2 — detect the request's noun-class once, thread it into the
                 # cache reconstruction so wrong-PART-TYPE cached edges are dropped
@@ -1184,7 +1262,19 @@ def _run_sourcing_background(
                     req_cls = _query_noun_class(_specs_from_dict(specs_dict))
                 except Exception:
                     req_cls = None
-                result = _result_from_cached_edges(edges, request_noun_class=req_cls)
+                result = _result_from_cached_edges(edges, request_noun_class=req_cls,
+                                                   banded=_bands_on)
+                if _bands_on:
+                    # Band the reconstructed result so the response gains the
+                    # findings/outreach shape on cache hits too. Fail-soft.
+                    try:
+                        from utils.procurement_agent.ranking_bands import apply_ranking_bands
+                        apply_ranking_bands(result, specs_dict.get("part_number"))
+                        result["filters_applied"] = list(result.get("filters_applied") or []) \
+                            + ["ranking_bands:v1"]
+                    except Exception as exc:
+                        log.warning("[%s] ranking_bands on cache hit failed (un-banded kept): %s",
+                                    run_id, exc)
                 log.info("[%s] known_parts cache HIT (%d suppliers) — skipping discovery", run_id, len(edges))
     except Exception as exc:
         log.warning("[%s] known_parts cache read failed: %s", run_id, exc)

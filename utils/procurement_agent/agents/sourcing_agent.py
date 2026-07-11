@@ -493,7 +493,7 @@ class SourcingAgent:
             for r in tier3.get("results", [])
         )
 
-        return {
+        result = {
             "tier_1":                 tier1,
             "tier_2":                 tier2,
             "tier_3":                 tier3,
@@ -502,6 +502,22 @@ class SourcingAgent:
             "filters_applied":        filters,
             "tier3_capability_pivot": tier3_pivot,
         }
+
+        # RANKING_BANDS_V1 (spec: RANKING_BANDS_SPEC.md) — evidence-banded ranking
+        # post-pass. Flag OFF ⇒ this block never runs and the result is byte-
+        # identical to pre-band behavior. Fail-soft: a banding error degrades to
+        # the un-banded result (logged), never crashes the run.
+        try:
+            from utils.procurement_agent.ranking_bands import (
+                apply_ranking_bands, ranking_bands_active,
+            )
+            if ranking_bands_active():
+                apply_ranking_bands(result, specs.part_number)
+                filters.append("ranking_bands:v1")
+        except Exception as exc:
+            print(f"[SourcingAgent] ranking_bands post-pass failed (un-banded result kept): {exc}")
+
+        return result
 
     # ------------------------------------------------------------------
     # Tier runners
