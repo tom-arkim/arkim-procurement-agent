@@ -24,7 +24,7 @@
  *    network), the page renders ONE generic "link no longer valid" state. It
  *    never surfaces a status code or distinguishes the failure kind.
  */
-import { Suspense } from "react";
+import { Suspense, use } from "react";
 import { ClaimPage } from "./claim-page";
 
 export const dynamic = "force-dynamic";
@@ -39,10 +39,11 @@ export const metadata = {
   referrer: "no-referrer",
 };
 
-export default function PortalTokenPage({ params }: { params: { token: string } }) {
+export default function PortalTokenPage({ params }: { params: Promise<{ token: string }> }) {
+  const { token } = use(params);
   return (
     <Suspense fallback={null}>
-      <ClaimPage token={params.token} />
+      <ClaimPage token={token} />
     </Suspense>
   );
 }
