@@ -11,10 +11,15 @@ Offline: no network, no live DB writes (_resolve_contact / _apollo_clarify patch
 out on the integration tests).
 """
 
+import json
 import random
 from unittest.mock import patch
 
 import pytest
+
+# The api TestClient fixture (temp DB, isolated registries) is reused for the
+# cache-policy tests; importing it registers it with this module for pytest.
+from utils.procurement_agent.tests.test_api_server import api  # noqa: F401
 
 from utils.procurement_agent import ranking_bands as rb
 from utils.procurement_agent.ranking_bands import (
@@ -700,6 +705,234 @@ class TestApiResponseShape:
             if c.get("is_mock"):
                 assert c["suitability_score"] is None
                 assert c["confidence_score"] is None
+
+
+# ---------------------------------------------------------------------------
+# Cache policy (spec §6) — T5: identity persists, vendor verdicts are TTL'd hints
+# ---------------------------------------------------------------------------
+
+_KP_PART_KEY_ARGS = ("Gusher Pumps", "84004-28-C238CBC")
+
+
+@pytest.fixture
+def kp(monkeypatch, tmp_path):
+    """utils.known_parts pointed at a tmp fixture store (the live
+    utils/known_parts.json is DATA and is never touched by tests)."""
+    from utils import known_parts
+    monkeypatch.setattr(known_parts, "_DB_PATH", str(tmp_path / "kp.json"))
+    return known_parts
+
+
+def _banded_a_candidate(**over):
+    c = _sealit(band="A", tier=2)
+    c.update(over)
+    return c
+
+
+class TestCacheWriteGate:
+    def test_flag_on_only_band_a_b_written(self, kp, monkeypatch):
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        n = kp.upsert_edges(pk, [
+            _banded_a_candidate(),                                   # A → written
+            _zoro(band="B", tier=2),                                 # B → written
+            _dxp(band="C", tier=1),                                  # C → never
+            _mock_seed(band="C", tier=3),                            # mock → never
+            _mock_seed("Sneaky", band="A", tier=3),                  # mock claims A → never
+            {**_us_seal(), "tier": 3},                               # un-banded → never
+        ])
+        assert n == 2
+        ids = {e["supplier_id"] for e in kp.get_edges(pk)}
+        assert ids == {"sealit123.com", "zoro.com"}
+
+    def test_flag_on_edges_carry_matcher_version(self, kp, monkeypatch):
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [_banded_a_candidate()])
+        edge = kp.get_edges(pk)[0]
+        assert edge["matcher_version"] == rb.MATCHER_VERSION
+        assert edge["edge_stale"] is False
+
+    def test_flag_off_writes_are_legacy_byte_identical(self, kp, monkeypatch):
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        n = kp.upsert_edges(pk, [
+            {**_sealit(), "tier": 2},          # un-banded: legacy write path
+            {**_mock_seed(), "tier": 3},       # legacy wrote mocks too (the defect)
+        ])
+        assert n == 2
+        for e in kp.get_edges(pk):
+            assert "matcher_version" not in e
+            assert "edge_stale" not in e   # flag-off read shape unchanged
+
+
+class TestEdgeStaleness:
+    def _seed_fresh(self, kp, monkeypatch):
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [_banded_a_candidate()])
+        return pk
+
+    def test_fresh_current_version_edge_not_stale(self, kp, monkeypatch):
+        pk = self._seed_fresh(kp, monkeypatch)
+        assert kp.get_edges(pk)[0]["edge_stale"] is False
+
+    def test_legacy_versionless_edge_is_stale(self, kp, monkeypatch):
+        # Written flag-OFF (no matcher_version) → read flag-ON as stale hint.
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [{**_sealit(), "tier": 2}])
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        assert kp.get_edges(pk)[0]["edge_stale"] is True
+
+    def test_matcher_version_bump_invalidates(self, kp, monkeypatch):
+        pk = self._seed_fresh(kp, monkeypatch)
+        monkeypatch.setattr(rb, "MATCHER_VERSION", rb.MATCHER_VERSION + 1)
+        assert kp.get_edges(pk)[0]["edge_stale"] is True
+
+    def test_edge_older_than_ttl_is_stale(self, kp, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        pk = self._seed_fresh(kp, monkeypatch)
+        db = kp.all_entries()
+        edge = db[pk]["edges"]["sealit123.com"]
+        edge["last_seen"] = (datetime.now(timezone.utc)
+                             - timedelta(days=kp.EDGE_TTL_DAYS + 1)).isoformat()
+        kp._save(db)
+        assert kp.get_edges(pk)[0]["edge_stale"] is True
+
+    def test_ttl_env_override(self, kp, monkeypatch):
+        from datetime import datetime, timedelta, timezone
+        pk = self._seed_fresh(kp, monkeypatch)
+        db = kp.all_entries()
+        db[pk]["edges"]["sealit123.com"]["last_seen"] = (
+            datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+        kp._save(db)
+        assert kp.get_edges(pk)[0]["edge_stale"] is False   # 3d < default 7d
+        monkeypatch.setenv("KNOWN_PARTS_EDGE_TTL_DAYS", "2")
+        assert kp.get_edges(pk)[0]["edge_stale"] is True    # 3d > 2d
+
+    def test_identity_key_retained_when_edges_stale(self, kp, monkeypatch):
+        # Staleness is annotation-at-read: the part-key identity entry and its
+        # edges REMAIN in the store (hints), never deleted.
+        pk = self._seed_fresh(kp, monkeypatch)
+        monkeypatch.setattr(rb, "MATCHER_VERSION", rb.MATCHER_VERSION + 1)
+        assert pk in kp.all_entries()
+        assert len(kp.get_edges(pk)) == 1
+
+
+class TestMigration:
+    def test_marks_legacy_edges_stale_hint_idempotently(self, kp, monkeypatch):
+        # Legacy store: flag-off writes (no matcher_version).
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [{**_sealit(), "tier": 2}, {**_zoro(), "tier": 2}])
+        assert kp.migrate_vendor_edges_stale_hint() == 2
+        assert kp.migrate_vendor_edges_stale_hint() == 0  # idempotent
+        db = kp.all_entries()
+        assert pk in db  # identity retained
+        assert all(e["stale_hint"] is True for e in db[pk]["edges"].values())
+        # Under the flag the hinted edges read stale.
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        assert all(e["edge_stale"] for e in kp.get_edges(pk))
+
+    def test_current_version_edges_not_marked(self, kp, monkeypatch):
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [_banded_a_candidate()])
+        assert kp.migrate_vendor_edges_stale_hint() == 0
+        assert kp.get_edges(pk)[0]["edge_stale"] is False
+
+
+class TestCacheFirstReadPolicy:
+    """Spec §9 criterion 6 at the API seam: a repeat search never replays a frozen
+    verdict — stale/invalidated edges → fresh discovery; TTL-fresh current-version
+    edges → served (re-verification path) with the banded response shape."""
+
+    def _specs_json(self):
+        return json.dumps({
+            "manufacturer": "Gusher Pumps", "part_number": "84004-28-C238CBC",
+            "detected_type": "mechanical seal", "model": "Type 21", "voltage": "N/A",
+        })
+
+    def _discovery_result(self):
+        from utils.procurement_agent.tests.test_api_server import _empty_sourcing
+        s = _empty_sourcing()
+        s["tier_2"]["results"] = [{
+            "vendor_name": "Fresh Discovery Vendor", "base_price": 61.0,
+            "source_url": "https://freshvendor.com/x", "suitability_score": 75,
+            "match_type": "Exact OEM", "found_part_number": "84004-28-C238CBC",
+        }]
+        s["filters_applied"] = ["ranking_bands:v1"]
+        for c in s["tier_2"]["results"]:
+            c.update(band="A", evidence_quality=70.0, banded=True)
+        return s
+
+    def test_stale_edges_do_not_short_circuit_discovery(self, api, kp, monkeypatch):
+        from utils.procurement_agent.tests.test_api_server import (
+            _create_run, _set_run, _mock_sourcing_pipeline)
+        # Seed a LEGACY (versionless → stale under flag) edge.
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [{**_sealit(), "tier": 2}])
+        # Flag ON: the stale edge must NOT be served; discovery runs.
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=self._specs_json())
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=self._discovery_result())
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        detail = api.get(f"/api/runs/{rid}").json()
+        vendors = [c["vendorName"] for c in detail["sourcing_results"]["tier2"]]
+        assert "Fresh Discovery Vendor" in vendors   # discovery ran
+        assert "Sealit123" not in vendors            # frozen verdict NOT replayed
+
+    def test_fresh_edges_served_with_banded_response(self, api, kp, monkeypatch):
+        from utils.procurement_agent.tests.test_api_server import (
+            _create_run, _set_run, _mock_sourcing_pipeline)
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [_banded_a_candidate()])   # fresh, current version
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=self._specs_json())
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=self._discovery_result())
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        detail = api.get(f"/api/runs/{rid}").json()
+        sr = detail["sourcing_results"]
+        vendors = [c["vendorName"] for c in sr["tier2"]]
+        assert "Fresh Discovery Vendor" not in vendors   # TTL-fresh: served from cache
+        assert any("ealit123" in v for v in vendors)
+        # The cache-hit response is banded: findings/outreach shape present.
+        assert "findings" in sr and "outreachTargets" in sr
+
+    def test_version_bump_forces_rediscovery(self, api, kp, monkeypatch):
+        from utils.procurement_agent.tests.test_api_server import (
+            _create_run, _set_run, _mock_sourcing_pipeline)
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [_banded_a_candidate()])
+        monkeypatch.setattr(rb, "MATCHER_VERSION", rb.MATCHER_VERSION + 1)  # bump
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=self._specs_json())
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=self._discovery_result())
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        detail = api.get(f"/api/runs/{rid}").json()
+        vendors = [c["vendorName"] for c in detail["sourcing_results"]["tier2"]]
+        assert "Fresh Discovery Vendor" in vendors   # invalidated → rediscovered
+
+    def test_flag_off_cache_behavior_unchanged(self, api, kp, monkeypatch):
+        from utils.procurement_agent.tests.test_api_server import (
+            _create_run, _set_run, _mock_sourcing_pipeline)
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+        pk = kp.canonical_part_key(*_KP_PART_KEY_ARGS)
+        kp.upsert_edges(pk, [{**_sealit(), "tier": 2}])
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=self._specs_json())
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=self._discovery_result())
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        detail = api.get(f"/api/runs/{rid}").json()
+        sr = detail["sourcing_results"]
+        vendors = [c["vendorName"] for c in sr["tier2"]]
+        assert "Fresh Discovery Vendor" not in vendors   # legacy: cache always serves
+        assert "findings" not in sr and "outreachTargets" not in sr
 
 
 # ---------------------------------------------------------------------------
