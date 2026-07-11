@@ -31,7 +31,7 @@ import os
 import sqlite3
 import uuid
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ def record_write_failure(run_id: str, exc: Exception,
                          context: str = "audit_log_write_failed") -> None:
     """Append a write-failure record to the in-process ring buffer."""
     _write_failures.appendleft({
-        "timestamp":         datetime.utcnow().isoformat(),
+        "timestamp":         datetime.now(timezone.utc).isoformat(),
         "sourcing_run_id":   run_id,
         "exception_class":   type(exc).__name__,
         "exception_message": str(exc),
@@ -59,7 +59,7 @@ def record_write_failure(run_id: str, exc: Exception,
 
 def recent_write_failures(hours: int = 24) -> list[dict]:
     """Return failure records from the last N hours, newest first."""
-    cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     return [f for f in _write_failures if f["timestamp"] >= cutoff]
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -131,7 +131,7 @@ def write_audit_log(run_data: dict) -> str:
       error_log             list[str]
     """
     entry_id = str(uuid.uuid4())
-    now      = datetime.utcnow().isoformat()
+    now      = datetime.now(timezone.utc).isoformat()
 
     row = (
         entry_id,

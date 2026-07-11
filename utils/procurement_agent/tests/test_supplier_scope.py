@@ -13,7 +13,7 @@ path is exercised; the inertness tests turn it OFF and assert dormancy.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -348,7 +348,7 @@ class TestTier1StateMachine:
 class TestGraduation:
     def test_onboarded_excluded_from_refresh_under_flag(self, isolated_db):
         s = isolated_db
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s.upsert_apollo_data("acme.com", {"suitability_status": "confirmed",
                                           "apollo_enriched_at": old})
         # Drive the tier1 lifecycle to onboarded.
@@ -361,7 +361,7 @@ class TestGraduation:
 
     def test_non_onboarded_still_refreshes_when_stale(self, isolated_db):
         s = isolated_db
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s.upsert_apollo_data("acme.com", {"suitability_status": "confirmed",
                                           "apollo_enriched_at": old})
         # Drive to quoted (not onboarded) — still stale.
@@ -374,7 +374,7 @@ class TestGraduation:
         """The pre-existing graduation (onboarding_status=onboarded_arkim_supplier)
         still applies — the new tier1 branch is ADDITIVE, not a replacement."""
         s = isolated_db
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s.upsert_apollo_data("acme.com", {"suitability_status": "confirmed",
                                           "apollo_enriched_at": old})
         s.update_supplier("acme.com", onboarding_status="onboarded_arkim_supplier")
@@ -567,7 +567,7 @@ class TestInertnessFlagOff:
         branch — only the legacy onboarding_status graduation applies. Proves
         the clarifier's needs_reenrichment is byte-identical to pre-Night-3."""
         s = isolated_db_off
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s.upsert_apollo_data("acme.com", {"suitability_status": "confirmed",
                                           "apollo_enriched_at": old})
         rec = s.lookup_by_domain("acme.com")
@@ -636,7 +636,7 @@ class TestClarifierCoexistence:
         This re-proves the existing test_apollo_clarify guarantee through the
         Night-3 registry code (the extension is dormant, so behavior is unchanged)."""
         s = isolated_db_off
-        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         s.upsert_apollo_data("mescocorp.com", {"suitability_status": "confirmed",
                                                "apollo_enriched_at": old})
         apollo = self._enabled_apollo(org_return=self._org())
@@ -655,7 +655,7 @@ class TestClarifierCoexistence:
         clarifier (the clarifier just calls needs_reenrichment; the flag-on
         branch makes it exempt)."""
         s = isolated_db
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s.upsert_apollo_data("mescocorp.com", {"suitability_status": "confirmed",
                                                "apollo_industry": "wholesale",
                                                "apollo_enriched_at": old})
@@ -676,7 +676,7 @@ class TestClarifierCoexistence:
         graduation only exempts 'onboarded', so a quoted-stage supplier refreshes
         exactly as the clarifier always has. Proves no over-exclusion."""
         s = isolated_db
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s.upsert_apollo_data("mescocorp.com", {"suitability_status": "confirmed",
                                                "apollo_enriched_at": old})
         # Drive only to quoted (NOT onboarded).

@@ -162,9 +162,11 @@ def _expire_apollo_cache() -> None:
     needs_reenrichment() returns True and the clarifier re-fetches (re-persisting
     apollo_org_name etc.). Non-destructive; uses the existing staleness path. Only
     the domains that appear in this run actually re-enrich."""
-    # Match the store's naive-UTC convention (upsert_apollo_data writes
-    # datetime.utcnow()); needs_reenrichment compares with a naive utcnow().
-    old = (datetime.utcnow() - timedelta(days=400)).isoformat()
+    # Backdate apollo_enriched_at so needs_reenrichment() returns True and the
+    # clarifier re-fetches. needs_reenrichment normalizes a naive or tz-aware
+    # stored value to aware UTC before comparing, so either form works; emit a
+    # tz-aware value (the current writer convention).
+    old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
     conn = supplier_registry._get_conn()
     try:
         cur = conn.execute(

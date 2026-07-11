@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 _DB_PATH = os.path.join(os.path.dirname(__file__), "known_parts.json")
@@ -108,7 +108,7 @@ def _channel(price: Optional[float], url: Optional[str]) -> str:
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _load() -> dict:
@@ -197,7 +197,7 @@ def get_edges(part_key: str, price_ttl_days: int = PRICE_TTL_DAYS) -> list[dict]
     entry = _load().get(part_key)
     if not entry:
         return []
-    cutoff = datetime.utcnow() - timedelta(days=price_ttl_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=price_ttl_days)
     out: list[dict] = []
     for edge in entry.get("edges", {}).values():
         e = dict(edge)
@@ -205,7 +205,14 @@ def get_edges(part_key: str, price_ttl_days: int = PRICE_TTL_DAYS) -> list[dict]
         if edge.get("price") is not None:
             pd = edge.get("price_date")
             try:
-                stale = datetime.fromisoformat(pd) < cutoff if pd else True
+                # Normalize to aware UTC: stored price_date was historically naive
+                # UTC (datetime.utcnow().isoformat()); newer writes are tz-aware.
+                # Treat a naive value as UTC so the aware `cutoff` comparison never
+                # raises "can't compare offset-naive and offset-aware".
+                pd_dt = datetime.fromisoformat(pd)
+                if pd_dt.tzinfo is None:
+                    pd_dt = pd_dt.replace(tzinfo=timezone.utc)
+                stale = pd_dt < cutoff
             except (ValueError, TypeError):
                 stale = True
         e["price_stale"] = bool(edge.get("price") is not None and stale)

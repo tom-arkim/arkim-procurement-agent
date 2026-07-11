@@ -92,7 +92,7 @@ class TestStoreCheckFirst:
 
     def test_onboarded_exempt_no_call_even_if_ancient(self, isolated_registry):
         sr = isolated_registry
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         sr.upsert_apollo_data("x.com", {"suitability_status": "confirmed", "apollo_enriched_at": old})
         sr.update_supplier("x.com", onboarding_status="onboarded_arkim_supplier")  # name == "x.com"
         apollo = _enabled_apollo(org_return=_org())
@@ -106,7 +106,7 @@ class TestStoreCheckFirst:
 
     def test_stale_not_onboarded_reenriches(self, isolated_registry):
         sr = isolated_registry
-        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         sr.upsert_apollo_data("x.com", {"suitability_status": "confirmed", "apollo_enriched_at": old})
         apollo = _enabled_apollo(org_return=_org(name="X"))
         agent = _agent(apollo=apollo, requirement=lambda s, o, u: "confirmed")

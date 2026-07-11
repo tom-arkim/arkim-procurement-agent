@@ -19,7 +19,7 @@ force-OFF by the conftest safety net - the double-gate).
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -148,7 +148,7 @@ def _seed_notification(domain="dxpe.com", *, days_ago=0, reason="core_class",
     distinct ``run_id`` to model distinct buyer requests (the teaser counts
     DISTINCT run_id, not rows)."""
     from utils import supplier_registry as sr
-    at = (datetime.utcnow() - timedelta(days=days_ago)).isoformat()
+    at = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
     return sr.record_supplier_notification(
         run_id=run_id, supplier_domain=domain, vendor_name="DXP Enterprises",
         noun_class="SEAL", notify_reason=reason, send_status="stubbed",
@@ -628,7 +628,7 @@ class TestUniformRejection:
         conn = sqlite3.connect(ct._DB_PATH)
         conn.execute(
             "UPDATE claim_tokens SET expires_at = ? WHERE token_hash = ?",
-            ((datetime.utcnow() - timedelta(days=1)).isoformat(),
+            ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
              hashlib.sha256(exp["token"].encode()).hexdigest()),
         )
         conn.commit()

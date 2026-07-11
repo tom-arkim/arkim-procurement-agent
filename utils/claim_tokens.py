@@ -64,7 +64,7 @@ import secrets
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 
@@ -130,7 +130,7 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _normalize_domain(raw: str) -> str:
@@ -171,7 +171,7 @@ def generate_for(supplier_domain: str, *,
     raw = secrets.token_urlsafe(_TOKEN_BYTES)
     digest = _hash_token(raw)
     prefix = raw[:_PREFIX_LEN]
-    expires = (datetime.utcnow() + timedelta(days=expiry_days)).isoformat()
+    expires = (datetime.now(timezone.utc) + timedelta(days=expiry_days)).isoformat()
     created = _now()
     token_id = str(uuid.uuid4())
     try:
@@ -238,11 +238,15 @@ def _is_expired(expires_at: Optional[str]) -> bool:
         dt = datetime.fromisoformat(expires_at)
     except (ValueError, TypeError):
         return True
-    now = datetime.utcnow()
-    if dt.tzinfo is not None:
-        from datetime import timezone
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt <= now
+    # Normalize to aware UTC: stored expires_at was historically naive UTC
+    # (datetime.utcnow()); newer writes are tz-aware. Treat a naive value as UTC
+    # so the aware `now` comparison never raises "can't compare offset-naive and
+    # offset-aware".
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt <= datetime.now(timezone.utc)
 
 
 def regenerate(supplier_domain: str, *,

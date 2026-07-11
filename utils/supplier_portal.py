@@ -129,13 +129,14 @@ def demand_teaser(supplier_domain: str,
     a supplier's demand.
 
     Window comparison: timestamps are PARSED to timezone-aware UTC datetimes and
-    compared as datetimes (not ISO strings). The stored ``notified_at`` is naive
-    UTC (``datetime.utcnow().isoformat()``, no tz suffix, microsecond precision
-    - see ``record_supplier_notification``), but a future writer or a manual
-    insert could emit a tz-suffixed (``Z`` / ``+00:00`` / offset) or
-    different-precision string; a string compare would silently miscount those
-    (a ``Z``-suffixed row in the same second as the cutoff but earlier
-    sub-second sorts AFTER a naive microsecond cutoff, so string compare wrongly
+    compared as datetimes (not ISO strings). The stored ``notified_at`` may be
+    naive UTC (the historical ``datetime.utcnow().isoformat()`` form, no tz
+    suffix, microsecond precision - see ``record_supplier_notification``) or
+    tz-aware (``+00:00``, the current writer form); a manual insert could emit a
+    ``Z`` / offset / different-precision string too. A string compare would
+    silently miscount those (a ``Z``-suffixed row in the same second as the
+    cutoff but earlier sub-second sorts AFTER a naive microsecond cutoff, so
+    string compare wrongly
     counts it). Parsing makes the result correct regardless of string format.
     A malformed/missing timestamp is excluded from the count (never crashes,
     never counts-as-matched).
@@ -172,10 +173,11 @@ def demand_teaser(supplier_domain: str,
 
 def _parse_ts_utc(raw: str) -> Optional[datetime]:
     """Parse a stored timestamp to a timezone-aware UTC datetime. A naive
-    timestamp (the repo default - ``datetime.utcnow().isoformat()``) is assumed
-    UTC. A tz-aware timestamp (``Z`` / ``+00:00`` / offset) is respected and
-    normalized to UTC. Returns None on a malformed/empty value so the caller can
-    exclude it from the count (never crashes, never counts-as-matched)."""
+    timestamp (the historical repo default - ``datetime.utcnow().isoformat()``)
+    is assumed UTC. A tz-aware timestamp (``+00:00`` / ``Z`` / offset, the
+    current writer form) is respected and normalized to UTC. Returns None on a
+    malformed/empty value so the caller can exclude it from the count (never
+    crashes, never counts-as-matched)."""
     if not raw:
         return None
     try:

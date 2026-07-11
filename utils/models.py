@@ -7,7 +7,7 @@ Arkim Procure Agent — Data Models (stdlib dataclasses, no third-party deps)
 
 from dataclasses import dataclass, field
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 
@@ -287,7 +287,8 @@ class SourcingRun:
     audit_log_run_id: Optional[str] = None
     agent_version: str = "2.0.0-phase1"
 
-    # Timestamps
-    initiated_at: datetime = field(default_factory=datetime.utcnow)
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    # Timestamps (tz-aware UTC; the persistence layer also stores tz-aware UTC
+    # via DateTime(timezone=True) defaults, so the in-memory and DB forms match.)
+    initiated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

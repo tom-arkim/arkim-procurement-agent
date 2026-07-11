@@ -18,7 +18,7 @@ import re
 import sqlite3
 import uuid
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import requests
@@ -127,7 +127,7 @@ def _save_cache(manufacturer: str, model: str, enriched: dict) -> None:
             manufacturer.lower().strip(),
             model.lower().strip(),
             json.dumps(enriched),
-            datetime.utcnow().isoformat(),
+            datetime.now(timezone.utc).isoformat(),
             _ENRICH_MODEL,
         ))
         conn.commit()

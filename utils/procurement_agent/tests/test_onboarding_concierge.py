@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -296,7 +296,7 @@ class TestInertnessFlagOff:
         graduation branch is gated off — Night 3 already proved this; we
         re-assert it isn't disturbed by Night 4)."""
         s = iso_db_off
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s.upsert_apollo_data("legacy-co.com", {"suitability_status": "confirmed",
                                                 "apollo_enriched_at": old})
         rec = s.lookup_by_domain("legacy-co.com")

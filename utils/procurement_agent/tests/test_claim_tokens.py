@@ -22,7 +22,7 @@ token store is standalone).
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -118,7 +118,7 @@ class TestExpiry:
         conn = _s.connect(store._DB_PATH)
         conn.execute(
             "UPDATE claim_tokens SET expires_at = ? WHERE id = ?",
-            ((datetime.utcnow() - timedelta(seconds=1)).isoformat(), out["token_id"]),
+            ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), out["token_id"]),
         )
         conn.commit()
         conn.close()
@@ -131,7 +131,7 @@ class TestExpiry:
     def test_default_expiry_is_7_days(self, store):
         out = store.generate_for("dxpe.com")
         exp = datetime.fromisoformat(out["expires_at"])
-        delta = exp - datetime.utcnow()
+        delta = exp - datetime.now(timezone.utc)
         # ~7 days, allow a minute of slack.
         assert timedelta(days=6, hours=23) < delta < timedelta(days=7, minutes=5)
 
@@ -189,7 +189,7 @@ class TestUniformRejection:
         conn = _s.connect(store._DB_PATH)
         conn.execute(
             "UPDATE claim_tokens SET expires_at = ? WHERE token_hash = ?",
-            ((datetime.utcnow() - timedelta(days=1)).isoformat(), expired_hash),
+            ((datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), expired_hash),
         )
         conn.commit()
         conn.close()

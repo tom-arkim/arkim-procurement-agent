@@ -494,7 +494,7 @@ def _maybe_seed(conn: sqlite3.Connection) -> None:
     count = conn.execute("SELECT COUNT(*) FROM suppliers").fetchone()[0]
     if count > 0:
         return
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     for domain, name in _SEED_VENDORS:
         conn.execute(
             """INSERT OR IGNORE INTO suppliers
@@ -573,7 +573,7 @@ def create_stub(name: str, domain: str = "", source_url: str = "") -> dict:
         return existing
 
     norm_domain = _normalize_domain(domain or source_url)
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     stub = {
         "id":                          str(uuid.uuid4()),
         "domain":                      norm_domain or None,
@@ -639,7 +639,7 @@ def update_supplier(name: str, **fields) -> bool:
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:
         return False
-    updates["updated_at"] = datetime.utcnow().isoformat()
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     set_clause = ", ".join(f"{k} = :{k}" for k in updates)
     updates["_name_lower"] = name.lower()
     try:
@@ -690,8 +690,8 @@ def upsert_apollo_data(domain: str, fields: dict) -> bool:
         updates["is_us_confirmed"] = int(bool(updates["is_us_confirmed"]))
 
     # Stamp the enrich date (drives staleness) unless caller pinned it.
-    updates.setdefault("apollo_enriched_at", datetime.utcnow().isoformat())
-    updates["updated_at"] = datetime.utcnow().isoformat()
+    updates.setdefault("apollo_enriched_at", datetime.now(timezone.utc).isoformat())
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
         with closing(_get_conn()) as conn:
@@ -699,7 +699,7 @@ def upsert_apollo_data(domain: str, fields: dict) -> bool:
                 "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
             ).fetchone()
             if not exists:
-                now = datetime.utcnow().isoformat()
+                now = datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     """INSERT OR IGNORE INTO suppliers
                        (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
@@ -737,15 +737,15 @@ def upsert_contact(domain: str, fields: dict) -> bool:
         return False
 
     # Stamp the resolution time (naive UTC, matching the store) unless caller pinned it.
-    updates.setdefault("contact_resolved_at", datetime.utcnow().isoformat())
-    updates["updated_at"] = datetime.utcnow().isoformat()
+    updates.setdefault("contact_resolved_at", datetime.now(timezone.utc).isoformat())
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
         with closing(_get_conn()) as conn:
             exists = conn.execute(
                 "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
             ).fetchone()
             if not exists:
-                now = datetime.utcnow().isoformat()
+                now = datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     """INSERT OR IGNORE INTO suppliers
                        (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
@@ -782,15 +782,15 @@ def upsert_primary_contact(domain: str, fields: dict) -> bool:
         print(f"[SupplierRegistry] upsert_primary_contact skipped -- no primary fields for {norm!r}")
         return False
 
-    updates.setdefault("primary_contact_at", datetime.utcnow().isoformat())
-    updates["updated_at"] = datetime.utcnow().isoformat()
+    updates.setdefault("primary_contact_at", datetime.now(timezone.utc).isoformat())
+    updates["updated_at"] = datetime.now(timezone.utc).isoformat()
     try:
         with closing(_get_conn()) as conn:
             exists = conn.execute(
                 "SELECT 1 FROM suppliers WHERE domain = ?", (norm,)
             ).fetchone()
             if not exists:
-                now = datetime.utcnow().isoformat()
+                now = datetime.now(timezone.utc).isoformat()
                 conn.execute(
                     """INSERT OR IGNORE INTO suppliers
                        (id, domain, name, onboarding_status, vendor_authorization_status, created_at, updated_at)
@@ -829,7 +829,7 @@ def mark_contact_bounced(domain: str, which: str = "generic") -> bool:
                "updated_at = ? WHERE domain = ?")
     try:
         with closing(_get_conn()) as conn:
-            cursor = conn.execute(sql, (datetime.utcnow().isoformat(), norm))
+            cursor = conn.execute(sql, (datetime.now(timezone.utc).isoformat(), norm))
             conn.commit()
             return cursor.rowcount > 0
     except Exception as exc:
@@ -936,7 +936,7 @@ def record_sent_message(
     the new row id, or None on failure (fail-soft — never raises into the flow).
     """
     domain = _normalize_domain(supplier_domain) if supplier_domain else None
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     row = (
         str(uuid.uuid4()),
         run_id,
@@ -1035,12 +1035,15 @@ def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_D
         dt = datetime.fromisoformat(enriched_at)
     except (ValueError, TypeError):
         return True
-    # Normalize a tz-aware timestamp to naive UTC so the subtraction below (against
-    # a naive utcnow()) never raises "can't subtract offset-naive and offset-aware".
-    # Writers use naive utcnow() today; this tolerates an aware value defensively.
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return (datetime.utcnow() - dt) > timedelta(days=ttl_days)
+    # Normalize to aware UTC: stored apollo_enriched_at was historically naive
+    # UTC (datetime.utcnow().isoformat(), no tz suffix); newer writes are
+    # tz-aware (+00:00). Treat a naive value as UTC so the aware `now` subtraction
+    # never raises "can't subtract offset-naive and offset-aware".
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return (datetime.now(timezone.utc) - dt) > timedelta(days=ttl_days)
 
 
 def record_review_item(
@@ -1071,7 +1074,7 @@ def record_review_item(
     (not merely the supplier domain). All optional/nullable — legacy + out-of-thread
     rows omit them and the caller falls back to the domain join."""
     domain = _normalize_domain(supplier_domain) if supplier_domain else None
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     row = (
         str(uuid.uuid4()), kind, status, run_id, domain, vendor_name,
         manufacturer, part_number, json.dumps(payload or {}),
@@ -1148,7 +1151,7 @@ def set_review_item_status(item_id: str, status: str) -> bool:
         with closing(_get_conn()) as conn:
             cur = conn.execute(
                 "UPDATE review_items SET status = ?, resolved_at = ? WHERE id = ?",
-                (status, datetime.utcnow().isoformat(), item_id),
+                (status, datetime.now(timezone.utc).isoformat(), item_id),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -1248,7 +1251,7 @@ def set_supplier_classes(domain: str, classes: list[dict],
     sid = _ensure_supplier_row(domain)
     if not sid:
         return False
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     try:
         with closing(_get_conn()) as conn:
             conn.execute("DELETE FROM supplier_classes WHERE supplier_id = ?", (sid,))
@@ -1314,7 +1317,7 @@ def set_supplier_brands(domain: str, brands: list[dict],
     sid = _ensure_supplier_row(domain)
     if not sid:
         return False
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     try:
         with closing(_get_conn()) as conn:
             conn.execute("DELETE FROM supplier_brands WHERE supplier_id = ?", (sid,))
@@ -1394,7 +1397,7 @@ def set_supplier_territory(domain: str, ship_area: dict,
         SHIP_AREA_NATIONWIDE_US, "STATES"
     ):
         return False
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     try:
         with closing(_get_conn()) as conn:
             conn.execute(
@@ -1465,7 +1468,7 @@ def set_supplier_verticals(domain: str, verticals: list[str],
     sid = _ensure_supplier_row(domain)
     if not sid:
         return False
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     try:
         with closing(_get_conn()) as conn:
             conn.execute(
@@ -1532,7 +1535,7 @@ def tier1_transition(domain: str, new_status: str,
         print(f"[SupplierRegistry] tier1 illegal transition rejected: "
               f"{current!r} -> {new_status!r}")
         return None
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     try:
         with closing(_get_conn()) as conn:
             conn.execute(
@@ -1760,7 +1763,7 @@ def record_supplier_notification(
     dom = _normalize_domain(supplier_domain) if supplier_domain else None
     if not dom:
         return None
-    now = notified_at or datetime.utcnow().isoformat()
+    now = notified_at or datetime.now(timezone.utc).isoformat()
     row = (
         str(uuid.uuid4()), run_id, dom, vendor_name, noun_class, notify_reason,
         now, send_status, message_id, threshold,

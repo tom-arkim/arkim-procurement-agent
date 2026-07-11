@@ -18,7 +18,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
@@ -156,14 +156,20 @@ def _discover_via_llm(manufacturer: str, equipment_type: str) -> Optional[dict]:
 def _is_stale(last_accessed_at: str, ttl_days: int) -> bool:
     try:
         ts = datetime.fromisoformat(last_accessed_at)
-        return datetime.utcnow() - ts > timedelta(days=ttl_days)
+        # Normalize to aware UTC: stored timestamps were historically naive UTC
+        # (datetime.utcnow().isoformat(), no tz suffix); newer writes are
+        # tz-aware (+00:00). Treat a naive value as UTC so the aware `now`
+        # subtraction never raises "can't subtract offset-naive and offset-aware".
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - ts > timedelta(days=ttl_days)
     except Exception:
         return True
 
 
 def _upsert(conn: sqlite3.Connection, manufacturer: str, equipment_type: str,
             payload: dict, model_used: str) -> None:
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     conn.execute("""
         INSERT INTO brand_intelligence
             (id, manufacturer, equipment_type, parent_company, subsidiaries,
@@ -198,7 +204,7 @@ def _touch(conn: sqlite3.Connection, manufacturer: str, equipment_type: str) -> 
     """Update last_accessed_at without changing data."""
     conn.execute(
         "UPDATE brand_intelligence SET last_accessed_at = ? WHERE manufacturer = ? AND equipment_type = ?",
-        (datetime.utcnow().isoformat(), manufacturer.lower().strip(), equipment_type.lower().strip()),
+        (datetime.now(timezone.utc).isoformat(), manufacturer.lower().strip(), equipment_type.lower().strip()),
     )
     conn.commit()
 

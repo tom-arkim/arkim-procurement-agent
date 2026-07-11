@@ -134,7 +134,7 @@ class TestUpsertApolloData:
 
     def test_caller_supplied_enriched_at_is_preserved(self, isolated_db):
         sr = isolated_db
-        pinned = (datetime.utcnow() - timedelta(days=10)).isoformat()
+        pinned = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
         sr.upsert_apollo_data("x.com", {"suitability_status": "confirmed", "apollo_enriched_at": pinned})
         rec = sr.lookup_by_domain("x.com")
         assert rec["apollo_enriched_at"] == pinned
@@ -161,21 +161,21 @@ class TestUpsertApolloData:
 class TestStaleness:
     def test_fresh_confirmed_not_stale(self):
         s = {"onboarding_status": "discovery_only",
-             "apollo_enriched_at": datetime.utcnow().isoformat()}
+             "apollo_enriched_at": datetime.now(timezone.utc).isoformat()}
         assert supplier_registry.needs_reenrichment(s) is False
 
     def test_stale_confirmed_needs_reenrich(self):
-        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         s = {"onboarding_status": "discovery_only", "apollo_enriched_at": old}
         assert supplier_registry.needs_reenrichment(s) is True
 
     def test_onboarded_exempt_even_if_ancient(self):
-        old = (datetime.utcnow() - timedelta(days=5000)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=5000)).isoformat()
         s = {"onboarding_status": "onboarded_arkim_supplier", "apollo_enriched_at": old}
         assert supplier_registry.needs_reenrichment(s) is False
 
     def test_invited_not_exempt(self):
-        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         s = {"onboarding_status": "invited", "apollo_enriched_at": old}
         assert supplier_registry.needs_reenrichment(s) is True
 
@@ -203,19 +203,19 @@ class TestStaleness:
         assert supplier_registry.needs_reenrichment({}) is False
 
     def test_ttl_param_respected(self):
-        d = (datetime.utcnow() - timedelta(days=10)).isoformat()
+        d = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
         s = {"onboarding_status": "discovery_only", "apollo_enriched_at": d}
         assert supplier_registry.needs_reenrichment(s, ttl_days=5) is True
         assert supplier_registry.needs_reenrichment(s, ttl_days=30) is False
 
     def test_staleness_via_store_roundtrip(self, isolated_db):
         sr = isolated_db
-        old = (datetime.utcnow() - timedelta(days=200)).isoformat()
+        old = (datetime.now(timezone.utc) - timedelta(days=200)).isoformat()
         sr.upsert_apollo_data("stale-co.com", {"suitability_status": "confirmed", "apollo_enriched_at": old})
         rec = sr.lookup_by_domain("stale-co.com")
         assert sr.needs_reenrichment(rec) is True
 
-        fresh = datetime.utcnow().isoformat()
+        fresh = datetime.now(timezone.utc).isoformat()
         sr.upsert_apollo_data("fresh-co.com", {"suitability_status": "confirmed", "apollo_enriched_at": fresh})
         assert sr.needs_reenrichment(sr.lookup_by_domain("fresh-co.com")) is False
 

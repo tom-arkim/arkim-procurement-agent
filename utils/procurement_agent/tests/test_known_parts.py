@@ -6,7 +6,7 @@ durable/volatile split (a stale price never drops the durable edge), and the
 determinism win (same key → same supplier set across reads once cached).
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -88,7 +88,7 @@ class TestFreshness:
         # Backdate the price beyond the TTL.
         db = isolated._load()
         edge = next(iter(db[key]["edges"].values()))
-        edge["price_date"] = (datetime.utcnow() - timedelta(days=known_parts.PRICE_TTL_DAYS + 5)).isoformat()
+        edge["price_date"] = (datetime.now(timezone.utc) - timedelta(days=known_parts.PRICE_TTL_DAYS + 5)).isoformat()
         isolated._save(db)
 
         edges = isolated.get_edges(key)

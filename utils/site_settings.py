@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 _DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
@@ -62,7 +62,7 @@ def upsert_shipto(site_id: str, fields: dict) -> bool:
     if not site_id:
         return False
     values = {k: (fields.get(k) or "") for k in _WRITABLE}
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
     try:
         conn = _get_conn()
         conn.execute(

@@ -12,7 +12,7 @@ exercise the pure function directly).
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 # Orders in these states count as real purchases (mirror utils/impact._PURCHASED_STATUSES).
@@ -36,7 +36,11 @@ def _parse(when: Optional[str]) -> Optional[datetime]:
 def reorder_forecast(orders: list[dict], now: Optional[datetime] = None) -> list[dict]:
     """Per-part reorder forecast from order history. Parts with < 2 purchases are
     omitted (no cadence). Returned most-urgent first (soonest/over-due). Pure."""
-    now = now or datetime.utcnow()
+    # Naive-ness is load-bearing here: `_parse` strips tzinfo for stable day math
+    # and the tests pass a naive `now`. `datetime.utcnow()` is deprecated, so use
+    # `datetime.now(timezone.utc)` and strip the tzinfo to stay naive-UTC —
+    # byte-identical to the old `datetime.utcnow()` value, no behavior change.
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
 
     by_part: dict[tuple, list[dict]] = {}
     for o in orders:
