@@ -936,6 +936,240 @@ class TestCacheFirstReadPolicy:
 
 
 # ---------------------------------------------------------------------------
+# T6 — ACCEPTANCE SUITE: spec §9 verbatim, Gusher as the acceptance case
+# ---------------------------------------------------------------------------
+
+def _seals_direct(**over) -> dict:
+    """Seals-Direct: aftermarket PN found, real URL (Band B, criterion 3)."""
+    c = {
+        "vendor_name": "Seals-Direct",
+        "source_url": "https://www.sealsdirect.com/gusher-84004-28",
+        "found_part_number": "84004-28SP",
+        "pn_match_status": "partial_match",
+        "base_price": 0.0,
+        "price_tbd": True,
+        "suitability_score": 18.0,
+        "merchant_type": "Quote Request",
+    }
+    c.update(over)
+    return c
+
+
+_FIVE_MOCKS = ("Phoenix Pumps", "Anderson Process", "OTC Industrial",
+               "Great Lakes", "Wagner Process")
+
+
+def _gusher_live_tiers() -> tuple[list, list, list]:
+    """The live Gusher run's candidate shapes (run 37e6104d / run_full.json):
+    DXP class-match in Tier 1; Zoro aftermarket in Tier 2; Sealit123 exact-PN
+    $53.25, US Seal exact-PN (crude 12.6), Seals-Direct aftermarket and the five
+    brand-intelligence mock seeds in Tier 3."""
+    tier1 = [_dxp()]
+    tier2 = [_zoro()]
+    tier3 = [_mock_seed(n) for n in _FIVE_MOCKS] + [_sealit(), _us_seal(), _seals_direct()]
+    return tier1, tier2, tier3
+
+
+def _run_gusher_pipeline(monkeypatch, flag_on: bool = True) -> dict:
+    """Drive the REAL SourcingAgent.run (floor, dedup, tier-3 ranking, band pass)
+    over the Gusher fixture, tiers mocked at the tier-runner seam."""
+    from utils.models import SourcingRun
+    from utils.procurement_agent.agents.sourcing_agent import SourcingAgent
+
+    if flag_on:
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+    else:
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+    tier1, tier2, tier3 = _gusher_live_tiers()
+    agent = SourcingAgent()
+    run = SourcingRun(
+        asset_specs_json={
+            "manufacturer": "Gusher Pumps", "model": "Type 21",
+            "part_number": _GUSHER_PN, "voltage": "N/A",
+            "category": "Part", "detected_type": "mechanical seal",
+            "shaft_size": '1-5/8"',
+        },
+        urgency_factor=0.3,
+        warranty_status="unknown",
+    )
+    with patch.object(agent, "_run_tier1", return_value=tier1), \
+         patch.object(agent, "_run_tier2", return_value=tier2), \
+         patch.object(agent, "_run_tier3", return_value=tier3), \
+         patch.object(agent, "_apollo_clarify", return_value=tier3), \
+         patch.object(agent, "_resolve_contact", return_value=tier3):
+        return agent.run(run)
+
+
+class TestAcceptanceGusher:
+    """RANKING_BANDS_SPEC.md §9, criteria 1-8, on the live-run fixture."""
+
+    @pytest.fixture
+    def response(self, monkeypatch):
+        from api_server import _transform_sourcing_results
+        return _transform_sourcing_results(_run_gusher_pipeline(monkeypatch))
+
+    def test_criterion_1_sealit123_ranks_first_when_dxp_unconfirmed(self, response):
+        """Exact PN + real URL + $53.25 ranks #1 overall — above every
+        category-only and mock candidate."""
+        assert response["findings"][0]["vendorName"] == "Sealit123"
+        assert response["findings"][0]["band"] == "A"
+        assert response["findings"][0]["price"] == 53.25
+
+    def test_criterion_1b_sealit123_is_2_when_dxp_confirmed(self, monkeypatch):
+        from api_server import _transform_sourcing_results
+        quote_index = {"by_thread": {}, "domain_threads": {}, "by_domain": {
+            "dxpe.com": {"status": "confirmed", "supplier_domain": "dxpe.com",
+                         "thread_id": "t-dxp", "confidence": 0.9,
+                         "payload": {"unit_price": 149.0, "lead_time": "2 days"}}}}
+        out = _transform_sourcing_results(_run_gusher_pipeline(monkeypatch),
+                                          quote_index=quote_index)
+        names = [f["vendorName"] for f in out["findings"]]
+        assert names[0] == "DXP Enterprises"
+        assert names[1] == "Sealit123"   # ranks #1 or #2 overall — criterion 1
+
+    def test_criterion_2_us_seal_not_rejected_band_a(self, monkeypatch):
+        """US Seal Manufacturing (exact PN) is NOT rejected — Band A, surfaced."""
+        raw = _run_gusher_pipeline(monkeypatch)
+        us = next(c for c in raw["tier_3"]["results"]
+                  if c["vendor_name"] == "US Seal Manufacturing")
+        assert us["band"] == BAND_A
+        assert not us.get("rejection_reason")
+        from api_server import _transform_sourcing_results
+        out = _transform_sourcing_results(raw)
+        assert "US Seal Manufacturing" in [f["vendorName"] for f in out["findings"]]
+
+    def test_criterion_3_aftermarket_surface_band_b_unfloored(self, monkeypatch):
+        """Zoro / Seals-Direct (compatible PN found) surface in Band B — not
+        floor-rejected at 10.5."""
+        raw = _run_gusher_pipeline(monkeypatch)
+        cands = {c["vendor_name"]: c
+                 for t in ("tier_2", "tier_3") for c in raw[t]["results"]}
+        for name in ("Zoro", "Seals-Direct"):
+            assert cands[name]["band"] == BAND_B, name
+            assert not cands[name].get("rejection_reason"), name
+
+    def test_criterion_4_no_mock_ranked_no_mock_numbers_seeds_in_outreach_only(self, response, monkeypatch):
+        """No is_mock candidate appears as a ranked option card; no mock carries a
+        suitability/confidence number; the five seeds appear (capped) in the
+        outreach block only."""
+        assert not any(f["isMock"] for f in response["findings"])
+        finding_names = {f["vendorName"] for f in response["findings"]}
+        assert finding_names.isdisjoint(set(_FIVE_MOCKS))
+        raw = _run_gusher_pipeline(monkeypatch)
+        mocks = [c for c in raw["tier_3"]["results"] if c.get("is_mock")]
+        assert len(mocks) == 5
+        for m in mocks:
+            assert m["suitability_score"] is None    # the 88.0 died
+            assert m["confidence_score"] is None     # the 75.0 died
+        outreach_names = [s["vendorName"] for s in response["outreachTargets"]["suppliers"]]
+        assert set(_FIVE_MOCKS).issubset(set(outreach_names))  # within the 5-cap
+
+    def test_criterion_5_dxp_named_onboarded_in_outreach_and_promotable(self, response, monkeypatch):
+        """DXP appears as the named onboarded supplier in the outreach block
+        (first-look RFQ); a simulated confirmation promotes it to top of Band A."""
+        suppliers = response["outreachTargets"]["suppliers"]
+        assert suppliers[0]["vendorName"] == "DXP Enterprises"
+        assert suppliers[0]["onboarded"] is True
+        # Promotion re-asserted end-to-end in test_criterion_1b (DXP tops findings).
+
+    def test_criterion_7_band_order_absolute_in_findings(self, response):
+        """No Band-B finding above Band A (Band C never a finding at all);
+        the randomized property lives in TestBandOrderingProperty."""
+        bands = [f["band"] for f in response["findings"]]
+        assert bands == sorted(bands)  # A... then B...
+        assert set(bands) <= {"A", "B"}
+
+    def test_criterion_8_confidence_from_evidence_zero_implies_band_c(self, monkeypatch):
+        """Confidence is evidence-derived; 0-confidence implies Band C — asserted
+        across the full fixture AND a randomized candidate bank."""
+        raw = _run_gusher_pipeline(monkeypatch)
+        for t in ("tier_1", "tier_2", "tier_3"):
+            for c in raw[t]["results"]:
+                if c.get("is_mock"):
+                    assert c["confidence_score"] is None
+                    continue
+                conf = c["confidence_score"]
+                if conf == 0.0:
+                    assert c["band"] == BAND_C, c["vendor_name"]
+                if c["band"] in (BAND_A, BAND_B):
+                    assert conf > 0.0, c["vendor_name"]
+        # The eval bank: randomized candidates spanning every evidence shape.
+        for seed in range(30):
+            rng = random.Random(7000 + seed)
+            for i in range(20):
+                c = annotate_candidate(_rand_candidate(rng, i), _GUSHER_PN)
+                if c.get("is_mock"):
+                    assert c["confidence_score"] is None
+                elif c["confidence_score"] == 0.0:
+                    assert c["band"] == BAND_C
+                else:
+                    assert c["band"] in (BAND_A, BAND_B)
+
+    # Criterion 6 (no frozen-verdict replay; version bump invalidates) is encoded
+    # at the API seam in TestCacheFirstReadPolicy (T5). Criterion 9 (suite green,
+    # Night-7 eval cases pass) is the suite itself.
+
+
+# ---------------------------------------------------------------------------
+# T6 — flag-off byte-identical parity
+# ---------------------------------------------------------------------------
+
+_BAND_KEYS = {"band", "evidence_quality", "banded", "provenance", "band_note",
+              "band_c_capped", "edge_stale", "price_stale", "matcher_version",
+              "stale_hint"}
+
+
+def _collect_keys(obj, found: set) -> None:
+    if isinstance(obj, dict):
+        found.update(obj.keys())
+        for v in obj.values():
+            _collect_keys(v, found)
+    elif isinstance(obj, list):
+        for v in obj:
+            _collect_keys(v, found)
+
+
+class TestFlagOffParity:
+    """RANKING_BANDS_V1 OFF ⇒ behavior byte-identical to pre-band code: no band
+    vocabulary anywhere, fabricated scores and floor verdicts exactly as before,
+    legacy response shape. (The wider parity net is the pre-existing suite, which
+    runs entirely flag-off and stays green.)"""
+
+    def test_pipeline_result_carries_no_band_vocabulary(self, monkeypatch):
+        raw = _run_gusher_pipeline(monkeypatch, flag_on=False)
+        keys: set = set()
+        _collect_keys(raw, keys)
+        assert keys.isdisjoint(_BAND_KEYS), keys & _BAND_KEYS
+
+    def test_legacy_scores_and_floor_verdicts_preserved(self, monkeypatch):
+        raw = _run_gusher_pipeline(monkeypatch, flag_on=False)
+        by_name = {c["vendor_name"]: c
+                   for t in ("tier_1", "tier_2", "tier_3") for c in raw[t]["results"]}
+        # The fabricated constants are UNTOUCHED flag-off (today's behavior).
+        for name in _FIVE_MOCKS:
+            assert by_name[name]["suitability_score"] == 88.0
+            assert by_name[name]["confidence_score"] == 75.0
+        # The floor inversion is UNTOUCHED flag-off (today's defect, preserved).
+        assert by_name["US Seal Manufacturing"]["rejection_reason"] == "suitability_below_floor"
+        assert by_name["Zoro"]["rejection_reason"] == "suitability_below_floor"
+        assert "ranking_bands:v1" not in raw["filters_applied"]
+
+    def test_legacy_response_shape(self, monkeypatch):
+        from api_server import _transform_sourcing_results
+        out = _transform_sourcing_results(_run_gusher_pipeline(monkeypatch, flag_on=False))
+        assert set(out.keys()) == {"tier1", "tier2", "tier3",
+                                   "warrantyBanner", "tier3CapabilityPivot"}
+
+    def test_flag_off_result_json_stable_across_runs(self, monkeypatch):
+        """Determinism guard: two identical flag-off runs serialize identically —
+        the strongest cheap byte-parity statement available without a pre-change
+        binary to diff against."""
+        a = json.dumps(_run_gusher_pipeline(monkeypatch, flag_on=False), sort_keys=True, default=str)
+        b = json.dumps(_run_gusher_pipeline(monkeypatch, flag_on=False), sort_keys=True, default=str)
+        assert a == b
+
+
+# ---------------------------------------------------------------------------
 # SourcingAgent integration seam (flag-on annotates; flag-off untouched)
 # ---------------------------------------------------------------------------
 
