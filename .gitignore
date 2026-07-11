@@ -40,6 +40,9 @@ data/*.sqlite-wal
 utils/*.db
 utils/price_db.json
 utils/known_parts.json
+# utils/ must never hold a registry DB — the live store is data/supplier_registry.sqlite
+# (a 0-byte utils/ copy once appeared here by mistake; this keeps it from re-landing).
+utils/supplier_registry.sqlite
 
 # Frontend — build artefacts, dependencies, and local env overrides (never commit)
 frontend/node_modules/
