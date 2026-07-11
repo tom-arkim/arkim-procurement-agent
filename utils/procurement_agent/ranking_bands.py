@@ -50,6 +50,11 @@ MATCHER_VERSION: int = 1
 # guards against a 2-3 char prefix coincidence claiming Band A.
 _CANONICAL_MIN_BASE_LEN = 6
 
+# Band C is not scored (spec §5): instead of a floor, C candidates are capped in
+# count — top-N by scope strength (evidence quality), onboarded ALWAYS included
+# (never counts against nor is cut by the cap).
+BAND_C_CAP = 5
+
 # Evidence-quality points (spec §4 — verifiable inputs only). 0-100 scale.
 _EQ_PN_POINTS: dict[str, float] = {
     "exact": 40.0,       # found PN equals the requested PN (normalized)
@@ -293,12 +298,69 @@ def order_banded(candidates: list[dict]) -> list[dict]:
     return sorted(candidates, key=banded_sort_key)
 
 
+# ---------------------------------------------------------------------------
+# Floor re-scoping (spec §5) — the floor is a Band-B quality bar, nothing more
+# ---------------------------------------------------------------------------
+
+def rescope_floor(candidate: dict, searched_pn: Optional[str]) -> None:
+    """Re-scope a `suitability_below_floor` rejection to the band rules (spec §5).
+    Mutates in place; touches ONLY the floor rejection (pn_mismatch /
+    duplicate_in_higher_tier / any other rejection type is never cleared).
+
+      Band A — NEVER floor-rejected: an exact/canonical part-match being floored
+               is the defect this kills (US Seal at 12.6). Cleared.
+      Band C — not scored, so the floor does not apply (the count cap replaces
+               it). Cleared.
+      Band B — the floor stands as a quality bar on partial evidence, EXCEPT when
+               the candidate has real found-PN evidence (a compatible/aftermarket
+               PN — Zoro at 10.5): a vendor who found a part variant is evidence-
+               qualified; the crude keyword score is ordering input only (§5).
+    """
+    if candidate.get("rejection_reason") != "suitability_below_floor":
+        return
+    band = candidate.get("band") or assign_band(candidate, searched_pn)
+    if band == BAND_A:
+        note = "floor_cleared_band_a"
+    elif band == BAND_C:
+        note = "floor_not_applicable_band_c"
+    elif pn_evidence_for(candidate, searched_pn) != "none":
+        note = "floor_cleared_pn_evidence"
+    else:
+        return  # Band B without PN evidence: the quality bar stands.
+    candidate["rejection_reason"] = None
+    candidate["band_note"] = note
+
+
+def cap_band_c(candidates: list[dict], cap: int = BAND_C_CAP) -> None:
+    """Apply the Band-C count cap (spec §5) across a candidate set: keep the
+    top-`cap` non-onboarded C candidates by evidence quality (scope strength);
+    onboarded C candidates are ALWAYS included and never count against the cap.
+    Annotate-don't-remove: over-cap candidates get band_c_capped=True (excluded
+    from the outreach block, still present for audit). Candidates already
+    carrying a rejection_reason don't compete for cap slots."""
+    eligible = [
+        c for c in candidates
+        if (c.get("band") == BAND_C
+            and not c.get("rejection_reason")
+            and not is_onboarded(c))
+    ]
+    eligible.sort(key=lambda c: -float(c.get("evidence_quality") or 0.0))
+    for c in eligible[:cap]:
+        c["band_c_capped"] = False
+    for c in eligible[cap:]:
+        c["band_c_capped"] = True
+
+
 def apply_ranking_bands(result: dict, searched_pn: Optional[str]) -> dict:
-    """Flag-on post-pass over a SourcingAgent result dict: annotate every tier
-    candidate with band + evidence_quality and stable-reorder each tier list into
-    banded order. Mutates `result` in place and returns it. Never changes list
-    membership. Callers gate on ranking_bands_active() — this function itself is
+    """Flag-on post-pass over a SourcingAgent result dict:
+      1. annotate every tier candidate with band + evidence_quality,
+      2. re-scope the suitability floor to the band rules (§5),
+      3. apply the Band-C count cap (cross-tier, onboarded always included),
+      4. stable-reorder each tier list into banded order.
+    Mutates `result` in place and returns it. Never changes list membership.
+    Callers gate on ranking_bands_active() — this function itself is
     unconditional so tests can drive it directly."""
+    all_candidates: list[dict] = []
     for tier_key in ("tier_1", "tier_2", "tier_3"):
         tier = result.get(tier_key) or {}
         results = tier.get("results")
@@ -306,5 +368,11 @@ def apply_ranking_bands(result: dict, searched_pn: Optional[str]) -> dict:
             continue
         for c in results:
             annotate_candidate(c, searched_pn)
-        results.sort(key=banded_sort_key)
+            rescope_floor(c, searched_pn)
+        all_candidates.extend(results)
+    cap_band_c(all_candidates)
+    for tier_key in ("tier_1", "tier_2", "tier_3"):
+        results = (result.get(tier_key) or {}).get("results")
+        if results:
+            results.sort(key=banded_sort_key)
     return result

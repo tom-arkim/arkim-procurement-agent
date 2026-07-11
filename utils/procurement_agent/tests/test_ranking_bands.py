@@ -18,11 +18,12 @@ import pytest
 
 from utils.procurement_agent import ranking_bands as rb
 from utils.procurement_agent.ranking_bands import (
-    BAND_A, BAND_B, BAND_C,
+    BAND_A, BAND_B, BAND_C, BAND_C_CAP,
     annotate_candidate,
     apply_ranking_bands,
     assign_band,
     banded_sort_key,
+    cap_band_c,
     classify_pn_evidence,
     confidence_from_evidence,
     evidence_quality,
@@ -30,6 +31,7 @@ from utils.procurement_agent.ranking_bands import (
     order_banded,
     pn_evidence_for,
     ranking_bands_active,
+    rescope_floor,
 )
 
 # The Gusher acceptance identifiers (spec §9) used throughout.
@@ -395,6 +397,101 @@ class TestBandOrderingProperty:
 
 
 # ---------------------------------------------------------------------------
+# Floor re-scoping (spec §5) — T2
+# ---------------------------------------------------------------------------
+
+class TestFloorRescope:
+    """The Gusher floor-inversion regressions: the floor rejected the vendors who
+    FOUND the part (US Seal 12.6, Zoro 10.5) while hardcoded-88 mocks passed."""
+
+    def _floored(self, factory, **over):
+        c = factory(rejection_reason="suitability_below_floor", **over)
+        annotate_candidate(c, _GUSHER_PN)
+        rescope_floor(c, _GUSHER_PN)
+        return c
+
+    def test_us_seal_band_a_floor_rejection_cleared(self):
+        c = self._floored(_us_seal)
+        assert c["rejection_reason"] is None
+        assert c["band_note"] == "floor_cleared_band_a"
+
+    def test_sealit_band_a_never_floor_rejected_even_at_zero(self):
+        c = self._floored(_sealit, suitability_score=0.0)
+        assert c["rejection_reason"] is None
+
+    def test_zoro_band_b_compatible_pn_unfloored(self):
+        c = self._floored(_zoro)  # suitability 10.5, compatible PN found
+        assert c["rejection_reason"] is None
+        assert c["band_note"] == "floor_cleared_pn_evidence"
+
+    def test_band_b_listing_without_pn_evidence_keeps_floor(self):
+        # The floor's legitimate job: junk listings with no PN evidence stay out.
+        c = self._floored(_zoro, found_part_number=None, pn_match_status="not_visible")
+        assert c["band"] == BAND_B
+        assert c["rejection_reason"] == "suitability_below_floor"
+
+    def test_band_c_floor_not_applicable(self):
+        c = self._floored(_pivot)
+        assert c["rejection_reason"] is None
+        assert c["band_note"] == "floor_not_applicable_band_c"
+
+    def test_non_floor_rejections_never_cleared(self):
+        for reason in ("pn_mismatch", "duplicate_in_higher_tier"):
+            c = _us_seal(rejection_reason=reason)
+            annotate_candidate(c, _GUSHER_PN)
+            rescope_floor(c, _GUSHER_PN)
+            assert c["rejection_reason"] == reason
+
+
+# ---------------------------------------------------------------------------
+# Band-C count cap (spec §5) — T2
+# ---------------------------------------------------------------------------
+
+class TestBandCCap:
+    def test_cap_keeps_top_n_by_evidence_and_flags_rest(self):
+        seeds = [annotate_candidate(_mock_seed(f"Seed{i}"), _GUSHER_PN)
+                 for i in range(BAND_C_CAP + 3)]
+        # Give a couple of them URL evidence so ordering by EQ is observable.
+        pivots = [annotate_candidate(_pivot(vendor_name=f"Pivot{i}"), _GUSHER_PN)
+                  for i in range(2)]
+        cands = seeds + pivots
+        cap_band_c(cands)
+        kept = [c for c in cands if c.get("band_c_capped") is False]
+        capped = [c for c in cands if c.get("band_c_capped") is True]
+        assert len(kept) == BAND_C_CAP
+        assert len(capped) == len(cands) - BAND_C_CAP
+        # URL-bearing pivots have higher EQ than URL-less seeds — they keep slots.
+        assert all(p in kept for p in pivots)
+
+    def test_onboarded_never_capped_and_never_counts_against_cap(self):
+        dxp = annotate_candidate(_dxp(), _GUSHER_PN)
+        seeds = [annotate_candidate(_mock_seed(f"Seed{i}"), _GUSHER_PN)
+                 for i in range(BAND_C_CAP)]
+        cands = [dxp] + seeds
+        cap_band_c(cands)
+        assert "band_c_capped" not in dxp  # onboarded: not in cap competition at all
+        assert all(c.get("band_c_capped") is False for c in seeds)  # full cap available
+
+    def test_band_a_b_untouched_by_cap(self):
+        a = annotate_candidate(_sealit(), _GUSHER_PN)
+        b = annotate_candidate(_zoro(), _GUSHER_PN)
+        cap_band_c([a, b])
+        assert "band_c_capped" not in a and "band_c_capped" not in b
+
+    def test_apply_ranking_bands_caps_across_tiers(self):
+        result = {
+            "tier_1": {"results": [_dxp()], "count": 1, "status": "ok"},
+            "tier_2": {"results": [], "count": 0, "status": "ok"},
+            "tier_3": {"results": [_mock_seed(f"S{i}") for i in range(BAND_C_CAP + 2)],
+                       "count": BAND_C_CAP + 2, "status": "ok"},
+        }
+        apply_ranking_bands(result, _GUSHER_PN)
+        t3 = result["tier_3"]["results"]
+        assert sum(1 for c in t3 if c.get("band_c_capped") is True) == 2
+        assert "band_c_capped" not in result["tier_1"]["results"][0]
+
+
+# ---------------------------------------------------------------------------
 # SourcingAgent integration seam (flag-on annotates; flag-off untouched)
 # ---------------------------------------------------------------------------
 
@@ -441,3 +538,25 @@ class TestSourcingAgentSeam:
         assert "ranking_bands:v1" in result["filters_applied"]
         # Band-A Sealit ordered above Band-B Zoro despite Zoro entering first.
         assert [c["vendor_name"] for c in t3] == ["Sealit123", "Zoro"]
+
+    def test_flag_on_pipeline_floor_fires_then_bands_clear_it(self, monkeypatch):
+        """End-to-end Gusher floor regression: the LIVE pipeline floor (30) rejects
+        US Seal (12.6) and Zoro (10.5); the flag-on band pass re-scopes it —
+        neither part-finder ends the run rejected."""
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        result = _run_agent_with([_us_seal(), _zoro()], monkeypatch)
+        by_name = {c["vendor_name"]: c for c in result["tier_3"]["results"]}
+        us, zoro = by_name["US Seal Manufacturing"], by_name["Zoro"]
+        assert us["band"] == BAND_A and not us.get("rejection_reason")
+        assert us["band_note"] == "floor_cleared_band_a"
+        assert zoro["band"] == BAND_B and not zoro.get("rejection_reason")
+        assert zoro["band_note"] == "floor_cleared_pn_evidence"
+
+    def test_flag_off_pipeline_floor_still_rejects(self, monkeypatch):
+        """Parity guard: flag OFF, the floor behaves exactly as today (US Seal and
+        Zoro rejected below the 30 floor)."""
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+        result = _run_agent_with([_us_seal(), _zoro()], monkeypatch)
+        by_name = {c["vendor_name"]: c for c in result["tier_3"]["results"]}
+        assert by_name["US Seal Manufacturing"]["rejection_reason"] == "suitability_below_floor"
+        assert by_name["Zoro"]["rejection_reason"] == "suitability_below_floor"
