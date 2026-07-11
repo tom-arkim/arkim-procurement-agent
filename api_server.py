@@ -1025,13 +1025,51 @@ def _transform_sourcing_results(raw: dict, quote_index: Optional[dict] = None) -
                 continue
             out.append(_transform_option(o, n, i, quote=_resolve_quote(o, quote_index)))
         return out
-    return {
+    result = {
         "tier1":               _tier("tier_1", 1),
         "tier2":               _tier("tier_2", 2),
         "tier3":               _tier("tier_3", 3),
         "warrantyBanner":      raw.get("warranty_banner"),
         "tier3CapabilityPivot": raw.get("tier3_capability_pivot", False),
     }
+    # RANKING_BANDS_V1 (spec §7) — a BANDED raw result additionally distinguishes
+    # findings (Band A/B cards, banded order) from outreachTargets (the Band-C
+    # ask-and-see block: onboarded supplier named first, capped seeds, provenance
+    # strings, NO numbers). Keyed off the result's own ranking_bands:v1 marker
+    # (not the live env) so a stored flag-off run never grows these keys —
+    # flag-off responses stay byte-identical. Fail-soft: a builder error degrades
+    # to the legacy shape.
+    if "ranking_bands:v1" in (raw.get("filters_applied") or []):
+        try:
+            from utils.procurement_agent.ranking_bands import (
+                banded_findings, is_onboarded, outreach_targets, provenance_for,
+            )
+            result["findings"] = [
+                {
+                    **_transform_option(o, n, i, quote=_resolve_quote(o, quote_index)),
+                    "band":            o.get("band"),
+                    "evidenceQuality": o.get("evidence_quality"),
+                    "isMock":          bool(o.get("is_mock")),  # contract: always False here
+                }
+                for o, n, i in banded_findings(raw)
+            ]
+            result["outreachTargets"] = {
+                "suppliers": [
+                    {
+                        "vendorName": c.get("vendor_name"),
+                        "onboarded":  is_onboarded(c),
+                        "provenance": c.get("provenance") or provenance_for(c),
+                    }
+                    for c in outreach_targets(raw)
+                ],
+            }
+            result["outreachTargets"]["requestedCount"] = \
+                len(result["outreachTargets"]["suppliers"])
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "findings/outreach build failed (legacy shape kept): %s", exc)
+    return result
 
 
 # ---------------------------------------------------------------------------

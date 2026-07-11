@@ -492,6 +492,149 @@ class TestBandCCap:
 
 
 # ---------------------------------------------------------------------------
+# Mock descoring + honest confidence (spec §4) — T3
+# ---------------------------------------------------------------------------
+
+class TestMockDescoring:
+    def test_mock_carries_no_suitability_or_confidence_number(self):
+        c = annotate_candidate(_mock_seed(), _GUSHER_PN)
+        assert c["suitability_score"] is None
+        assert c["confidence_score"] is None
+        assert c["band"] == BAND_C
+        assert c["provenance"] == "Authorized distributor per brand intelligence"
+
+    def test_mock_with_spurious_confirmation_stays_band_c(self):
+        # A fabricated candidate can never be a finding, whatever flags it carries.
+        c = annotate_candidate(_mock_seed(quote_confirmed=True), _GUSHER_PN)
+        assert c["band"] == BAND_C
+
+    def test_confidence_becomes_evidence_derived_for_real_candidates(self):
+        us = annotate_candidate(_us_seal(confidence_score=46.3), _GUSHER_PN)
+        assert us["confidence_score"] == confidence_from_evidence(us, _GUSHER_PN)
+        assert us["confidence_score"] > 0
+        dxp = annotate_candidate(_dxp(confidence_score=90.0), _GUSHER_PN)
+        assert dxp["confidence_score"] == 0.0  # class-match only: nothing verified
+
+    def test_provenance_shapes(self):
+        assert annotate_candidate(_pivot(), _GUSHER_PN)["provenance"] == "Capability discovery"
+        assert annotate_candidate(_dxp(), _GUSHER_PN)["provenance"] == "Onboarded supplier — class match"
+        assert annotate_candidate(_zoro(), _GUSHER_PN)["provenance"] == "Discovered listing"
+
+
+# ---------------------------------------------------------------------------
+# Findings vs outreach targets (spec §7) — T3
+# ---------------------------------------------------------------------------
+
+def _banded_gusher_result() -> dict:
+    """A banded result dict shaped like the live Gusher run: real findings in
+    tiers 2/3, DXP class-match in tier 1, five mock seeds in tier 3."""
+    from utils.procurement_agent.ranking_bands import apply_ranking_bands
+    result = {
+        "tier_1": {"results": [_dxp()], "count": 1, "status": "ok"},
+        "tier_2": {"results": [_zoro()], "count": 1, "status": "ok"},
+        "tier_3": {"results": [_mock_seed(f"Seed{i}") for i in range(5)]
+                              + [_sealit(), _us_seal()],
+                   "count": 7, "status": "ok"},
+        "filters_applied": ["suitability_floor:30%", "ranking_bands:v1"],
+        "warranty_banner": None,
+        "tier3_capability_pivot": False,
+    }
+    return apply_ranking_bands(result, _GUSHER_PN)
+
+
+class TestFindingsAndOutreach:
+    def test_findings_are_band_a_then_b_across_tiers(self):
+        from utils.procurement_agent.ranking_bands import banded_findings
+        entries = banded_findings(_banded_gusher_result())
+        names = [c["vendor_name"] for c, _, _ in entries]
+        bands = [c["band"] for c, _, _ in entries]
+        assert names == ["Sealit123", "US Seal Manufacturing", "Zoro"]
+        assert bands == [BAND_A, BAND_A, BAND_B]
+
+    def test_no_mock_ever_a_finding(self):
+        from utils.procurement_agent.ranking_bands import banded_findings
+        entries = banded_findings(_banded_gusher_result())
+        assert not any(c.get("is_mock") for c, _, _ in entries)
+
+    def test_rejected_candidates_are_not_findings(self):
+        from utils.procurement_agent.ranking_bands import banded_findings
+        result = _banded_gusher_result()
+        for c, _, _ in banded_findings(result):
+            if c["vendor_name"] == "Zoro":
+                c["rejection_reason"] = "pn_mismatch"
+        assert "Zoro" not in [c["vendor_name"] for c, _, _ in banded_findings(result)]
+
+    def test_outreach_targets_onboarded_first_capped_excluded(self):
+        from utils.procurement_agent.ranking_bands import outreach_targets
+        result = _banded_gusher_result()
+        targets = outreach_targets(result)
+        assert targets[0]["vendor_name"] == "DXP Enterprises"  # named first, yours
+        assert all(t["band"] == BAND_C for t in targets)
+        # 5 seeds fit within the cap of 5 (DXP is onboarded, doesn't count).
+        assert len(targets) == 6
+        # Push over the cap: a 6th seed must be excluded from the block.
+        result["tier_3"]["results"].append(_mock_seed("Seed5"))
+        from utils.procurement_agent.ranking_bands import apply_ranking_bands
+        apply_ranking_bands(result, _GUSHER_PN)
+        targets2 = outreach_targets(result)
+        assert len(targets2) == 6  # DXP + capped-at-5 seeds
+        assert sum(1 for c in result["tier_3"]["results"]
+                   if c.get("band_c_capped") is True) == 1
+
+
+# ---------------------------------------------------------------------------
+# API response shape (flag-on findings/outreachTargets; flag-off untouched) — T3
+# ---------------------------------------------------------------------------
+
+class TestApiResponseShape:
+    def _transform(self, raw):
+        from api_server import _transform_sourcing_results
+        return _transform_sourcing_results(raw)
+
+    def test_banded_result_gains_findings_and_outreach(self):
+        out = self._transform(_banded_gusher_result())
+        assert "findings" in out and "outreachTargets" in out
+        names = [f["vendorName"] for f in out["findings"]]
+        assert names == ["Sealit123", "US Seal Manufacturing", "Zoro"]
+        assert [f["band"] for f in out["findings"]] == ["A", "A", "B"]
+        # CONTRACT (spec §4, test-enforced): is_mock in findings = violation.
+        assert not any(f["isMock"] for f in out["findings"])
+
+    def test_outreach_block_no_numbers_onboarded_first(self):
+        out = self._transform(_banded_gusher_result())
+        suppliers = out["outreachTargets"]["suppliers"]
+        assert suppliers[0] == {
+            "vendorName": "DXP Enterprises", "onboarded": True,
+            "provenance": "Onboarded supplier — class match",
+        }
+        assert out["outreachTargets"]["requestedCount"] == len(suppliers) == 6
+        for s in suppliers:
+            # Provenance strings only — never a fabricated number.
+            assert set(s.keys()) == {"vendorName", "onboarded", "provenance"}
+
+    def test_unbanded_result_response_shape_unchanged(self):
+        raw = _banded_gusher_result()
+        raw["filters_applied"] = ["suitability_floor:30%"]  # no ranking_bands marker
+        out = self._transform(raw)
+        assert "findings" not in out
+        assert "outreachTargets" not in out
+
+    def test_pipeline_contract_no_mock_in_findings(self, monkeypatch):
+        """End-to-end contract: flag-on agent.run over seeds + real findings →
+        transformed response findings contain NO is_mock candidate and every mock
+        carries no suitability/confidence number."""
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        tier3 = [_mock_seed(f"Seed{i}") for i in range(5)] + [_sealit(), _us_seal()]
+        raw = _run_agent_with(tier3, monkeypatch)
+        out = self._transform(raw)
+        assert not any(f["isMock"] for f in out["findings"])
+        for c in raw["tier_3"]["results"]:
+            if c.get("is_mock"):
+                assert c["suitability_score"] is None
+                assert c["confidence_score"] is None
+
+
+# ---------------------------------------------------------------------------
 # SourcingAgent integration seam (flag-on annotates; flag-off untouched)
 # ---------------------------------------------------------------------------
 

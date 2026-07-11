@@ -171,19 +171,21 @@ def assign_band(candidate: dict, searched_pn: Optional[str]) -> str:
     """Assign the evidence band for one candidate. Pure; no mutation.
 
     Order of checks is load-bearing:
-      1. An explicit confirmation record → Band A (even for an otherwise Band-C
+      1. Mock/seeded cards → Band C unconditionally (a fabricated candidate can
+         never be a finding — the contract findings must satisfy; a "confirmation"
+         on a mock would itself be fabricated).
+      2. An explicit confirmation record → Band A (even for an otherwise Band-C
          onboarded class-match — this is the §3 band-mobility promotion).
-      2. Mock/seeded cards and capability pivots → Band C (no candidate-specific
-         evidence, whatever score they used to carry).
-      3. Exact/canonical found-PN + real URL → Band A.
-      4. Compatible found-PN, exact/canonical PN without a URL, an extractor
+      3. Capability pivots → Band C (inferred capability only).
+      4. Exact/canonical found-PN + real URL → Band A.
+      5. Compatible found-PN, exact/canonical PN without a URL, an extractor
          partial-match, or a part-referencing discovered listing → Band B.
-      5. Everything else (registry class-match, URL-less seeds) → Band C.
+      6. Everything else (registry class-match, URL-less seeds) → Band C.
     """
-    if has_confirmation(candidate):
-        return BAND_A
     if candidate.get("is_mock"):
         return BAND_C
+    if has_confirmation(candidate):
+        return BAND_A
     if candidate.get("search_type") == "capability_pivot":
         return BAND_C
 
@@ -280,13 +282,43 @@ def banded_sort_key(candidate: dict) -> tuple:
     )
 
 
+def provenance_for(candidate: dict) -> str:
+    """Human-readable evidence provenance (spec §4/§7): what a candidate's presence
+    is based on — the ONLY thing a no-evidence candidate carries (no numbers)."""
+    if candidate.get("is_mock"):
+        return "Authorized distributor per brand intelligence"
+    if candidate.get("search_type") == "capability_pivot":
+        return "Capability discovery"
+    if is_onboarded(candidate):
+        return "Onboarded supplier — class match"
+    if _has_real_url(candidate):
+        return "Discovered listing"
+    return "Discovered supplier"
+
+
 def annotate_candidate(candidate: dict, searched_pn: Optional[str]) -> dict:
     """Attach band + evidence annotations in place (annotate-don't-remove):
-    band, evidence_quality, banded=True. Returns the candidate."""
+    band, evidence_quality, provenance, banded=True — and make the scores honest
+    (spec §4):
+
+      - is_mock (seeded) candidates carry NO suitability and NO confidence number
+        (the fabricated 88.0/75.0 die here) — only provenance + Band C.
+      - every other candidate's confidence_score is REPLACED by the evidence-
+        derived confidence (the C3 fix): 0 means nothing verified, and only
+        Band C is nothing-verified.
+
+    Returns the candidate."""
     band = assign_band(candidate, searched_pn)
     eq = evidence_quality(candidate, searched_pn, band=band)
     candidate["band"] = band
     candidate["evidence_quality"] = eq
+    candidate["provenance"] = provenance_for(candidate)
+    if candidate.get("is_mock"):
+        candidate["suitability_score"] = None
+        candidate["confidence_score"] = None
+    else:
+        candidate["confidence_score"] = confidence_from_evidence(
+            candidate, searched_pn, band=band, eq=eq)
     candidate["banded"] = True
     return candidate
 
@@ -296,6 +328,45 @@ def order_banded(candidates: list[dict]) -> list[dict]:
     onboarded first, then evidence quality; prior (TCA) order breaks remaining
     ties via sort stability. Input candidates must be annotated."""
     return sorted(candidates, key=banded_sort_key)
+
+
+# ---------------------------------------------------------------------------
+# Findings vs outreach targets (spec §7) — answers are cards, leads are outreach
+# ---------------------------------------------------------------------------
+
+def banded_findings(result: dict) -> list[tuple[dict, int, int]]:
+    """The FINDINGS of a banded result: Band A/B candidates without an active
+    rejection, in banded order across ALL tiers. Returns (candidate, tier_number,
+    index-within-raw-tier-list) so the API layer can build cards whose ids match
+    the tier arrays. is_mock candidates are structurally Band C (assign_band) and
+    therefore never findings — the §4 contract."""
+    entries: list[tuple[dict, int, int]] = []
+    for tier_key, n in (("tier_1", 1), ("tier_2", 2), ("tier_3", 3)):
+        for i, c in enumerate((result.get(tier_key) or {}).get("results") or []):
+            if c.get("rejection_reason"):
+                continue
+            if c.get("band") in (BAND_A, BAND_B):
+                entries.append((c, n, i))
+    entries.sort(key=lambda e: banded_sort_key(e[0]))
+    return entries
+
+
+def outreach_targets(result: dict) -> list[dict]:
+    """The OUTREACH BLOCK of a banded result (spec §7): Band C candidates without
+    an active rejection and within the count cap, onboarded FIRST (named as
+    yours), then by scope strength (evidence quality). These are RFQ targets, not
+    results — the caller must render provenance strings only, never numbers."""
+    targets = [
+        c
+        for tier_key in ("tier_1", "tier_2", "tier_3")
+        for c in ((result.get(tier_key) or {}).get("results") or [])
+        if (c.get("band") == BAND_C
+            and not c.get("rejection_reason")
+            and not c.get("band_c_capped"))
+    ]
+    targets.sort(key=lambda c: (0 if is_onboarded(c) else 1,
+                                -float(c.get("evidence_quality") or 0.0)))
+    return targets
 
 
 # ---------------------------------------------------------------------------
