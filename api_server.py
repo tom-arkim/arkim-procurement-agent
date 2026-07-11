@@ -1042,8 +1042,21 @@ def _transform_sourcing_results(raw: dict, quote_index: Optional[dict] = None) -
     if "ranking_bands:v1" in (raw.get("filters_applied") or []):
         try:
             from utils.procurement_agent.ranking_bands import (
-                banded_findings, is_onboarded, outreach_targets, provenance_for,
+                banded_findings, is_onboarded, outreach_targets,
+                promote_confirmed, provenance_for,
             )
+            # T4 — band mobility (spec §3): a Band-C candidate whose CONFIRMED
+            # quote carries a real price is promoted to Band A at read time (the
+            # quote arrives after sourcing results were persisted, so promotion
+            # is computed per read from the live quote index — "at that moment").
+            # Being onboarded, a promoted supplier tops Band A (onboarded-first).
+            # Mutates only this request's parsed copy; nothing is written back.
+            for _tier_key in ("tier_1", "tier_2", "tier_3"):
+                for _o in (raw.get(_tier_key) or {}).get("results") or []:
+                    if _o.get("band") == "C" and not _o.get("rejection_reason"):
+                        _q = _resolve_quote(_o, quote_index)
+                        if _q and (_q.get("payload") or {}).get("unit_price") is not None:
+                            promote_confirmed(_o)
             result["findings"] = [
                 {
                     **_transform_option(o, n, i, quote=_resolve_quote(o, quote_index)),

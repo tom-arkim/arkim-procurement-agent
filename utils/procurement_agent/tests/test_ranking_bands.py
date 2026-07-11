@@ -583,6 +583,74 @@ class TestFindingsAndOutreach:
 
 
 # ---------------------------------------------------------------------------
+# Band promotion (spec §3 mobility) — T4
+# ---------------------------------------------------------------------------
+
+class TestBandPromotion:
+    def test_promote_confirmed_rebands_to_a(self):
+        from utils.procurement_agent.ranking_bands import promote_confirmed
+        dxp = annotate_candidate(_dxp(), _GUSHER_PN)
+        assert dxp["band"] == BAND_C
+        promote_confirmed(dxp, _GUSHER_PN)
+        assert dxp["band"] == BAND_A
+        assert dxp["band_note"] == "promoted_confirmed_quote"
+        assert dxp["confidence_score"] > 0  # confirmed: no longer nothing-verified
+
+    def test_promoted_onboarded_supplier_tops_band_a(self):
+        from utils.procurement_agent.ranking_bands import promote_confirmed
+        sealit = annotate_candidate(_sealit(), _GUSHER_PN)
+        dxp = promote_confirmed(annotate_candidate(_dxp(), _GUSHER_PN), _GUSHER_PN)
+        ordered = order_banded([sealit, dxp])
+        assert [c["vendor_name"] for c in ordered] == ["DXP Enterprises", "Sealit123"]
+
+    def test_mock_is_never_promotable(self):
+        from utils.procurement_agent.ranking_bands import promote_confirmed
+        seed = annotate_candidate(_mock_seed(), _GUSHER_PN)
+        promote_confirmed(seed, _GUSHER_PN)
+        assert seed["band"] == BAND_C
+
+    def _dxp_quote_index(self, price=189.0):
+        return {
+            "by_thread": {},
+            "domain_threads": {},
+            "by_domain": {"dxpe.com": {
+                "status": "confirmed", "supplier_domain": "dxpe.com",
+                "thread_id": "t-123", "confidence": 0.9,
+                "payload": {"unit_price": price, "lead_time": "3 days", "currency": "USD"},
+            }},
+        }
+
+    def test_simulated_dxp_confirmation_promotes_to_top_of_findings(self):
+        """Acceptance criterion 5: DXP appears in the outreach block (Band C);
+        a simulated DXP confirmation (structured quote with part+price) promotes
+        it to the TOP of Band A — visibly the onboarding benefit working."""
+        from api_server import _transform_sourcing_results
+        # WITHOUT confirmation: Sealit123 is #1; DXP leads the outreach block.
+        out = _transform_sourcing_results(_banded_gusher_result())
+        assert out["findings"][0]["vendorName"] == "Sealit123"
+        assert out["outreachTargets"]["suppliers"][0]["vendorName"] == "DXP Enterprises"
+        # WITH a confirmed DXP quote: DXP tops the findings in Band A position,
+        # carries the quoted price, and leaves the outreach block.
+        out2 = _transform_sourcing_results(_banded_gusher_result(),
+                                           quote_index=self._dxp_quote_index())
+        assert out2["findings"][0]["vendorName"] == "DXP Enterprises"
+        assert out2["findings"][0]["band"] == "A"
+        assert out2["findings"][0]["quoteConfirmed"] is True
+        assert out2["findings"][0]["price"] == 189.0
+        assert out2["findings"][1]["vendorName"] == "Sealit123"
+        assert "DXP Enterprises" not in [
+            s["vendorName"] for s in out2["outreachTargets"]["suppliers"]]
+
+    def test_confirmed_quote_without_price_does_not_promote(self):
+        from api_server import _transform_sourcing_results
+        idx = self._dxp_quote_index()
+        idx["by_domain"]["dxpe.com"]["payload"] = {"lead_time": "3 days"}  # no price
+        out = _transform_sourcing_results(_banded_gusher_result(), quote_index=idx)
+        assert "DXP Enterprises" not in [f["vendorName"] for f in out["findings"]]
+        assert out["outreachTargets"]["suppliers"][0]["vendorName"] == "DXP Enterprises"
+
+
+# ---------------------------------------------------------------------------
 # API response shape (flag-on findings/outreachTargets; flag-off untouched) — T3
 # ---------------------------------------------------------------------------
 

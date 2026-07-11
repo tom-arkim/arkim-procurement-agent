@@ -331,6 +331,26 @@ def order_banded(candidates: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Band mobility (spec §3) — first look → confirm → win
+# ---------------------------------------------------------------------------
+
+def promote_confirmed(candidate: dict, searched_pn: Optional[str] = None) -> dict:
+    """Promote a candidate that CONFIRMED (structured portal quote / parsed email
+    quote with part+price) — spec §3 band mobility. Stamps the confirmation and
+    re-annotates: has_confirmation → Band A; an onboarded supplier then sits at
+    the TOP of Band A via the within-band onboarded-first rule — the
+    first-look → confirm → win loop that makes onboarding genuinely valuable.
+
+    An is_mock candidate is NEVER promoted (assign_band keeps it Band C — a
+    fabricated candidate cannot confirm anything). The caller decides what
+    counts as a confirmation (a confirmed quote whose payload carries a price);
+    this function records and re-bands."""
+    candidate["quote_confirmed"] = True
+    candidate["band_note"] = "promoted_confirmed_quote"
+    return annotate_candidate(candidate, searched_pn)
+
+
+# ---------------------------------------------------------------------------
 # Findings vs outreach targets (spec §7) — answers are cards, leads are outreach
 # ---------------------------------------------------------------------------
 
