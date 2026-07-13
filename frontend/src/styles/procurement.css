@@ -279,6 +279,11 @@
 .proc-opt .o-name { font-size: 15.5px; font-weight: 600; color: var(--text-strong); letter-spacing: -0.1px; }
 .proc-opt .o-part { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
 .proc-opt .o-tags { display: flex; align-items: center; gap: 8px; margin-top: 9px; flex-wrap: wrap; }
+/* Evidence link: the buyer's click-through to the source listing. Inline text link
+   with padded hit area + visible focus ring (a11y: contrast via --accent-text). */
+.proc-opt .o-listing { display: inline-flex; align-items: center; gap: 4px; margin-top: 7px; padding: 4px 2px; font-size: 12.5px; font-weight: 600; color: var(--accent-text); text-decoration: underline; text-underline-offset: 2px; border-radius: 4px; }
+.proc-opt .o-listing:hover { color: var(--accent); }
+.proc-opt .o-listing:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .o-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .o-tag[data-kind="exact"] { color: var(--st-done); border-color: transparent; background: var(--st-done-fill); }
 .o-tag[data-kind="equiv"] { color: var(--st-progress); border-color: transparent; background: var(--st-progress-fill); }

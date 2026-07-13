@@ -230,7 +230,14 @@ export function OptionsScreen({ runId }: { runId: string }) {
                           expressed on the action ("Order through Gofer") and the fulfilment
                           sub-line — it never replaces the seller's identity. */}
                       <div className="o-name">{c.vendorName}</div>
-                      {c.loc && <div className="o-part">{c.loc}</div>}
+                      {/* Structural part evidence: the listing's actual PN is the buyer's
+                          proof the seller has THIS part — first-class, not buried prose. */}
+                      {(c.foundPartNumber || c.loc) && (
+                        <div className="o-part">
+                          {[c.foundPartNumber ? `PN ${c.foundPartNumber}` : null, c.loc]
+                            .filter(Boolean).join(" · ")}
+                        </div>
+                      )}
                       <div className="o-tags">
                         {/* State C is the strongest claim — lead the tags with it (C > M). */}
                         {quoted && (
@@ -245,6 +252,21 @@ export function OptionsScreen({ runId }: { runId: string }) {
                         </span>
                         {c.stock && <span className="o-tag" data-kind="stock">{c.stock}</span>}
                       </div>
+                      {/* The evidence link — the buyer's ability to verify the part is
+                          correct is the point of the evidence model. Every card with a
+                          source listing links it, marketplace and quoted rows included
+                          (transparency outranks disintermediation risk — Gofer earns the
+                          order by doing the work, not by hiding the source). */}
+                      {c.url && (
+                        <a
+                          className="o-listing"
+                          href={c.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          View listing ↗
+                        </a>
+                      )}
                     </div>
                     <div className="o-price">
                       {c.price != null
@@ -319,17 +341,8 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       {whyBullets(c, specs?.manufacturer).map((w, i) => (
                         <div key={i} className="wb-row"><span className="d" /><span>{w}</span></div>
                       ))}
-                      {/* Reference rows link out to verify the price; marketplace (State M)
-                          rows do NOT — sending the customer to the marketplace is the
-                          disintermediation we're avoiding (Arkim is buyer-of-record).
-                          Quoted (State C) rows also don't — the shown figure is the
-                          supplier's quote, not that listing's price. */}
-                      {!isUncontacted(c) && !isMkt && !quoted && c.url && (
-                        <div className="wb-row"><span className="d" /><span>
-                          <a href={c.url} target="_blank" rel="noopener noreferrer"
-                             style={{ color: "var(--accent)", textDecoration: "underline" }}>View listing ↗</a>
-                        </span></div>
-                      )}
+                      {/* The listing link lives structurally on the card (o-listing above)
+                          for every row with a source_url — no duplicate here. */}
                       {!isUncontacted(c) && c.comparisonArtifact && <SpecMatch artifact={c.comparisonArtifact} />}
                     </div>
                   )}
