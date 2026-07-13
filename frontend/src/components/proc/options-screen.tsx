@@ -75,16 +75,23 @@ function whyBullets(c: Candidate, manufacturer?: string): string[] {
     out.push("Pricing and exact-part confirmation come from the supplier when they quote.");
     return out;
   }
-  // Priced — a real listing backs the claim.
-  // State M: framed as speed/certainty + Arkim fulfils — NOT "go buy at {marketplace}".
-  // The marketplace is Arkim's supply source (operational), not the customer's destination.
-  if (c.purchaseChannel === "marketplace") out.push(`Available immediately at this price — ${BRAND_NAME} can order it for you now, no quote needed.`);
+  // Priced — a real listing backs the claim. The availability claim must match the
+  // price evidence: an indicative/unverified price can never claim "at this price".
+  const vendor = c.vendorName || "the seller";
+  const priceIndicative = Boolean(c.priceUnverified) || c.priceVerified === false;
+  if (c.purchaseChannel === "marketplace") {
+    out.push(priceIndicative
+      ? `Available now at ${vendor} — the listed price is indicative; ${BRAND_NAME} confirms the final price before you're charged.`
+      : `Available now at ${vendor} — ${BRAND_NAME} can order it for you at this price, no quote needed.`);
+  }
   out.push(isExact(c)
     ? "Matches the exact part number on your equipment record."
     : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
   if (c.foundPartNumber) out.push(`Listed for part ${c.foundPartNumber}.`);
-  if (c.priceUnverified) out.push("Price auto-extracted at low confidence — confirm it with the vendor before ordering.");
-  if (c.priceVerified === false) out.push("Limited price data — treat the listed price as indicative.");
+  // One price caveat, never stacked: the low-confidence extraction explains WHY the
+  // price is indicative; limited-price-data is the fallback qualifier.
+  if (c.priceUnverified) out.push(`We read this price from the listing at low confidence — treat it as indicative until ${BRAND_NAME} confirms it with the seller.`);
+  else if (c.priceVerified === false) out.push("Limited price data — treat the listed price as indicative.");
   if (c.comparisonArtifact?.engineerNotes) out.push(c.comparisonArtifact.engineerNotes);
   return out;
 }
@@ -287,8 +294,16 @@ export function OptionsScreen({ runId }: { runId: string }) {
                       )}
                       {/* State C: surface the quote's terms alongside price + lead time. */}
                       {quoted && c.terms && <div className="o-terms">{c.terms}</div>}
-                      {/* State M: in stock now, Arkim orders it — speed/certainty, not channel. */}
-                      {isMkt && !quoted && <div className="o-mkt">Available now · no quote needed</div>}
+                      {/* State M: in stock now, Arkim orders it — speed/certainty, not channel.
+                          The sub-line matches the price evidence: an indicative price never
+                          claims "no quote needed" (the figure isn't final). */}
+                      {isMkt && !quoted && (
+                        <div className="o-mkt">
+                          {unverified || c.priceVerified === false
+                            ? "Available now · final price confirmed at order"
+                            : "Available now · no quote needed"}
+                        </div>
+                      )}
                     </div>
                     <div className="o-act">
                       {committed ? (
