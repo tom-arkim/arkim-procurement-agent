@@ -214,10 +214,6 @@ export function OptionsScreen({ runId }: { runId: string }) {
               // through Arkim" (action). The unverified qualifier is the QUOTE's confidence
               // when quoted, the listing's otherwise — composes, never masked.
               const unverified = quoted ? Boolean(c.quoteUnverified) : Boolean(c.priceUnverified);
-              // Name the supplier on a quoted row (the claim names them, and there's no
-              // outbound link to bypass Arkim); keep State-M's "Available through Arkim"
-              // only for non-quoted marketplace rows.
-              const namesSupplier = quoted || !isMkt;
               return (
                 <div key={c.id} className="proc-opt" data-rec={rec}>
                   {rec && (
@@ -229,11 +225,12 @@ export function OptionsScreen({ runId }: { runId: string }) {
                   )}
                   <div className="o-body">
                     <div className="o-tt">
-                      {/* State M: don't headline the marketplace name — it's Arkim's supply
-                          source, not a customer destination. Frame as an Arkim-fulfilled
-                          in-stock option; price + match tag differentiate the rows. */}
-                      <div className="o-name">{namesSupplier ? c.vendorName : `Available through ${BRAND_NAME}`}</div>
-                      {namesSupplier && c.loc && <div className="o-part">{c.loc}</div>}
+                      {/* The headline is ALWAYS the actual seller. Gofer is a buying agent
+                          working FOR the user, not a reseller: merchant-of-record is
+                          expressed on the action ("Order through Gofer") and the fulfilment
+                          sub-line — it never replaces the seller's identity. */}
+                      <div className="o-name">{c.vendorName}</div>
+                      {c.loc && <div className="o-part">{c.loc}</div>}
                       <div className="o-tags">
                         {/* State C is the strongest claim — lead the tags with it (C > M). */}
                         {quoted && (
