@@ -63,6 +63,57 @@ def _neutralize_external_api_keys(monkeypatch):
     monkeypatch.setattr(_email_sender, "EMAIL_SEND_ENABLED", False)
 
 
+# Every feature flag the codebase reads, with the module attributes that BIND the
+# flag at import time (the attr is what matters once the module is loaded — the
+# env pin alone can't fix an already-imported module, and a setattr alone can't
+# fix a module imported later in the session). Maintained by grep over the
+# os.environ flag-read sites; add new flags here when they're introduced.
+_FEATURE_FLAG_ENVS = (
+    "TIER1_V2", "RANKING_BANDS_V1", "SUPPLIER_PORTAL_V1", "SEND_GOVERNANCE_V1",
+    "INTAKE_CHANNELS_V1", "DEMO_MODE", "INTAKE_TYPE_AWARE", "SCORING_V2",
+    "RUN_CAPTURE",
+)
+# (module in sys.modules, attribute, pinned default) — import-bound flag bindings.
+_FEATURE_FLAG_MODULE_ATTRS = (
+    ("utils.supplier_registry",          "TIER1_V2",              False),
+    ("utils.sourcing_archieved.scoring", "SCORING_V2",            False),
+    ("api_server",                       "DEMO_MODE",             False),
+    ("api_server",                       "SUPPLIER_PORTAL_V1",    False),
+    ("utils.claim_tokens",               "CLAIM_TOKENS_ENABLED",  False),
+    ("utils.run_capture",                "RUN_CAPTURE",           False),
+    ("utils.run_labels",                 "RUN_CAPTURE",           False),
+    ("utils.eval_export",                "RUN_CAPTURE",           False),
+)
+
+
+@pytest.fixture(autouse=True)
+def _pin_feature_flags_off(monkeypatch):
+    """Session-wide flag hygiene: every feature flag is pinned to its DEFAULT-OFF
+    state for every test, so the suite's behavior cannot depend on the shell
+    environment ($env: leakage) or on which test ran first (module reloads under
+    a flag — the TIER1_V2 leak that broke TestConfirmIntake three times).
+
+    Two layers, following the TIER1_V2 idiom in test_sourcing_agent.py:
+      1. env pinned to "" (strict-truthy parses that as off; empty-not-deleted so
+         load_dotenv(override=False) can't resurrect a value) — this makes any
+         LATER first-import bind the flag off;
+      2. the import-bound module ATTRIBUTES are set False for modules already in
+         sys.modules — this fixes a module imported earlier under a polluted env.
+         Modules are looked up, never imported here (importing api_server from
+         conftest would run its module-level DB init before per-test patching).
+
+    A test that exercises a flag opts in explicitly (its own monkeypatch
+    setenv/setattr runs after this autouse setup and wins) — same contract as
+    _neutralize_external_api_keys above. EMAIL_SEND_ENABLED is pinned there.
+    """
+    for var in _FEATURE_FLAG_ENVS:
+        monkeypatch.setenv(var, "")
+    for mod_name, attr, default in _FEATURE_FLAG_MODULE_ATTRS:
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, attr):
+            monkeypatch.setattr(mod, attr, default)
+
+
 @pytest.fixture(scope="function")
 def db_url():
     """Return the test DB URL and reset tables before each test."""
