@@ -3378,6 +3378,123 @@ def admin_suppression_remove(domain: str, body: AllowlistRemoveRequest,
     return {"domain": domain, "removed": True, "removed_by": body.removed_by}
 
 
+# --- Release queue (T4): the concierge send-approval step ---------------------
+#
+# Phase-1 model (spec §3): an approved RFQ draft is never delivered directly — a
+# human lists the pending drafts (full rendered content + recipients) and releases
+# or rejects each. Release runs the FULL gate stack (suppression → allowlist →
+# caps → EMAIL_SEND_ENABLED) via send_rfq → GmailSender; with the delivery gate
+# off, a released draft records "stubbed" with releaser identity — the whole
+# governance flow exercised end-to-end with zero deliveries. Batch = same
+# endpoint, list of ids. A released-but-not-delivered draft stays 'approved'
+# (claim-matches-reality: 'sent' means a message actually went) and therefore
+# remains in the queue — deliberate for shadow mode, documented in the report.
+
+def _release_part_key(run_id: str) -> Optional[str]:
+    """Canonical part identity for a run's sends (the open-RFQ cap key).
+    Fail-soft: a derivation error returns None (the daily cap still binds)."""
+    try:
+        from utils import known_parts
+        with _SessionFactory() as session:
+            run = session.get(SourcingRunORM, run_id)
+            specs = json.loads(run.asset_specs_json) if run and run.asset_specs_json else {}
+        return known_parts.canonical_part_key(
+            specs.get("manufacturer"), specs.get("part_number")) or None
+    except Exception:
+        return None
+
+
+class ReleaseRequest(BaseModel):
+    draft_ids: List[str]
+    released_by: str
+
+
+class ReleaseRejectRequest(BaseModel):
+    rejected_by: str
+
+
+@app.get("/api/admin/send-governance/release-queue")
+def admin_release_queue(role: str = Depends(require_admin)):
+    """Pending (approved, not yet sent) RFQ drafts across all runs, oldest first,
+    with the FULL rendered content + current recipient set — what the concierge
+    reviews before releasing."""
+    _require_send_governance_enabled()
+    from utils.procurement_agent.state import persistence
+    drafts = persistence.list_drafts_by_status("approved")
+    for d in drafts:
+        d["recipients"] = _draft_recipients(d, seed=False)
+    return {"count": len(drafts), "pending": drafts}
+
+
+@app.post("/api/admin/send-governance/release-queue/release")
+def admin_release_drafts(body: ReleaseRequest, role: str = Depends(require_admin)):
+    """Release one or more approved drafts (batch = list of ids). Each release
+    runs the full gate stack; the sent_messages row records the releaser identity
+    and timestamp alongside the outcome status (stubbed while the delivery gate is
+    off; suppressed/not_allowlisted/cap_blocked when governance blocks). Per-draft
+    results — one bad id never voids the rest of the batch."""
+    _require_send_governance_enabled()
+    from utils.procurement_agent.state import persistence
+    from utils import rfq_send
+
+    results = []
+    for draft_id in body.draft_ids:
+        draft = persistence.get_draft(draft_id)
+        if draft is None:
+            results.append({"draft_id": draft_id, "released": False,
+                            "error": "Draft not found"})
+            continue
+        if draft["status"] != "approved":
+            results.append({"draft_id": draft_id, "released": False,
+                            "error": f"draft is '{draft['status']}' - only an approved "
+                                     f"draft can be released"})
+            continue
+        approval = rfq_send.Approval(approved_by=draft["approved_by"],
+                                     approved_at=draft["approved_at"])
+        result = rfq_send.send_rfq(
+            draft["candidate_snapshot"],
+            draft["draft_body"],
+            approval,
+            run_id=draft["run_id"],
+            part_key=_release_part_key(draft["run_id"]),
+            released_by=body.released_by,
+        )
+        draft_status = draft["status"]
+        if result.get("sent"):   # genuine delivery only (claim-matches-reality)
+            persistence.transition_draft(draft_id, "sent",
+                                         sent_message_id=result.get("sent_message_id"))
+            draft_status = "sent"
+        results.append({
+            "draft_id": draft_id,
+            "released": True,
+            "released_by": body.released_by,
+            "send_status": result.get("status"),
+            "sent": bool(result.get("sent")),
+            "draft_status": draft_status,
+            "sent_message_id": result.get("sent_message_id"),
+            "recipients": result.get("recipients"),
+        })
+    return {"released_by": body.released_by, "results": results}
+
+
+@app.post("/api/admin/send-governance/release-queue/{draft_id}/reject")
+def admin_release_reject(draft_id: str, body: ReleaseRejectRequest,
+                         role: str = Depends(require_admin)):
+    """Concierge decline at the release step: approved -> rejected (terminal).
+    Governance-only transition (the legacy lifecycle keeps approved drafts
+    unrejectable, byte-identical flag-off). 404 unknown; 409 not-approved."""
+    _require_send_governance_enabled()
+    from utils.procurement_agent.state import persistence
+    if persistence.get_draft(draft_id) is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    try:
+        draft = persistence.release_reject_draft(draft_id, rejected_by=body.rejected_by)
+    except persistence.DraftTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"draft_id": draft["id"], "status": draft["status"],
+            "rejected_by": draft["rejected_by"]}
+
+
 @app.get("/api/admin/review-queue")
 def admin_review_queue(role: str = Depends(require_admin)):
     """review_items — extracted quotes/contacts, confidence, status (incl.
@@ -4491,6 +4608,17 @@ def send_rfq_draft(draft_id: str):
     draft = persistence.get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
+    # SEND_GOVERNANCE_V1 (T4): with governance active, an approved draft is delivered
+    # ONLY via the concierge release queue (releaser identity recorded) — this direct
+    # send endpoint refuses, making the release step structurally unbypassable.
+    # Flag OFF: byte-identical legacy behavior below.
+    from utils import send_governance as _sg
+    if _sg.send_governance_active():
+        raise HTTPException(
+            status_code=409,
+            detail="Send governance is active - approved drafts are released via "
+                   "/api/admin/send-governance/release-queue, not sent directly",
+        )
     # Gate BEFORE send: only 'approved' -> 'sent' is legal. A drafted/rejected/sent draft 409s
     # and send_rfq is never reached.
     if not persistence.can_transition_draft(draft["status"], "sent"):

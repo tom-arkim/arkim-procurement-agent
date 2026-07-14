@@ -488,6 +488,142 @@ def admin_api(tmp_path, monkeypatch, gov_store):
     return TestClient(api_server.app)
 
 
+# ---------------------------------------------------------------------------
+# Release queue (T4): the concierge send-approval step
+# ---------------------------------------------------------------------------
+
+class TestReleaseQueue:
+    @pytest.fixture
+    def queue_env(self, admin_api, tmp_path, monkeypatch, gov_store, flag_on):
+        """A run + two approved drafts (dxpe.com), registry contact seeded, stores
+        isolated. Returns (client, draft_ids, supplier_registry)."""
+        from utils import supplier_registry
+        from utils.procurement_agent.state import persistence
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        supplier_registry.upsert_contact("dxpe.com", {
+            "contact_email": "sales@dxpe.com", "contact_method": "generic_inbox",
+            "contact_status": "resolved"})
+        run_id = admin_api.post("/api/runs", json={"asset_specs": {
+            "manufacturer": "Gusher Pumps", "part_number": "84004-28"}}).json()["id"]
+        ids = []
+        for i in range(2):
+            d = persistence.create_draft(
+                run_id=run_id, candidate_id=f"DXP-t1-{i}",
+                candidate_snapshot={"vendor_name": "DXP Enterprises",
+                                    "source_url": "https://dxpe.com"},
+                draft_body=f"Subject: Quote request {i}\n\nbody {i}")
+            persistence.transition_draft(d["id"], "approved", approved_by="tom")
+            ids.append(d["id"])
+        return admin_api, ids, supplier_registry
+
+    def test_queue_lists_approved_drafts_with_content(self, queue_env):
+        client, ids, _sr = queue_env
+        r = client.get("/api/admin/send-governance/release-queue", headers=_auth())
+        assert r.status_code == 200
+        body = r.json()
+        assert body["count"] == 2
+        listed = {d["id"] for d in body["pending"]}
+        assert listed == set(ids)
+        d0 = body["pending"][0]
+        assert d0["draft_body"].startswith("Subject:")          # full rendered content
+        assert d0["recipients"]["to"] == ["sales@dxpe.com"]     # who it goes to
+
+    def test_release_records_stubbed_with_releaser_identity(self, queue_env, gov_store):
+        # SUCCESS CRITERION 4: released + delivery gate off ⇒ sent_messages row
+        # status 'stubbed' carrying released_by + released_at. Zero deliveries.
+        client, ids, sr = queue_env
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        r = client.post("/api/admin/send-governance/release-queue/release",
+                        headers=_auth(),
+                        json={"draft_ids": ids[:1], "released_by": "tom"})
+        assert r.status_code == 200
+        res = r.json()["results"][0]
+        assert res["released"] is True
+        assert res["send_status"] == "stubbed"                  # gate off: no delivery
+        assert res["sent"] is False
+        assert res["draft_status"] == "approved"                # 'sent' = really went
+        rows = sr.get_sent_messages()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "stubbed"
+        assert rows[0]["released_by"] == "tom"
+        assert rows[0]["released_at"]                           # timestamp recorded
+        assert rows[0]["part_key"]                              # cap key stamped
+
+    def test_release_runs_the_full_stack_not_allowlisted(self, queue_env):
+        # Empty allowlist: a released draft is BLOCKED and the block is recorded
+        # with the releaser identity (the release action was real).
+        client, ids, sr = queue_env
+        r = client.post("/api/admin/send-governance/release-queue/release",
+                        headers=_auth(),
+                        json={"draft_ids": ids[:1], "released_by": "tom"})
+        res = r.json()["results"][0]
+        assert res["send_status"] == "not_allowlisted"
+        rows = sr.get_sent_messages()
+        assert rows[0]["status"] == "not_allowlisted"
+        assert rows[0]["released_by"] == "tom"
+
+    def test_release_suppressed_beats_allowlisted(self, queue_env, gov_store):
+        client, ids, sr = queue_env
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        gov_store.suppression_add("dxpe.com", added_by="tom", is_test=True)
+        r = client.post("/api/admin/send-governance/release-queue/release",
+                        headers=_auth(),
+                        json={"draft_ids": ids[:1], "released_by": "tom"})
+        assert r.json()["results"][0]["send_status"] == "suppressed"
+
+    def test_batch_release_mixed_outcomes(self, queue_env, gov_store):
+        # Batch: first release stubs; the second hits the per-part open-RFQ cap
+        # (same supplier, same part) — per-draft outcomes, no all-or-nothing.
+        client, ids, sr = queue_env
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        r = client.post("/api/admin/send-governance/release-queue/release",
+                        headers=_auth(),
+                        json={"draft_ids": ids, "released_by": "tom"})
+        statuses = [x["send_status"] for x in r.json()["results"]]
+        assert statuses == ["stubbed", "cap_blocked"]
+
+    def test_release_unknown_and_unapproved_ids_error_per_draft(self, queue_env):
+        client, ids, _sr = queue_env
+        from utils.procurement_agent.state import persistence
+        persistence.release_reject_draft(ids[1], rejected_by="tom")   # now 'rejected'
+        r = client.post("/api/admin/send-governance/release-queue/release",
+                        headers=_auth(),
+                        json={"draft_ids": ["nope", ids[1]], "released_by": "tom"})
+        res = r.json()["results"]
+        assert res[0]["released"] is False and "not found" in res[0]["error"]
+        assert res[1]["released"] is False and "rejected" in res[1]["error"]
+
+    def test_release_reject_endpoint(self, queue_env):
+        client, ids, _sr = queue_env
+        r = client.post(f"/api/admin/send-governance/release-queue/{ids[0]}/reject",
+                        headers=_auth(), json={"rejected_by": "tom"})
+        assert r.status_code == 200
+        assert r.json()["status"] == "rejected"
+        # …and it left the queue.
+        q = client.get("/api/admin/send-governance/release-queue", headers=_auth())
+        assert ids[0] not in {d["id"] for d in q.json()["pending"]}
+
+    def test_legacy_send_endpoint_409s_flag_on(self, queue_env):
+        client, ids, _sr = queue_env
+        r = client.post(f"/api/rfq-drafts/{ids[0]}/send")
+        assert r.status_code == 409
+        assert "release" in r.json()["detail"].lower()
+
+    def test_legacy_lifecycle_untouched_flag_off(self, queue_env, monkeypatch):
+        # Flag OFF: approved→rejected stays ILLEGAL through the legacy transition
+        # (release_reject_draft is reachable only via the flag-gated endpoint).
+        from utils.procurement_agent.state import persistence
+        client, ids, _sr = queue_env
+        monkeypatch.delenv("SEND_GOVERNANCE_V1", raising=False)
+        with pytest.raises(persistence.DraftTransitionError):
+            persistence.transition_draft(ids[0], "rejected", rejected_by="x")
+        # and the queue routes are gone (404, route absent).
+        assert client.get("/api/admin/send-governance/release-queue",
+                          headers=_auth()).status_code == 404
+
+
 class TestAdminEndpoints:
     def test_flag_off_routes_404(self, admin_api, monkeypatch):
         monkeypatch.delenv("SEND_GOVERNANCE_V1", raising=False)

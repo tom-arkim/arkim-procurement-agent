@@ -453,6 +453,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     if "part_key" not in sm_existing:
         conn.execute("ALTER TABLE sent_messages ADD COLUMN part_key TEXT")
         added.append("sent_messages.part_key")
+    # Release provenance (SEND_GOVERNANCE_V1 T4): the concierge release action's
+    # identity + timestamp. Nullable; only governance releases populate them.
+    for col in ("released_by", "released_at"):
+        if col not in sm_existing:
+            conn.execute(f"ALTER TABLE sent_messages ADD COLUMN {col} TEXT")
+            added.append(f"sent_messages.{col}")
 
     # supplier_notifications provenance column (demand-teaser honesty: a test/
     # fixture/seed row must be excludable from the live buyer-request count).
@@ -937,6 +943,8 @@ def record_sent_message(
     approved_by: Optional[str] = None,
     sent_at: Optional[str] = None,
     part_key: Optional[str] = None,
+    released_by: Optional[str] = None,
+    released_at: Optional[str] = None,
 ) -> Optional[str]:
     """Persist one outbound-send record (the key inbound matching will later join on).
 
@@ -968,9 +976,10 @@ def record_sent_message(
                 """INSERT INTO sent_messages
                    (id, run_id, supplier_domain, vendor_name, recipients_to_json,
                     recipients_cc_json, subject, body, message_id, thread_id, status,
-                    approved_by, sent_at, created_at, part_key)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                row + (part_key,),
+                    approved_by, sent_at, created_at, part_key, released_by,
+                    released_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                row + (part_key, released_by, released_at),
             )
             conn.commit()
         print(f"[SupplierRegistry] Sent-message recorded: {vendor_name} ({domain}) status={status}")

@@ -93,6 +93,7 @@ def send_rfq(
     run_id: Optional[str] = None,
     sender: Optional[EmailSender] = None,
     part_key: Optional[str] = None,
+    released_by: Optional[str] = None,
 ) -> dict:
     """Send (or stub) one approved Tier 3 RFQ to a supplier's recipient set.
 
@@ -170,6 +171,11 @@ def send_rfq(
         message_id=send_result.message_id, thread_id=send_result.thread_id,
         approved_by=approval.approved_by, sent_at=send_result.sent_at,
         part_key=part_key,
+        # Release provenance (SEND_GOVERNANCE_V1 T4): who released this send and
+        # when. Only the flag-gated release-queue path passes released_by; the
+        # timestamp is stamped here so it is tied to the actual send attempt.
+        released_by=released_by,
+        released_at=_now_iso() if released_by else None,
     )
 
     # ── Human-readable audit event (run-level trail). ────────────────────────

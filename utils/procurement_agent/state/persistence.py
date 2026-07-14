@@ -475,6 +475,48 @@ def list_drafts(run_id: str, db_url: Optional[str] = None) -> list[dict]:
         session.close()
 
 
+def list_drafts_by_status(status: str, db_url: Optional[str] = None) -> list[dict]:
+    """All drafts in one lifecycle status across ALL runs, oldest first (queue order).
+    SEND_GOVERNANCE_V1 release-queue read; harmless generally (pure read)."""
+    session = _get_session(db_url)
+    try:
+        rows = (
+            session.query(RfqDraftORM)
+            .filter(RfqDraftORM.status == status)
+            .order_by(RfqDraftORM.created_at.asc())
+            .all()
+        )
+        return [_draft_to_dict(r) for r in rows]
+    finally:
+        session.close()
+
+
+def release_reject_draft(draft_id: str, *, rejected_by: str,
+                         db_url: Optional[str] = None) -> dict:
+    """SEND_GOVERNANCE_V1 concierge reject: an APPROVED draft is declined at the
+    release step (approved -> rejected, terminal). Deliberately NOT added to
+    ALLOWED_DRAFT_TRANSITIONS: the legacy lifecycle (and its /reject endpoint)
+    keeps approved-drafts unrejectable, byte-identical flag-off — only the
+    flag-gated release-queue endpoint reaches this function. Raises
+    DraftTransitionError on unknown id or a non-approved draft."""
+    session = _get_session(db_url)
+    try:
+        row = session.get(RfqDraftORM, draft_id)
+        if row is None:
+            raise DraftTransitionError(f"draft {draft_id} not found")
+        if row.status != "approved":
+            raise DraftTransitionError(
+                f"release-reject requires an approved draft (is '{row.status}')")
+        row.rejected_by = rejected_by
+        row.rejected_at = datetime.now(timezone.utc).isoformat()
+        row.status = "rejected"
+        row.updated_at = datetime.now(timezone.utc)
+        session.commit()
+        return _draft_to_dict(row)
+    finally:
+        session.close()
+
+
 def transition_draft(
     draft_id: str,
     new_status: str,
