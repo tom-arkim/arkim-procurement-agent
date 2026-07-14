@@ -3339,6 +3339,45 @@ def admin_allowlist_remove(domain: str, body: AllowlistRemoveRequest,
     return {"domain": domain, "removed": True, "removed_by": body.removed_by}
 
 
+class SuppressionAddRequest(BaseModel):
+    domain: str
+    added_by: str
+    reason: Optional[str] = None
+
+
+@app.get("/api/admin/send-governance/suppression")
+def admin_suppression_list(role: str = Depends(require_admin)):
+    """The suppression list ("supplier asked to stop") — beats the allowlist."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    rows = send_governance.suppression_list()
+    return {"count": len(rows), "suppression": rows}
+
+
+@app.post("/api/admin/send-governance/suppression", status_code=201)
+def admin_suppression_add(body: SuppressionAddRequest, role: str = Depends(require_admin)):
+    """Suppress one domain (audit-logged who/when/why). Permanent until removed."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    try:
+        row = send_governance.suppression_add(body.domain, added_by=body.added_by,
+                                              reason=body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return row
+
+
+@app.post("/api/admin/send-governance/suppression/{domain}/remove")
+def admin_suppression_remove(domain: str, body: AllowlistRemoveRequest,
+                             role: str = Depends(require_admin)):
+    """Lift a suppression (audit-logged). 404 if not suppressed."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    if not send_governance.suppression_remove(domain, removed_by=body.removed_by):
+        raise HTTPException(status_code=404, detail="Domain not suppressed")
+    return {"domain": domain, "removed": True, "removed_by": body.removed_by}
+
+
 @app.get("/api/admin/review-queue")
 def admin_review_queue(role: str = Depends(require_admin)):
     """review_items — extracted quotes/contacts, confidence, status (incl.

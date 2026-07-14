@@ -56,6 +56,19 @@ CREATE TABLE IF NOT EXISTS send_allowlist (
 );
 """
 
+# Suppression ("supplier asked to stop", spec §2 compliance floor): checked FIRST,
+# ahead of the allowlist — a suppressed domain is blocked even if allowlisted.
+# Permanent until an admin removes it (audit-logged).
+_SUPPRESSION_DDL = """
+CREATE TABLE IF NOT EXISTS send_suppression (
+    domain     TEXT PRIMARY KEY,
+    added_by   TEXT NOT NULL,
+    added_at   TEXT NOT NULL,
+    reason     TEXT,
+    is_test    INTEGER NOT NULL DEFAULT 0
+);
+"""
+
 
 def _env_truthy(value: Optional[str]) -> bool:
     """Strict opt-in parse (house rule): only 1/true/yes/on enable; anything else —
@@ -87,6 +100,7 @@ def _get_conn() -> sqlite3.Connection:
     os.makedirs(_DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(_DB_PATH)
     conn.execute(_ALLOWLIST_DDL)
+    conn.execute(_SUPPRESSION_DDL)
     return conn
 
 
@@ -195,6 +209,63 @@ def _recipient_domains(message) -> list[str]:
     return domains
 
 
+# ---------------------------------------------------------------------------
+# Suppression store ("supplier asked to stop" — spec §2 compliance floor)
+# ---------------------------------------------------------------------------
+
+def suppression_add(domain: str, *, added_by: str, reason: Optional[str] = None,
+                    is_test: bool = False) -> dict:
+    """Suppress one domain: no send will ever be delivered to it (checked FIRST,
+    beats the allowlist), permanently until an admin removes it. Audit-logged."""
+    dom = _normalize_domain(domain)
+    if not dom:
+        raise ValueError(f"not a usable domain: {domain!r}")
+    with closing(_get_conn()) as conn:
+        conn.execute(
+            "INSERT INTO send_suppression (domain, added_by, added_at, reason, is_test) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(domain) DO UPDATE SET "
+            "added_by=excluded.added_by, added_at=excluded.added_at, "
+            "reason=excluded.reason, is_test=excluded.is_test",
+            (dom, added_by, _now_iso(), reason, 1 if is_test else 0),
+        )
+        conn.commit()
+    _audit("send_suppression_add", actor=added_by, domain=dom, note=reason)
+    print(f"[SendGovernance] suppression ADD {dom} by {added_by}")
+    return {"domain": dom, "added_by": added_by}
+
+
+def suppression_remove(domain: str, *, removed_by: str) -> bool:
+    """Lift a suppression (admin action, audit-logged). True if a row was removed."""
+    dom = _normalize_domain(domain)
+    with closing(_get_conn()) as conn:
+        cur = conn.execute("DELETE FROM send_suppression WHERE domain = ?", (dom,))
+        conn.commit()
+        removed = cur.rowcount > 0
+    if removed:
+        _audit("send_suppression_remove", actor=removed_by, domain=dom)
+        print(f"[SendGovernance] suppression REMOVE {dom} by {removed_by}")
+    return removed
+
+
+def suppression_list() -> list[dict]:
+    """All suppressed domains (admin read). Raises on store failure."""
+    with closing(_get_conn()) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT domain, added_by, added_at, reason, is_test FROM send_suppression "
+            "ORDER BY domain").fetchall()
+        return [dict(r) for r in rows]
+
+
+def _domain_suppressed(dom: str) -> bool:
+    """Enforcement-path check. RAISES on store failure — converted to a blocked
+    verdict by the caller (fail-closed)."""
+    with closing(_get_conn()) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM send_suppression WHERE domain = ?", (dom,)).fetchone()
+        return row is not None
+
+
 # Cap limits (spec §3 / brief T2): env-configurable, strict defaults. An unparseable
 # override fails CLOSED (the caps stage blocks), never falls back silently.
 _DAILY_CAP_ENV = "SEND_GOVERNANCE_DAILY_CAP"
@@ -210,6 +281,22 @@ def _cap_from_env(var: str, default: int) -> int:
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
+
+
+def _check_suppression(message) -> Optional[GovernanceVerdict]:
+    """Suppression stage — FIRST in the stack: a supplier who asked to stop is
+    blocked no matter what else says yes (suppression beats allowlist beats caps).
+    Any recipient domain suppressed ⇒ blocked. Store failure ⇒ blocked
+    (fail-closed)."""
+    try:
+        for dom in _recipient_domains(message):
+            if _domain_suppressed(dom):
+                return GovernanceVerdict(False, "suppressed",
+                                         f"domain is suppressed (asked to stop): {dom}")
+        return None
+    except Exception as exc:
+        return GovernanceVerdict(False, "suppressed",
+                                 f"suppression check failed (fail-closed): {exc}")
 
 
 def _check_allowlist(message) -> Optional[GovernanceVerdict]:
@@ -275,7 +362,7 @@ def evaluate(message) -> GovernanceVerdict:
 
     Never raises: each stage converts its own failure into a BLOCKED verdict
     carrying that stage's status. Never allows on error."""
-    for check in (_check_allowlist, _check_caps):
+    for check in (_check_suppression, _check_allowlist, _check_caps):
         verdict = check(message)
         if verdict is not None:
             return verdict

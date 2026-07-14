@@ -233,6 +233,98 @@ class TestSendRfqRecordsVerdict:
 
 
 # ---------------------------------------------------------------------------
+# Suppression (T3): "supplier asked to stop" — first in the stack
+# ---------------------------------------------------------------------------
+
+class TestSuppression:
+    def test_suppressed_domain_blocks_with_suppressed_status(self, gov_store):
+        gov_store.suppression_add("dxpe.com", added_by="tom",
+                                  reason="asked to stop", is_test=True)
+        v = gov_store.evaluate(_msg())
+        assert v.allowed is False
+        assert v.status == "suppressed"
+
+    def test_suppression_beats_allowlist(self, gov_store):
+        # The precedence rule: a domain BOTH allowlisted and suppressed is blocked
+        # as suppressed — the stop request wins over the permission.
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        gov_store.suppression_add("dxpe.com", added_by="tom", is_test=True)
+        v = gov_store.evaluate(_msg())
+        assert v.status == "suppressed"
+
+    def test_any_suppressed_recipient_blocks(self, gov_store):
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        gov_store.allowlist_add("other.com", added_by="tom", is_test=True)
+        gov_store.suppression_add("other.com", added_by="tom", is_test=True)
+        v = gov_store.evaluate(_msg(to=("sales@dxpe.com",), cc=("info@other.com",)))
+        assert v.status == "suppressed"
+
+    def test_permanent_until_removed(self, gov_store):
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        gov_store.suppression_add("dxpe.com", added_by="tom", is_test=True)
+        assert gov_store.evaluate(_msg()).status == "suppressed"
+        gov_store.suppression_remove("dxpe.com", removed_by="tom")
+        assert gov_store.evaluate(_msg()).allowed is True
+
+    def test_unreadable_store_fails_closed_as_suppressed(self, gov_store, tmp_path,
+                                                         monkeypatch):
+        broken = tmp_path / "broken_gov"
+        broken.mkdir()
+        monkeypatch.setattr(send_governance, "_DB_PATH", str(broken))
+        v = gov_store.evaluate(_msg())
+        assert v.allowed is False
+        assert v.status == "suppressed"     # blocked at the FIRST failing stage
+
+    def test_sender_returns_suppressed_and_never_touches_provider(
+            self, gov_store, flag_on, monkeypatch):
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        gov_store.suppression_add("dxpe.com", added_by="tom", is_test=True)
+        service = _MockGmailService()
+        monkeypatch.setattr(email_sender, "EMAIL_SEND_ENABLED", True)
+        res = GmailSender(service=service).send(_msg())
+        assert res.status == "suppressed"
+        assert service.send_calls == 0
+
+    def test_send_rfq_records_suppressed(self, tmp_path, monkeypatch, gov_store, flag_on):
+        from utils import supplier_registry
+        from utils.rfq_send import Approval, send_rfq
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        supplier_registry.upsert_contact("dxpe.com", {
+            "contact_email": "sales@dxpe.com", "contact_method": "generic_inbox",
+            "contact_status": "resolved"})
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        gov_store.suppression_add("dxpe.com", added_by="tom", is_test=True)
+        res = send_rfq({"vendor_name": "DXP", "source_url": "https://dxpe.com"},
+                       "Subject: Q\n\nbody", Approval("tom"), run_id="r1")
+        assert res["status"] == "suppressed"
+        assert res["outreach_status"] == "blocked"
+        rows = supplier_registry.get_sent_messages(run_id="r1")
+        assert len(rows) == 1 and rows[0]["status"] == "suppressed"
+
+
+class TestSuppressionAdminEndpoints:
+    def test_roundtrip(self, admin_api, flag_on):
+        r = admin_api.post("/api/admin/send-governance/suppression", headers=_auth(),
+                           json={"domain": "https://DXPE.com", "added_by": "tom",
+                                 "reason": "asked to stop"})
+        assert r.status_code == 201 and r.json()["domain"] == "dxpe.com"
+        r = admin_api.get("/api/admin/send-governance/suppression", headers=_auth())
+        assert [x["domain"] for x in r.json()["suppression"]] == ["dxpe.com"]
+        r = admin_api.post("/api/admin/send-governance/suppression/dxpe.com/remove",
+                           headers=_auth(), json={"removed_by": "tom"})
+        assert r.status_code == 200
+        assert admin_api.get("/api/admin/send-governance/suppression",
+                             headers=_auth()).json()["count"] == 0
+
+    def test_flag_off_404(self, admin_api, monkeypatch):
+        monkeypatch.delenv("SEND_GOVERNANCE_V1", raising=False)
+        assert admin_api.get("/api/admin/send-governance/suppression",
+                             headers=_auth()).status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Caps (T2): daily global + per-supplier-per-part open-RFQ, from sent_messages
 # ---------------------------------------------------------------------------
 
