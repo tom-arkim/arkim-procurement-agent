@@ -446,6 +446,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE review_items ADD COLUMN {col} {coltype}")
             added.append(f"review_items.{col}")
 
+    # sent_messages part identity (SEND_GOVERNANCE_V1 T2): the per-supplier-per-part
+    # open-RFQ cap counts rows by (supplier_domain, part_key). Nullable, no backfill —
+    # only governance-active sends populate it (flag-off rows are unchanged).
+    sm_existing = {row[1] for row in conn.execute("PRAGMA table_info(sent_messages)").fetchall()}
+    if "part_key" not in sm_existing:
+        conn.execute("ALTER TABLE sent_messages ADD COLUMN part_key TEXT")
+        added.append("sent_messages.part_key")
+
     # supplier_notifications provenance column (demand-teaser honesty: a test/
     # fixture/seed row must be excludable from the live buyer-request count).
     # Same idempotent ADD COLUMN: existing rows keep DEFAULT 0 (live). The two
@@ -928,6 +936,7 @@ def record_sent_message(
     thread_id: Optional[str] = None,
     approved_by: Optional[str] = None,
     sent_at: Optional[str] = None,
+    part_key: Optional[str] = None,
 ) -> Optional[str]:
     """Persist one outbound-send record (the key inbound matching will later join on).
 
@@ -959,9 +968,9 @@ def record_sent_message(
                 """INSERT INTO sent_messages
                    (id, run_id, supplier_domain, vendor_name, recipients_to_json,
                     recipients_cc_json, subject, body, message_id, thread_id, status,
-                    approved_by, sent_at, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                row,
+                    approved_by, sent_at, created_at, part_key)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                row + (part_key,),
             )
             conn.commit()
         print(f"[SupplierRegistry] Sent-message recorded: {vendor_name} ({domain}) status={status}")
@@ -1002,6 +1011,47 @@ def get_sent_messages(
     except Exception as exc:
         print(f"[SupplierRegistry] get_sent_messages failed: {exc}")
         return []
+
+
+# Statuses that represent a send ATTEMPT (the message reached the provider stage) —
+# what the SEND_GOVERNANCE_V1 daily cap counts. Governance-blocked outcomes
+# (suppressed / not_allowlisted / cap_blocked) never count against caps.
+SEND_ATTEMPT_STATUSES: tuple = ("sent", "stubbed", "error")
+# Statuses of an OPEN RFQ for the per-supplier-per-part cap: attempted and not yet
+# terminally resolved (T6's transitions — replied/bounced — free the slot).
+OPEN_RFQ_STATUSES: tuple = ("sent", "stubbed")
+
+
+def count_send_attempts_utc_day(day: Optional[str] = None) -> int:
+    """Count send ATTEMPTS recorded on one UTC day (default: today, UTC).
+
+    SEND_GOVERNANCE_V1 cap input. Deliberately RAISES on store failure — the
+    governance caller converts an exception into a BLOCKED verdict (fail-closed);
+    a fail-soft 0 here would silently waive the cap. `day` is 'YYYY-MM-DD'.
+    """
+    day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    marks = ",".join("?" for _ in SEND_ATTEMPT_STATUSES)
+    with closing(_get_conn()) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM sent_messages "
+            f"WHERE substr(created_at, 1, 10) = ? AND status IN ({marks})",
+            (day, *SEND_ATTEMPT_STATUSES),
+        ).fetchone()
+        return int(row[0])
+
+
+def count_open_rfqs(domain: str, part_key: str) -> int:
+    """Count OPEN RFQs to one supplier domain for one part (SEND_GOVERNANCE_V1
+    per-supplier-per-part cap input). RAISES on store failure — fail-closed at
+    the governance caller, same contract as count_send_attempts_utc_day."""
+    marks = ",".join("?" for _ in OPEN_RFQ_STATUSES)
+    with closing(_get_conn()) as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM sent_messages "
+            f"WHERE supplier_domain = ? AND part_key = ? AND status IN ({marks})",
+            (_normalize_domain(domain), part_key, *OPEN_RFQ_STATUSES),
+        ).fetchone()
+        return int(row[0])
 
 
 def needs_reenrichment(supplier: Optional[dict], ttl_days: int = _REENRICH_TTL_DAYS) -> bool:

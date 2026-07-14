@@ -233,6 +233,133 @@ class TestSendRfqRecordsVerdict:
 
 
 # ---------------------------------------------------------------------------
+# Caps (T2): daily global + per-supplier-per-part open-RFQ, from sent_messages
+# ---------------------------------------------------------------------------
+
+class TestCaps:
+    @pytest.fixture
+    def stores(self, tmp_path, monkeypatch, gov_store):
+        """Governance + supplier_registry stores on tmp; dxpe.com allowlisted so
+        the caps stage (after allowlist) is what's under test."""
+        from utils import supplier_registry
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        return supplier_registry
+
+    def _attempt_row(self, sr, status="stubbed", domain="dxpe.com", part_key=None,
+                     run_id="r1"):
+        return sr.record_sent_message(
+            run_id=run_id, supplier_domain=domain, vendor_name="DXP",
+            to=[f"sales@{domain}"], status=status, part_key=part_key)
+
+    def _pk_msg(self, part_key="gusher pumps|8400428"):
+        m = _msg()
+        m.metadata["part_key"] = part_key
+        return m
+
+    def test_daily_cap_blocks_at_limit(self, stores, monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_DAILY_CAP", "3")
+        for _ in range(3):
+            self._attempt_row(stores)
+        v = send_governance.evaluate(_msg())
+        assert v.allowed is False
+        assert v.status == "cap_blocked"
+        assert "daily" in v.reason
+
+    def test_daily_cap_allows_below_limit(self, stores, monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_DAILY_CAP", "3")
+        for _ in range(2):
+            self._attempt_row(stores)
+        assert send_governance.evaluate(_msg()).allowed is True
+
+    def test_default_daily_cap_is_10(self, stores):
+        for _ in range(10):
+            self._attempt_row(stores)
+        v = send_governance.evaluate(_msg())
+        assert v.allowed is False and v.status == "cap_blocked"
+
+    def test_blocked_rows_never_consume_cap(self, stores, monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_DAILY_CAP", "1")
+        for st in ("not_allowlisted", "suppressed", "cap_blocked"):
+            self._attempt_row(stores, status=st)
+        assert send_governance.evaluate(_msg()).allowed is True
+
+    def test_utc_day_rollover_resets(self, stores, monkeypatch):
+        # Criterion 6: yesterday's attempts don't count against today.
+        import sqlite3
+        monkeypatch.setenv("SEND_GOVERNANCE_DAILY_CAP", "1")
+        self._attempt_row(stores)
+        with sqlite3.connect(stores._DB_PATH) as conn:
+            conn.execute("UPDATE sent_messages SET created_at = '2026-07-10T12:00:00+00:00'")
+            conn.commit()
+        assert send_governance.evaluate(_msg()).allowed is True
+
+    def test_open_rfq_cap_blocks_same_part_same_supplier(self, stores):
+        self._attempt_row(stores, part_key="gusher pumps|8400428")
+        v = send_governance.evaluate(self._pk_msg())
+        assert v.allowed is False
+        assert v.status == "cap_blocked"
+        assert "open-RFQ" in v.reason
+
+    def test_open_rfq_cap_scoped_to_part_and_supplier(self, stores, gov_store):
+        gov_store.allowlist_add("other.com", added_by="tom", is_test=True)
+        self._attempt_row(stores, part_key="gusher pumps|8400428")
+        # different part, same supplier ⇒ allowed
+        assert send_governance.evaluate(self._pk_msg("skf|6205")).allowed is True
+        # same part, different supplier ⇒ allowed
+        m = EmailMessage(to=["sales@other.com"], subject="s", body="b",
+                         metadata={"supplier_domain": "other.com",
+                                   "part_key": "gusher pumps|8400428"})
+        assert send_governance.evaluate(m).allowed is True
+
+    def test_open_rfq_cap_env_override(self, stores, monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_OPEN_RFQ_CAP", "2")
+        self._attempt_row(stores, part_key="gusher pumps|8400428")
+        assert send_governance.evaluate(self._pk_msg()).allowed is True
+
+    def test_unparseable_cap_env_fails_closed(self, stores, monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_DAILY_CAP", "ten")
+        v = send_governance.evaluate(_msg())
+        assert v.allowed is False and v.status == "cap_blocked"
+
+    def test_unreadable_sent_messages_store_fails_closed(self, stores, tmp_path, monkeypatch):
+        broken = tmp_path / "broken_sm"
+        broken.mkdir()
+        from utils import supplier_registry
+        monkeypatch.setattr(supplier_registry, "_DB_PATH", str(broken))
+        v = send_governance.evaluate(_msg())
+        assert v.allowed is False and v.status == "cap_blocked"
+
+    def test_allowlist_beats_caps(self, stores, monkeypatch):
+        # Precedence: a non-allowlisted domain reports not_allowlisted even when
+        # the daily cap is also exhausted.
+        monkeypatch.setenv("SEND_GOVERNANCE_DAILY_CAP", "0")
+        m = EmailMessage(to=["sales@nowhere.com"], subject="s", body="b")
+        v = send_governance.evaluate(m)
+        assert v.status == "not_allowlisted"
+
+    def test_send_rfq_records_cap_blocked_and_part_key(self, stores, flag_on):
+        from utils.rfq_send import Approval, send_rfq
+        stores.upsert_contact("dxpe.com", {"contact_email": "sales@dxpe.com",
+                                           "contact_method": "generic_inbox",
+                                           "contact_status": "resolved"})
+        cand = {"vendor_name": "DXP Enterprises", "source_url": "https://dxpe.com"}
+        pk = "gusher pumps|8400428"
+        r1 = send_rfq(cand, "Subject: Q\n\nbody", Approval("tom"), run_id="r1", part_key=pk)
+        assert r1["status"] == "stubbed"                      # first: through the stack
+        rows = stores.get_sent_messages(run_id="r1")
+        assert rows[0]["part_key"] == pk                      # part identity recorded
+        r2 = send_rfq(dict(cand), "Subject: Q\n\nbody", Approval("tom"), run_id="r1",
+                      part_key=pk)
+        assert r2["status"] == "cap_blocked"                  # open-RFQ cap bites
+        assert r2["outreach_status"] == "blocked"
+        statuses = {r["status"] for r in stores.get_sent_messages(run_id="r1")}
+        assert statuses == {"stubbed", "cap_blocked"}         # blocked outcome recorded
+
+
+# ---------------------------------------------------------------------------
 # Admin endpoints (flag-gated + admin-token-gated)
 # ---------------------------------------------------------------------------
 

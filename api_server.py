@@ -4460,12 +4460,32 @@ def send_rfq_draft(draft_id: str):
             detail=f"draft is '{draft['status']}' — only an approved draft can be sent",
         )
 
+    # SEND_GOVERNANCE_V1 (T2): stamp the run's canonical part identity onto the send
+    # so the per-supplier-per-part open-RFQ cap can count it. Governance-active only
+    # (flag-off sent_messages rows stay byte-identical); fail-soft — a part_key
+    # derivation error must not break the send flow (the daily cap still binds).
+    # Governance-off: the send_rfq call below is BYTE-IDENTICAL to before (no
+    # part_key kwarg at all — parity holds at the call site, not just the flag).
+    send_kwargs: dict = {}
+    from utils import send_governance
+    if send_governance.send_governance_active():
+        try:
+            from utils import known_parts
+            with _SessionFactory() as session:
+                run = session.get(SourcingRunORM, draft["run_id"])
+                specs = json.loads(run.asset_specs_json) if run and run.asset_specs_json else {}
+            send_kwargs["part_key"] = known_parts.canonical_part_key(
+                specs.get("manufacturer"), specs.get("part_number")) or None
+        except Exception:
+            send_kwargs["part_key"] = None
+
     approval = rfq_send.Approval(approved_by=draft["approved_by"], approved_at=draft["approved_at"])
     result = rfq_send.send_rfq(
         draft["candidate_snapshot"],   # the frozen snapshot the human approved (vendor_name + source_url)
         draft["draft_body"],
         approval,
         run_id=draft["run_id"],
+        **send_kwargs,
     )
 
     # Mark 'sent' ONLY on a genuine send. send_rfq returns a sent_message_id even when stubbed

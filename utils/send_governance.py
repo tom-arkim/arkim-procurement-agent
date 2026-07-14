@@ -195,17 +195,26 @@ def _recipient_domains(message) -> list[str]:
     return domains
 
 
-def evaluate(message) -> GovernanceVerdict:
-    """Run the governance stack over one outbound message. Order is load-bearing
-    (suppression beats allowlist beats caps — precedence is property-tested):
+# Cap limits (spec §3 / brief T2): env-configurable, strict defaults. An unparseable
+# override fails CLOSED (the caps stage blocks), never falls back silently.
+_DAILY_CAP_ENV = "SEND_GOVERNANCE_DAILY_CAP"
+_OPEN_RFQ_CAP_ENV = "SEND_GOVERNANCE_OPEN_RFQ_CAP"
+DEFAULT_DAILY_CAP = 10
+DEFAULT_OPEN_RFQ_CAP = 1
 
-      1. suppression (T3 — lands ahead of allowlist when built)
-      2. allowlist: EVERY recipient domain must be explicitly allowlisted.
-         Empty/missing/unreadable allowlist ⇒ blocked (fail-closed).
-      3. caps (T2)
 
-    Never raises: any internal failure returns a BLOCKED verdict for the stage
-    that failed. Never allows on error."""
+def _cap_from_env(var: str, default: int) -> int:
+    """Read a cap limit. Unset ⇒ default; a set-but-unparseable value RAISES so
+    the caps stage blocks (a typo'd cap must never mean 'no cap')."""
+    raw = os.environ.get(var)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw)
+
+
+def _check_allowlist(message) -> Optional[GovernanceVerdict]:
+    """Allowlist stage: EVERY recipient domain (to+cc) must be explicitly
+    allowlisted. Empty/missing/unreadable allowlist ⇒ blocked (fail-closed)."""
     try:
         domains = _recipient_domains(message)
         if not domains:
@@ -215,8 +224,59 @@ def evaluate(message) -> GovernanceVerdict:
             if not _domain_allowlisted(dom):
                 return GovernanceVerdict(False, "not_allowlisted",
                                          f"domain not on send allowlist: {dom}")
-        return GovernanceVerdict(True)
+        return None
     except Exception as exc:
-        # Fail-CLOSED: a governance store problem blocks the send.
         return GovernanceVerdict(False, "not_allowlisted",
                                  f"allowlist check failed (fail-closed): {exc}")
+
+
+def _check_caps(message) -> Optional[GovernanceVerdict]:
+    """Caps stage (spec §3 backstop — caps turn a bug into a bounded incident):
+
+      - global per-UTC-day send cap (default 10; env SEND_GOVERNANCE_DAILY_CAP),
+        counted from sent_messages ATTEMPT rows (sent/stubbed/error) — blocked
+        outcomes never consume cap.
+      - per-supplier-per-part open-RFQ cap (default 1; env
+        SEND_GOVERNANCE_OPEN_RFQ_CAP), keyed on (metadata.supplier_domain,
+        metadata.part_key). Messages without a part_key (notify/intake) have no
+        part to cap on — the RFQ path always stamps one (test-locked).
+
+    Store/parse failures ⇒ blocked "cap_blocked" (fail-closed)."""
+    from utils import supplier_registry
+    try:
+        daily_cap = _cap_from_env(_DAILY_CAP_ENV, DEFAULT_DAILY_CAP)
+        used = supplier_registry.count_send_attempts_utc_day()
+        if used >= daily_cap:
+            return GovernanceVerdict(False, "cap_blocked",
+                                     f"daily send cap reached ({used}/{daily_cap})")
+        meta = getattr(message, "metadata", None) or {}
+        part_key = meta.get("part_key")
+        dom = _normalize_domain(meta.get("supplier_domain") or "")
+        if part_key and dom:
+            open_cap = _cap_from_env(_OPEN_RFQ_CAP_ENV, DEFAULT_OPEN_RFQ_CAP)
+            open_now = supplier_registry.count_open_rfqs(dom, part_key)
+            if open_now >= open_cap:
+                return GovernanceVerdict(
+                    False, "cap_blocked",
+                    f"open-RFQ cap reached for {dom} / {part_key} ({open_now}/{open_cap})")
+        return None
+    except Exception as exc:
+        return GovernanceVerdict(False, "cap_blocked",
+                                 f"cap check failed (fail-closed): {exc}")
+
+
+def evaluate(message) -> GovernanceVerdict:
+    """Run the governance stack over one outbound message. Order is load-bearing
+    (suppression beats allowlist beats caps — precedence is property-tested):
+
+      1. suppression (T3 — lands ahead of allowlist when built)
+      2. allowlist (fail-closed; empty list blocks everything)
+      3. caps (fail-closed)
+
+    Never raises: each stage converts its own failure into a BLOCKED verdict
+    carrying that stage's status. Never allows on error."""
+    for check in (_check_allowlist, _check_caps):
+        verdict = check(message)
+        if verdict is not None:
+            return verdict
+    return GovernanceVerdict(True)

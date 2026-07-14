@@ -92,6 +92,7 @@ def send_rfq(
     *,
     run_id: Optional[str] = None,
     sender: Optional[EmailSender] = None,
+    part_key: Optional[str] = None,
 ) -> dict:
     """Send (or stub) one approved Tier 3 RFQ to a supplier's recipient set.
 
@@ -127,9 +128,12 @@ def send_rfq(
 
     rfq_id = str(uuid.uuid4())
     subject = _subject_from_draft(approved_draft) or f"Quote request - {vendor_name or 'part'}"
+    # part_key (SEND_GOVERNANCE_V1 T2): the per-supplier-per-part open-RFQ cap keys
+    # on it. Callers pass it only when governance is active (flag-off rows unchanged).
     message = EmailMessage(
         to=to, cc=cc, subject=subject, body=approved_draft,
-        metadata={"run_id": run_id, "supplier_domain": domain, "rfq_id": rfq_id},
+        metadata={"run_id": run_id, "supplier_domain": domain, "rfq_id": rfq_id,
+                  "part_key": part_key},
     )
 
     # ── Send path vs stub path. Flag False => provider is NOT invoked. ───────
@@ -165,6 +169,7 @@ def send_rfq(
         to=to, cc=cc, subject=subject, body=approved_draft, status=status,
         message_id=send_result.message_id, thread_id=send_result.thread_id,
         approved_by=approval.approved_by, sent_at=send_result.sent_at,
+        part_key=part_key,
     )
 
     # ── Human-readable audit event (run-level trail). ────────────────────────
