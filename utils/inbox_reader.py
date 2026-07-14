@@ -26,11 +26,24 @@ import email as _email
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from typing import Optional
 
 import utils.email_sender as email_sender
 from utils import gmail_client
+
+
+def _is_intake_address(addr: str) -> bool:
+    """True for an intake-stream address — ``intake@`` or ``intake+<tenant>@`` on
+    the intake domain (utils.intake_channels convention). The SEND_GOVERNANCE_V1
+    cross-stream filter drops such mail from the RFQ reader: the two streams share
+    a mailbox but must never cross (spec §8 / Night 8 I2)."""
+    if not addr or "@" not in addr:
+        return False
+    from utils.intake_channels import INTAKE_DOMAIN
+    local, _, domain = addr.strip().lower().partition("@")
+    return (domain == INTAKE_DOMAIN.lower()
+            and (local == "intake" or local.startswith("intake+")))
 
 
 @dataclass
@@ -55,6 +68,11 @@ class ReplyNotice:
     body: str = ""
     attachments: list = field(default_factory=list)
     form: Optional[dict] = None
+    # Recipient addresses (To/Cc/Delivered-To), parsed for stream attribution —
+    # the SEND_GOVERNANCE_V1 cross-stream filter keys on these (an intake-addressed
+    # message must never surface to the RFQ reader). Always populated; only the
+    # flag-gated filter acts on it.
+    to_addresses: list = field(default_factory=list)
 
 
 @dataclass
@@ -178,6 +196,14 @@ class GmailInboxReader(InboxReader):
         sender = parseaddr(msg.get("From") or "")[1]
         if not sender:
             return None
+        # Recipient set for stream attribution (T5): To/Cc plus the delivery
+        # headers Gmail stamps — Delivered-To survives plus-address routing even
+        # when the visible To differs.
+        to_addresses: list = []
+        for header in ("To", "Cc", "Delivered-To", "X-Original-To"):
+            for _, addr in getaddresses(msg.get_all(header) or []):
+                if addr and addr not in to_addresses:
+                    to_addresses.append(addr)
 
         def _strip(v):
             return (v or "").strip().strip("<>").strip() or None
@@ -212,6 +238,7 @@ class GmailInboxReader(InboxReader):
             subject=msg.get("Subject"),
             body=body,
             attachments=attachments,
+            to_addresses=to_addresses,
         )
 
     def fetch_replies(self) -> list[ReplyNotice]:
@@ -222,14 +249,31 @@ class GmailInboxReader(InboxReader):
         try:
             # Inbox messages that aren't bounces (DSNs are handled by fetch_bounces).
             q = "in:inbox -from:mailer-daemon -from:postmaster"
+            # SEND_GOVERNANCE_V1 (T5) — cross-stream isolation: scope the RFQ
+            # reader to ITS OWN stream. Two layers, belt and braces:
+            #   1. Gmail-side: narrow the query to mail addressed to the RFQ
+            #      sending identity (replies come back to the address we sent from).
+            #   2. Post-parse (below): drop anything addressed to an intake
+            #      address — intake mail must NEVER surface as an RFQ reply, even
+            #      if the provider-side query lets it through.
+            # Flag OFF ⇒ the query string and behavior are byte-identical to before.
+            from utils import send_governance
+            governed = send_governance.send_governance_active()
+            if governed:
+                q += f" to:{gmail_client.gmail_sender_address()}"
             listed = service.users().messages().list(userId="me", q=q).execute()
             for m in listed.get("messages", []) or []:
                 raw, thread_id = self._get_raw(service, m.get("id"))
                 if not raw:
                     continue
                 notice = self._parse_reply(raw, thread_id)
-                if notice:
-                    notices.append(notice)
+                if not notice:
+                    continue
+                if governed and any(_is_intake_address(a) for a in notice.to_addresses):
+                    print(f"[InboxReader] DROPPED cross-stream (intake-addressed) "
+                          f"message from {notice.sender} — not an RFQ reply")
+                    continue
+                notices.append(notice)
         except Exception as exc:
             print(f"[InboxReader] fetch_replies failed: {type(exc).__name__}: {exc}")
         return notices

@@ -452,6 +452,97 @@ class TestCaps:
 
 
 # ---------------------------------------------------------------------------
+# Inbox scoping (T5): intake mail and RFQ replies must never cross
+# ---------------------------------------------------------------------------
+
+import base64 as _b64mod
+from unittest.mock import MagicMock
+
+
+def _b64(text: str) -> str:
+    return _b64mod.urlsafe_b64encode(text.encode("utf-8")).decode()
+
+
+def _raw_mail(to: str, from_addr: str = "jeff@baypower.com", body: str = "quote inside") -> str:
+    return (f"From: {from_addr}\r\n"
+            f"To: {to}\r\n"
+            f"Subject: Re: Quote request\r\n"
+            f"Message-ID: <m-{to}@x>\r\n"
+            f"Content-Type: text/plain; charset=\"utf-8\"\r\n\r\n"
+            f"{body}\r\n")
+
+
+def _inbox_service(msgs_map: dict):
+    """Mocked Gmail read service: list() returns every id, get(id) its raw mail."""
+    service = MagicMock()
+    m = service.users.return_value.messages.return_value
+    m.list.return_value.execute.return_value = {
+        "messages": [{"id": k} for k in msgs_map]}
+
+    def _get(userId=None, id=None, format=None):
+        r = MagicMock()
+        r.execute.return_value = {"raw": _b64(msgs_map[id]), "threadId": f"T-{id}"}
+        return r
+
+    m.get.side_effect = _get
+    return service, m
+
+
+class TestInboxScoping:
+    @pytest.fixture(autouse=True)
+    def _gate_on_no_sender_env(self, monkeypatch):
+        # Reads are gated like sends: simulate the gate on (module attr only) so
+        # the MOCKED service is consulted. Default sender = procurement@arkim.ai.
+        monkeypatch.setattr(email_sender, "EMAIL_SEND_ENABLED", True)
+        monkeypatch.delenv("GMAIL_SENDER", raising=False)
+
+    def test_flag_on_intake_mail_never_surfaces_to_rfq_reader(self, flag_on):
+        from utils.inbox_reader import GmailInboxReader
+        service, m = _inbox_service({
+            "r1": _raw_mail("procurement@arkim.ai"),              # real RFQ reply
+            "i1": _raw_mail("intake+acme@arkim.ai",
+                            from_addr="tech@customer.com"),       # intake stream
+            "i2": _raw_mail("intake@arkim.ai",
+                            from_addr="tech@customer.com"),       # bare intake@
+        })
+        notices = GmailInboxReader(service=service).fetch_replies()
+        assert [n.sender for n in notices] == ["jeff@baypower.com"]
+        # Gmail-side narrowing also applied: the query asks for the RFQ stream.
+        assert "to:procurement@arkim.ai" in m.list.call_args.kwargs["q"]
+
+    def test_flag_on_drops_intake_even_when_cc_hides_it(self, flag_on):
+        # An intake address anywhere in the recipient set (Cc) still marks the
+        # message as intake-stream — dropped.
+        from utils.inbox_reader import GmailInboxReader
+        raw = ("From: tech@customer.com\r\n"
+               "To: procurement@arkim.ai\r\n"
+               "Cc: intake+acme@arkim.ai\r\n"
+               "Subject: hello\r\n\r\nbody\r\n")
+        service, _m = _inbox_service({"x": raw})
+        assert GmailInboxReader(service=service).fetch_replies() == []
+
+    def test_flag_off_query_and_behavior_byte_identical(self, monkeypatch):
+        monkeypatch.delenv("SEND_GOVERNANCE_V1", raising=False)
+        from utils.inbox_reader import GmailInboxReader
+        service, m = _inbox_service({
+            "r1": _raw_mail("procurement@arkim.ai"),
+            "i1": _raw_mail("intake+acme@arkim.ai", from_addr="tech@customer.com"),
+        })
+        notices = GmailInboxReader(service=service).fetch_replies()
+        assert len(notices) == 2                                  # today's behavior
+        assert m.list.call_args.kwargs["q"] == \
+            "in:inbox -from:mailer-daemon -from:postmaster"       # untouched query
+
+    def test_reverse_direction_rfq_mail_never_becomes_intake(self):
+        # The intake adapter's tenant resolution structurally rejects RFQ-stream
+        # addresses — no tenant, no intake run (cross-stream, both directions).
+        from utils.intake_channels import resolve_tenant_from_address
+        assert resolve_tenant_from_address("procurement@arkim.ai") is None
+        assert resolve_tenant_from_address("rfq@arkim.ai") is None
+        assert resolve_tenant_from_address("intake+acme@arkim.ai") == "acme"
+
+
+# ---------------------------------------------------------------------------
 # Admin endpoints (flag-gated + admin-token-gated)
 # ---------------------------------------------------------------------------
 
