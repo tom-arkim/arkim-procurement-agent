@@ -186,7 +186,16 @@ export function OptionsScreen({ runId }: { runId: string }) {
   }
 
   const sr = run.sourcing_results;
-  const options: Candidate[] = [...(sr?.tier1 ?? []), ...(sr?.tier2 ?? []), ...(sr?.tier3 ?? [])];
+  // RANKING_BANDS_V1: a banded payload carries findings[] (Band A/B evidence cards,
+  // already in banded order) + outreachTargets (Band C — who we're ASKING, not what
+  // we found). Detected from the payload itself: the backend emits these keys only
+  // for results carrying the ranking_bands:v1 marker — never an env read here.
+  // Flag-off / legacy results have no findings key → the tier-array path below is
+  // byte-identical to before.
+  const banded = Array.isArray(sr?.findings);
+  const options: Candidate[] = banded
+    ? (sr?.findings ?? [])
+    : [...(sr?.tier1 ?? []), ...(sr?.tier2 ?? []), ...(sr?.tier3 ?? [])];
   const priced = options.filter((c) => c.price != null);
   const recId = run.selected_candidate?.id ?? priced[0]?.id ?? options[0]?.id;
 

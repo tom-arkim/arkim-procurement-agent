@@ -157,6 +157,25 @@ export interface Candidate {
   relationship?: string;
   // Tier 1 two-mode display: true = show "Request Confirmation"; false = show "Buy Now".
   confirmationPending?: boolean;
+  // RANKING_BANDS_V1 (findings[] entries only): evidence band + quality. isMock is a
+  // backend contract field (always false in findings — test-enforced server-side).
+  band?: "A" | "B" | "C";
+  evidenceQuality?: number;
+  isMock?: boolean;
+}
+
+/** RANKING_BANDS_V1 — one Band-C outreach target: a supplier we intend to ASK,
+ *  not a finding. Carries identity + provenance only — no scores, no prices. */
+export interface OutreachTarget {
+  vendorName: string;
+  onboarded: boolean;
+  provenance: string;
+}
+
+export interface OutreachTargets {
+  /** Onboarded supplier(s) first (server-sorted), then capped capability matches. */
+  suppliers: OutreachTarget[];
+  requestedCount: number;
 }
 
 export interface ApprovalActionRecord {
@@ -218,6 +237,14 @@ export interface SourcingResults {
   tier3: Candidate[];
   warrantyBanner?: string;
   tier3CapabilityPivot?: boolean;
+  // RANKING_BANDS_V1: present ONLY when the stored result carries the
+  // ranking_bands:v1 marker (the backend keys these off the result, not the env —
+  // api_server._transform_sourcing_results). Their presence IS the client-visible
+  // flag-on signal: findings[] = Band A/B evidence cards in banded order;
+  // outreachTargets = the Band-C ask-and-see block. Legacy/flag-off results never
+  // carry these keys.
+  findings?: Candidate[];
+  outreachTargets?: OutreachTargets;
 }
 
 export interface SourcingRunDetail {
