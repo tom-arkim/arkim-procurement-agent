@@ -209,6 +209,21 @@ class GmailSender(EmailSender):
         return raw, header.strip("<>")
 
     def send(self, message: EmailMessage) -> SendResult:
+        # SEND_GOVERNANCE_V1 — the governance stack runs FIRST, ahead of the
+        # delivery gate, at this last seam before delivery so NO caller can bypass
+        # it (rfq_send, tier1_notify, the intake reply sink, operator scripts all
+        # come through here). Precedence: suppression → allowlist → caps → (release,
+        # structural, upstream) → EMAIL_SEND_ENABLED. A blocked verdict returns a
+        # recorded status ("suppressed"/"not_allowlisted"/"cap_blocked"), zero
+        # network. Governance can only BLOCK — it never enables delivery; the gate
+        # below is untouched. Flag OFF ⇒ this block is inert (byte-identical).
+        from utils import send_governance
+        if send_governance.send_governance_active():
+            verdict = send_governance.evaluate(message)
+            if not verdict.allowed:
+                print(f"[EmailSender] BLOCKED ({verdict.status}: {verdict.reason}) "
+                      f"-> {message.all_recipients}")
+                return SendResult(status=verdict.status, error=verdict.reason)
         if not EMAIL_SEND_ENABLED:
             print(f"[EmailSender] STUBBED (EMAIL_SEND_ENABLED=False) -> {message.all_recipients}")
             return SendResult(status="stubbed")

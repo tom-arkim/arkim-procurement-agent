@@ -12,6 +12,11 @@ from __future__ import annotations
 from utils import email_sender
 from utils.audit_log import write_audit_log
 
+# Version stamp for the RFQ template below (SEND_GOVERNANCE_V1 T6): recorded on
+# every governance-active sent_messages row so the ledger shows exactly which
+# template text a supplier received. Bump when _make_draft's copy changes.
+TEMPLATE_VERSION = "rfq-v1"
+
 # Appended to an RFQ ONLY when it falls back to a generic inbox (no resolved named
 # primary). Asks the supplier to nominate the right procurement contact. Capturing
 # the reply is Layer 3 (inbound) — out of scope here; this is outbound text only.

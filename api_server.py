@@ -3277,6 +3277,238 @@ def admin_sent_messages(role: str = Depends(require_admin)):
     return {"count": len(rows), "sent_messages": rows}
 
 
+# ---------------------------------------------------------------------------
+# Send-governance admin surface (SEND_GOVERNANCE_V1 — Night 10)
+#
+# Flag-gated: with SEND_GOVERNANCE_V1 off these routes 404 byte-identically to an
+# unknown route (mirrors the intake-channels flag-off pattern), so flag-off parity
+# holds at the API surface. All mutations carry actor identity and are audit-logged
+# in utils/send_governance. NONE of this enables delivery — the allowlist can only
+# ever BLOCK; EMAIL_SEND_ENABLED remains the untouched delivery gate.
+# ---------------------------------------------------------------------------
+
+def _require_send_governance_enabled():
+    """Shared route gate: SEND_GOVERNANCE_V1 off -> 404 (route absent)."""
+    from utils import send_governance
+    if not send_governance.send_governance_active():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+class AllowlistAddRequest(BaseModel):
+    domain: str
+    added_by: str
+    note: Optional[str] = None
+
+
+class AllowlistRemoveRequest(BaseModel):
+    removed_by: str
+
+
+@app.get("/api/admin/send-governance/allowlist")
+def admin_allowlist_list(role: str = Depends(require_admin)):
+    """The send allowlist (fail-closed: empty list ⇒ nothing can deliver)."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    rows = send_governance.allowlist_list()
+    return {"count": len(rows), "allowlist": rows}
+
+
+@app.post("/api/admin/send-governance/allowlist", status_code=201)
+def admin_allowlist_add(body: AllowlistAddRequest, role: str = Depends(require_admin)):
+    """Allow sends to one supplier domain (audit-logged who/when). 422 on an
+    unusable domain."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    try:
+        row = send_governance.allowlist_add(body.domain, added_by=body.added_by,
+                                            note=body.note)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return row
+
+
+@app.post("/api/admin/send-governance/allowlist/{domain}/remove")
+def admin_allowlist_remove(domain: str, body: AllowlistRemoveRequest,
+                           role: str = Depends(require_admin)):
+    """Remove one domain from the allowlist (audit-logged). 404 if not listed.
+    POST (not DELETE) so the remover's identity travels in the body."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    if not send_governance.allowlist_remove(domain, removed_by=body.removed_by):
+        raise HTTPException(status_code=404, detail="Domain not on the allowlist")
+    return {"domain": domain, "removed": True, "removed_by": body.removed_by}
+
+
+class SuppressionAddRequest(BaseModel):
+    domain: str
+    added_by: str
+    reason: Optional[str] = None
+
+
+@app.get("/api/admin/send-governance/suppression")
+def admin_suppression_list(role: str = Depends(require_admin)):
+    """The suppression list ("supplier asked to stop") — beats the allowlist."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    rows = send_governance.suppression_list()
+    return {"count": len(rows), "suppression": rows}
+
+
+@app.post("/api/admin/send-governance/suppression", status_code=201)
+def admin_suppression_add(body: SuppressionAddRequest, role: str = Depends(require_admin)):
+    """Suppress one domain (audit-logged who/when/why). Permanent until removed."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    try:
+        row = send_governance.suppression_add(body.domain, added_by=body.added_by,
+                                              reason=body.reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return row
+
+
+@app.post("/api/admin/send-governance/suppression/{domain}/remove")
+def admin_suppression_remove(domain: str, body: AllowlistRemoveRequest,
+                             role: str = Depends(require_admin)):
+    """Lift a suppression (audit-logged). 404 if not suppressed."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    if not send_governance.suppression_remove(domain, removed_by=body.removed_by):
+        raise HTTPException(status_code=404, detail="Domain not suppressed")
+    return {"domain": domain, "removed": True, "removed_by": body.removed_by}
+
+
+# --- Release queue (T4): the concierge send-approval step ---------------------
+#
+# Phase-1 model (spec §3): an approved RFQ draft is never delivered directly — a
+# human lists the pending drafts (full rendered content + recipients) and releases
+# or rejects each. Release runs the FULL gate stack (suppression → allowlist →
+# caps → EMAIL_SEND_ENABLED) via send_rfq → GmailSender; with the delivery gate
+# off, a released draft records "stubbed" with releaser identity — the whole
+# governance flow exercised end-to-end with zero deliveries. Batch = same
+# endpoint, list of ids. A released-but-not-delivered draft stays 'approved'
+# (claim-matches-reality: 'sent' means a message actually went) and therefore
+# remains in the queue — deliberate for shadow mode, documented in the report.
+
+def _release_part_key(run_id: str) -> Optional[str]:
+    """Canonical part identity for a run's sends (the open-RFQ cap key).
+    Fail-soft: a derivation error returns None (the daily cap still binds)."""
+    try:
+        from utils import known_parts
+        with _SessionFactory() as session:
+            run = session.get(SourcingRunORM, run_id)
+            specs = json.loads(run.asset_specs_json) if run and run.asset_specs_json else {}
+        return known_parts.canonical_part_key(
+            specs.get("manufacturer"), specs.get("part_number")) or None
+    except Exception:
+        return None
+
+
+class ReleaseRequest(BaseModel):
+    draft_ids: List[str]
+    released_by: str
+
+
+class ReleaseRejectRequest(BaseModel):
+    rejected_by: str
+
+
+@app.get("/api/admin/send-governance/release-queue")
+def admin_release_queue(role: str = Depends(require_admin)):
+    """Pending (approved, not yet sent) RFQ drafts across all runs, oldest first,
+    with the FULL rendered content + current recipient set — what the concierge
+    reviews before releasing."""
+    _require_send_governance_enabled()
+    from utils.procurement_agent.state import persistence
+    drafts = persistence.list_drafts_by_status("approved")
+    for d in drafts:
+        d["recipients"] = _draft_recipients(d, seed=False)
+    return {"count": len(drafts), "pending": drafts}
+
+
+@app.post("/api/admin/send-governance/release-queue/release")
+def admin_release_drafts(body: ReleaseRequest, role: str = Depends(require_admin)):
+    """Release one or more approved drafts (batch = list of ids). Each release
+    runs the full gate stack; the sent_messages row records the releaser identity
+    and timestamp alongside the outcome status (stubbed while the delivery gate is
+    off; suppressed/not_allowlisted/cap_blocked when governance blocks). Per-draft
+    results — one bad id never voids the rest of the batch."""
+    _require_send_governance_enabled()
+    from utils.procurement_agent.state import persistence
+    from utils import rfq_send
+
+    results = []
+    for draft_id in body.draft_ids:
+        draft = persistence.get_draft(draft_id)
+        if draft is None:
+            results.append({"draft_id": draft_id, "released": False,
+                            "error": "Draft not found"})
+            continue
+        if draft["status"] != "approved":
+            results.append({"draft_id": draft_id, "released": False,
+                            "error": f"draft is '{draft['status']}' - only an approved "
+                                     f"draft can be released"})
+            continue
+        approval = rfq_send.Approval(approved_by=draft["approved_by"],
+                                     approved_at=draft["approved_at"])
+        result = rfq_send.send_rfq(
+            draft["candidate_snapshot"],
+            draft["draft_body"],
+            approval,
+            run_id=draft["run_id"],
+            part_key=_release_part_key(draft["run_id"]),
+            released_by=body.released_by,
+        )
+        draft_status = draft["status"]
+        if result.get("sent"):   # genuine delivery only (claim-matches-reality)
+            persistence.transition_draft(draft_id, "sent",
+                                         sent_message_id=result.get("sent_message_id"))
+            draft_status = "sent"
+        results.append({
+            "draft_id": draft_id,
+            "released": True,
+            "released_by": body.released_by,
+            "send_status": result.get("status"),
+            "sent": bool(result.get("sent")),
+            "draft_status": draft_status,
+            "sent_message_id": result.get("sent_message_id"),
+            "recipients": result.get("recipients"),
+        })
+    return {"released_by": body.released_by, "results": results}
+
+
+@app.get("/api/admin/send-governance/digest")
+def admin_send_digest(day: Optional[str] = None, role: str = Depends(require_admin)):
+    """The daily-ritual digest (spec §4, 5 minutes): status-event counts for one
+    UTC day (default today) + the detail lists — bounces, replies, anything
+    blocked. Counts EVENTS from each row's status history, so a Monday release
+    that bounces Tuesday shows in both days honestly. Read-only; endpoint-only
+    by design (the ritual starts as curl/CLI, no UI)."""
+    _require_send_governance_enabled()
+    from utils import supplier_registry
+    if day is not None and (len(day) != 10 or day[4] != "-" or day[7] != "-"):
+        raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+    return supplier_registry.sent_messages_digest(day)
+
+
+@app.post("/api/admin/send-governance/release-queue/{draft_id}/reject")
+def admin_release_reject(draft_id: str, body: ReleaseRejectRequest,
+                         role: str = Depends(require_admin)):
+    """Concierge decline at the release step: approved -> rejected (terminal).
+    Governance-only transition (the legacy lifecycle keeps approved drafts
+    unrejectable, byte-identical flag-off). 404 unknown; 409 not-approved."""
+    _require_send_governance_enabled()
+    from utils.procurement_agent.state import persistence
+    if persistence.get_draft(draft_id) is None:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    try:
+        draft = persistence.release_reject_draft(draft_id, rejected_by=body.rejected_by)
+    except persistence.DraftTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"draft_id": draft["id"], "status": draft["status"],
+            "rejected_by": draft["rejected_by"]}
+
+
 @app.get("/api/admin/review-queue")
 def admin_review_queue(role: str = Depends(require_admin)):
     """review_items — extracted quotes/contacts, confidence, status (incl.
@@ -4390,6 +4622,17 @@ def send_rfq_draft(draft_id: str):
     draft = persistence.get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="Draft not found")
+    # SEND_GOVERNANCE_V1 (T4): with governance active, an approved draft is delivered
+    # ONLY via the concierge release queue (releaser identity recorded) — this direct
+    # send endpoint refuses, making the release step structurally unbypassable.
+    # Flag OFF: byte-identical legacy behavior below.
+    from utils import send_governance as _sg
+    if _sg.send_governance_active():
+        raise HTTPException(
+            status_code=409,
+            detail="Send governance is active - approved drafts are released via "
+                   "/api/admin/send-governance/release-queue, not sent directly",
+        )
     # Gate BEFORE send: only 'approved' -> 'sent' is legal. A drafted/rejected/sent draft 409s
     # and send_rfq is never reached.
     if not persistence.can_transition_draft(draft["status"], "sent"):
@@ -4398,12 +4641,32 @@ def send_rfq_draft(draft_id: str):
             detail=f"draft is '{draft['status']}' — only an approved draft can be sent",
         )
 
+    # SEND_GOVERNANCE_V1 (T2): stamp the run's canonical part identity onto the send
+    # so the per-supplier-per-part open-RFQ cap can count it. Governance-active only
+    # (flag-off sent_messages rows stay byte-identical); fail-soft — a part_key
+    # derivation error must not break the send flow (the daily cap still binds).
+    # Governance-off: the send_rfq call below is BYTE-IDENTICAL to before (no
+    # part_key kwarg at all — parity holds at the call site, not just the flag).
+    send_kwargs: dict = {}
+    from utils import send_governance
+    if send_governance.send_governance_active():
+        try:
+            from utils import known_parts
+            with _SessionFactory() as session:
+                run = session.get(SourcingRunORM, draft["run_id"])
+                specs = json.loads(run.asset_specs_json) if run and run.asset_specs_json else {}
+            send_kwargs["part_key"] = known_parts.canonical_part_key(
+                specs.get("manufacturer"), specs.get("part_number")) or None
+        except Exception:
+            send_kwargs["part_key"] = None
+
     approval = rfq_send.Approval(approved_by=draft["approved_by"], approved_at=draft["approved_at"])
     result = rfq_send.send_rfq(
         draft["candidate_snapshot"],   # the frozen snapshot the human approved (vendor_name + source_url)
         draft["draft_body"],
         approval,
         run_id=draft["run_id"],
+        **send_kwargs,
     )
 
     # Mark 'sent' ONLY on a genuine send. send_rfq returns a sent_message_id even when stubbed

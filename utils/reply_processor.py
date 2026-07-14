@@ -104,6 +104,12 @@ def process_replies(
         run_id = row.get("run_id")
         domain = row.get("supplier_domain")
         vendor = row.get("vendor_name")
+        # SEND_GOVERNANCE_V1 (T6 ledger): a matched reply transitions its outbound
+        # row to "replied" (frees the per-part open-RFQ cap slot; feeds the daily
+        # digest). Flag OFF: rows untouched (byte-identical).
+        from utils.send_governance import send_governance_active
+        if send_governance_active() and row.get("id"):
+            supplier_registry.update_sent_message_status(row["id"], "replied")
         specs = specs_lookup(run_id) or {}
         # Deterministic-join keys carried from the matched outbound (State C 3a) — the data
         # is in hand at the match; previously it was dropped at the forward below.
