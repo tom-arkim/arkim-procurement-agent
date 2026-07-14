@@ -133,7 +133,14 @@ def send_rfq(
     )
 
     # ── Send path vs stub path. Flag False => provider is NOT invoked. ───────
-    if email_sender.EMAIL_SEND_ENABLED:
+    # SEND_GOVERNANCE_V1: with governance active the sender IS invoked even while
+    # the delivery gate is off — the governance stack (suppression → allowlist →
+    # caps) runs inside the sender ahead of the gate, so a blocked send records its
+    # real verdict ("suppressed"/"not_allowlisted"/"cap_blocked") instead of being
+    # masked as "stubbed". The sender itself still stubs at the gate — delivery
+    # remains impossible. Flag OFF: byte-identical to before (provider untouched).
+    from utils import send_governance
+    if email_sender.EMAIL_SEND_ENABLED or send_governance.send_governance_active():
         try:
             send_result = sender.send(message)
         except Exception as exc:  # fail-soft: a provider error must not crash the flow
@@ -147,9 +154,10 @@ def send_rfq(
         # Gated: behave like the existing no-send stub WITHOUT touching the provider.
         send_result = SendResult(status="stubbed")
 
-    status = send_result.status                      # "sent" | "stubbed" | "error"
+    status = send_result.status    # "sent" | "stubbed" | "error" | governance-blocked
     sent = status == "sent"
-    outreach_status = "contacted" if sent else "awaiting"
+    blocked = status in ("suppressed", "not_allowlisted", "cap_blocked")
+    outreach_status = "contacted" if sent else ("blocked" if blocked else "awaiting")
 
     # ── Persist the sent-message record (the inbound-matching key). ──────────
     sent_message_id = supplier_registry.record_sent_message(

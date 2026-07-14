@@ -3277,6 +3277,68 @@ def admin_sent_messages(role: str = Depends(require_admin)):
     return {"count": len(rows), "sent_messages": rows}
 
 
+# ---------------------------------------------------------------------------
+# Send-governance admin surface (SEND_GOVERNANCE_V1 — Night 10)
+#
+# Flag-gated: with SEND_GOVERNANCE_V1 off these routes 404 byte-identically to an
+# unknown route (mirrors the intake-channels flag-off pattern), so flag-off parity
+# holds at the API surface. All mutations carry actor identity and are audit-logged
+# in utils/send_governance. NONE of this enables delivery — the allowlist can only
+# ever BLOCK; EMAIL_SEND_ENABLED remains the untouched delivery gate.
+# ---------------------------------------------------------------------------
+
+def _require_send_governance_enabled():
+    """Shared route gate: SEND_GOVERNANCE_V1 off -> 404 (route absent)."""
+    from utils import send_governance
+    if not send_governance.send_governance_active():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+class AllowlistAddRequest(BaseModel):
+    domain: str
+    added_by: str
+    note: Optional[str] = None
+
+
+class AllowlistRemoveRequest(BaseModel):
+    removed_by: str
+
+
+@app.get("/api/admin/send-governance/allowlist")
+def admin_allowlist_list(role: str = Depends(require_admin)):
+    """The send allowlist (fail-closed: empty list ⇒ nothing can deliver)."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    rows = send_governance.allowlist_list()
+    return {"count": len(rows), "allowlist": rows}
+
+
+@app.post("/api/admin/send-governance/allowlist", status_code=201)
+def admin_allowlist_add(body: AllowlistAddRequest, role: str = Depends(require_admin)):
+    """Allow sends to one supplier domain (audit-logged who/when). 422 on an
+    unusable domain."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    try:
+        row = send_governance.allowlist_add(body.domain, added_by=body.added_by,
+                                            note=body.note)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return row
+
+
+@app.post("/api/admin/send-governance/allowlist/{domain}/remove")
+def admin_allowlist_remove(domain: str, body: AllowlistRemoveRequest,
+                           role: str = Depends(require_admin)):
+    """Remove one domain from the allowlist (audit-logged). 404 if not listed.
+    POST (not DELETE) so the remover's identity travels in the body."""
+    _require_send_governance_enabled()
+    from utils import send_governance
+    if not send_governance.allowlist_remove(domain, removed_by=body.removed_by):
+        raise HTTPException(status_code=404, detail="Domain not on the allowlist")
+    return {"domain": domain, "removed": True, "removed_by": body.removed_by}
+
+
 @app.get("/api/admin/review-queue")
 def admin_review_queue(role: str = Depends(require_admin)):
     """review_items — extracted quotes/contacts, confidence, status (incl.
