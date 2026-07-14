@@ -2694,3 +2694,131 @@ class TestLeadTimeProvenanceTransform:
         # The known-parts cache path sets lead_time_days but no source -> conservative defaulted.
         out = self._t(base_price=10.0, lead_time_days=5)    # number present, source absent
         assert out["leadTime"] == "5 days" and out["leadTimeSource"] == "defaulted"
+
+
+# ---------------------------------------------------------------------------
+# RANKING_BANDS_V1 × TIER1_V2 — Step-3 re-derive must re-band tier_1
+# ---------------------------------------------------------------------------
+
+class TestBandedTier1ReDeriveOrdering:
+    """REGRESSION (Night 9 × Night 5 ordering): Step 3's TIER1_V2 fresh re-derive
+    REPLACES result["tier_1"] AFTER the band pass ran (SourcingAgent on the
+    discovery path, the cache-hit post-pass), so the re-derived candidates carried
+    no `band` and silently vanished from findings/outreachTargets/the T4 read-time
+    promotion loop (observed live: DXP Enterprises, the onboarded Band-C class
+    match). The fix re-applies the band pass after the re-derive, keyed off the
+    result's own ranking_bands:v1 marker.
+
+    These tests drive the REAL background path end-to-end (confirm-intake →
+    _run_sourcing_background → persist): the synthetic _banded_gusher_result
+    fixture in test_ranking_bands.py bands a tier_1 that already contains DXP, so
+    it never reproduced the replace — T4 passed there while the live path was
+    broken. This class is the net that keeps the ordering bug from returning."""
+
+    _DXP = {
+        "vendor_name": "DXP Enterprises",
+        "source_url": "https://dxpe.com",
+        "found_part_number": None,
+        "price_tbd": True,
+        "base_price": 0.0,
+        "suitability_score": 92.0,
+        "merchant_type": "Arkim Network",
+        "is_registry_backed": True,
+    }
+
+    def _wire_tier1_rederive(self, monkeypatch):
+        """TIER1_V2 on; the matcher re-derives a DXP-like onboarded class match
+        (no found PN, no listing → Band C by evidence). known_parts is stubbed
+        both ways so the test neither reads nor writes the real store."""
+        from utils.procurement_agent import tier1_matcher
+        from utils import known_parts
+        monkeypatch.setattr(tier1_matcher, "tier1_v2_active", lambda: True)
+        monkeypatch.setattr(tier1_matcher, "match_tier1", lambda **kw: ["match"])
+        monkeypatch.setattr(tier1_matcher, "candidates_from_matches",
+                            lambda matches, **kw: [dict(self._DXP)])
+        monkeypatch.setattr(known_parts, "get_edges", lambda key: [])
+        monkeypatch.setattr(known_parts, "upsert_edges", lambda key, cands: 0)
+
+    def _banded_sourcing_result(self) -> dict:
+        """What a flag-on SourcingAgent.run() returns: the marker + banded-able
+        tiers, tier_1 EMPTY — Step 3's re-derive is the only tier_1 source,
+        exactly the live shape that exposed the bug."""
+        return {
+            "tier_1": {"results": [], "count": 0},
+            "tier_2": {"results": [{
+                "vendor_name": "Seal It",
+                "found_part_number": "84004-28",
+                "source_url": "https://sealit.example/gusher/84004-28",
+                "base_price": 53.25, "price_tbd": False,
+                "suitability_score": 80.0, "confidence_score": 70.0,
+            }], "count": 1},
+            "tier_3": {"results": [], "count": 0},
+            "filters_applied": ["ranking_bands:v1"],
+        }
+
+    def _run_banded(self, api, monkeypatch) -> str:
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(
+            {"manufacturer": "Gusher Pumps", "part_number": "84004-28"}))
+        self._wire_tier1_rederive(monkeypatch)
+        _mock_sourcing_pipeline(monkeypatch,
+                                sourcing_result=self._banded_sourcing_result(),
+                                artifact=None)
+        resp = api.post(f"/api/runs/{rid}/confirm-intake")
+        assert resp.status_code == 200
+        return rid
+
+    def test_rederived_tier1_is_banded_in_the_stored_result(self, api, monkeypatch):
+        rid = self._run_banded(api, monkeypatch)
+        t1 = _read_sourcing_results_raw(api, rid)["tier_1"]["results"]
+        assert [c["vendor_name"] for c in t1] == ["DXP Enterprises"]
+        assert t1[0]["band"] == "C"          # was None before the fix
+        assert t1[0]["banded"] is True
+
+    def test_onboarded_tier1_leads_outreach_targets(self, api, monkeypatch):
+        rid = self._run_banded(api, monkeypatch)
+        sr = api.get(f"/api/runs/{rid}").json()["sourcing_results"]
+        suppliers = sr["outreachTargets"]["suppliers"]
+        assert suppliers and suppliers[0] == {
+            "vendorName": "DXP Enterprises",
+            "onboarded": True,
+            "provenance": "Onboarded supplier — class match",
+        }
+        # ...and DXP is NOT presented as a finding (it found nothing).
+        assert [f["vendorName"] for f in sr["findings"]] == ["Seal It"]
+
+    def test_t4_promotion_works_on_the_real_persisted_result(self, api, monkeypatch):
+        # The read-time promotion loop only considers band == "C" candidates, so
+        # an unbanded tier_1 DXP was silently unpromotable. Promote against the
+        # REAL persisted result — not a synthetic fixture.
+        rid = self._run_banded(api, monkeypatch)
+        raw = _read_sourcing_results_raw(api, rid)
+        idx = {"by_thread": {}, "domain_threads": {}, "by_domain": {"dxpe.com": {
+            "status": "confirmed", "supplier_domain": "dxpe.com",
+            "thread_id": "t-1", "confidence": 0.9,
+            "payload": {"unit_price": 189.0, "lead_time": "3 days",
+                        "currency": "USD"},
+        }}}
+        out = api._api_server._transform_sourcing_results(raw, quote_index=idx)
+        assert out["findings"][0]["vendorName"] == "DXP Enterprises"
+        assert out["findings"][0]["band"] == "A"
+        assert out["findings"][0]["price"] == 189.0
+        assert "DXP Enterprises" not in [
+            s["vendorName"] for s in out["outreachTargets"]["suppliers"]]
+
+    def test_flag_off_rederived_tier1_stays_unbanded(self, api, monkeypatch):
+        # No marker ⇒ the re-annotation must not run: flag-off results stay
+        # byte-identical (no band keys, no findings/outreachTargets).
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(
+            {"manufacturer": "Gusher Pumps", "part_number": "84004-28"}))
+        self._wire_tier1_rederive(monkeypatch)
+        result = self._banded_sourcing_result()
+        result["filters_applied"] = []       # flag-off: no marker
+        _mock_sourcing_pipeline(monkeypatch, sourcing_result=result, artifact=None)
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        raw = _read_sourcing_results_raw(api, rid)
+        assert "band" not in raw["tier_1"]["results"][0]
+        sr = api.get(f"/api/runs/{rid}").json()["sourcing_results"]
+        assert "findings" not in sr
+        assert "outreachTargets" not in sr

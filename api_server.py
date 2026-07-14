@@ -1420,6 +1420,24 @@ def _run_sourcing_background(
         log.warning("[%s] Tier 1 fresh re-derive failed (keeping %s tier_1): %s",
                     run_id, "cached" if result is not None else "discovered", exc)
 
+    # RANKING_BANDS_V1 × TIER1_V2 ordering fix: the fresh Tier-1 re-derive above
+    # REPLACES result["tier_1"] AFTER the band pass already ran (SourcingAgent on
+    # the discovery path, the cache-hit post-pass above), so the re-derived
+    # candidates carried no band and vanished from findings/outreachTargets/the
+    # T4 promotion loop at read time (observed live: DXP, the onboarded Band-C
+    # class match). Re-apply the band pass when the result carries the marker —
+    # annotate/floor/cap/sort are pure and deterministic, so re-running over the
+    # already-banded Tier 2/3 is a no-op; only the fresh Tier 1 changes. Keyed
+    # off the result's own marker (not the live env) and fail-soft, same as the
+    # read-time transform.
+    if "ranking_bands:v1" in (result.get("filters_applied") or []):
+        try:
+            from utils.procurement_agent.ranking_bands import apply_ranking_bands
+            apply_ranking_bands(result, specs_dict.get("part_number"))
+        except Exception as exc:
+            log.warning("[%s] tier-1 band re-annotation failed (unbanded tier_1 kept): %s",
+                        run_id, exc)
+
     with _SessionFactory() as session:
         orm = session.get(SourcingRunORM, run_id)
         if orm and orm.current_phase == Phase.SOURCING.value:
