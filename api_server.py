@@ -3477,6 +3477,20 @@ def admin_release_drafts(body: ReleaseRequest, role: str = Depends(require_admin
     return {"released_by": body.released_by, "results": results}
 
 
+@app.get("/api/admin/send-governance/digest")
+def admin_send_digest(day: Optional[str] = None, role: str = Depends(require_admin)):
+    """The daily-ritual digest (spec §4, 5 minutes): status-event counts for one
+    UTC day (default today) + the detail lists — bounces, replies, anything
+    blocked. Counts EVENTS from each row's status history, so a Monday release
+    that bounces Tuesday shows in both days honestly. Read-only; endpoint-only
+    by design (the ritual starts as curl/CLI, no UI)."""
+    _require_send_governance_enabled()
+    from utils import supplier_registry
+    if day is not None and (len(day) != 10 or day[4] != "-" or day[7] != "-"):
+        raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
+    return supplier_registry.sent_messages_digest(day)
+
+
 @app.post("/api/admin/send-governance/release-queue/{draft_id}/reject")
 def admin_release_reject(draft_id: str, body: ReleaseRejectRequest,
                          role: str = Depends(require_admin)):

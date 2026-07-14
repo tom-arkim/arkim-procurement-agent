@@ -452,6 +452,175 @@ class TestCaps:
 
 
 # ---------------------------------------------------------------------------
+# Ledger + digest (T6): record-before-delivery, transitions, the daily ritual
+# ---------------------------------------------------------------------------
+
+class TestLedger:
+    @pytest.fixture
+    def rfq_env(self, tmp_path, monkeypatch, gov_store, flag_on):
+        from utils import supplier_registry
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        supplier_registry.upsert_contact("dxpe.com", {
+            "contact_email": "sales@dxpe.com", "contact_method": "generic_inbox",
+            "contact_status": "resolved"})
+        gov_store.allowlist_add("dxpe.com", added_by="tom", is_test=True)
+        return supplier_registry
+
+    def _send(self, released_by="tom", run_id="r1"):
+        from utils.rfq_send import Approval, send_rfq
+        return send_rfq({"vendor_name": "DXP", "source_url": "https://dxpe.com"},
+                        "Subject: Q\n\nbody", Approval("tom"), run_id=run_id,
+                        part_key="gusher pumps|8400428", released_by=released_by)
+
+    def test_recorded_before_delivery_with_history_and_template(self, rfq_env):
+        # Spec §1(b): the ledger row is created at "released" BEFORE the attempt,
+        # then transitions to the outcome — history shows both, in order.
+        import json as _json
+        res = self._send()
+        rows = rfq_env.get_sent_messages(run_id="r1")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["status"] == "stubbed"                       # outcome (gate off)
+        history = _json.loads(row["status_history_json"])
+        assert [h["status"] for h in history] == ["released", "stubbed"]
+        assert row["template_version"] == "rfq-v1"
+        assert row["released_by"] == "tom"
+        assert res["sent_message_id"] == row["id"]
+
+    def test_blocked_outcome_transitions_history(self, rfq_env, gov_store):
+        gov_store.suppression_add("dxpe.com", added_by="tom", is_test=True)
+        import json as _json
+        self._send(run_id="r2")
+        row = rfq_env.get_sent_messages(run_id="r2")[0]
+        assert row["status"] == "suppressed"
+        assert [h["status"] for h in _json.loads(row["status_history_json"])] == \
+            ["released", "suppressed"]
+
+    def test_replied_transition_frees_open_rfq_cap_slot(self, rfq_env):
+        # T2's "open" definition composes with T6's transitions: a replied RFQ no
+        # longer counts as open, so the next send to the same (supplier, part) passes.
+        self._send(run_id="r3")
+        row = rfq_env.get_sent_messages(run_id="r3")[0]
+        assert self._send(run_id="r3")["status"] == "cap_blocked"   # slot occupied
+        assert rfq_env.update_sent_message_status(row["id"], "replied") is True
+        assert self._send(run_id="r3")["status"] == "stubbed"       # slot freed
+
+    def test_update_unknown_row_returns_false(self, rfq_env):
+        assert rfq_env.update_sent_message_status("nope", "replied") is False
+
+    def test_digest_counts_events_and_details(self, rfq_env, gov_store):
+        self._send(run_id="r1")                                   # released+stubbed
+        gov_store.suppression_add("dxpe.com", added_by="tom", is_test=True)
+        self._send(run_id="r2")                                   # released+suppressed
+        row = rfq_env.get_sent_messages(run_id="r1")[0]
+        rfq_env.update_sent_message_status(row["id"], "replied")
+        d = rfq_env.sent_messages_digest()
+        assert d["status_counts"]["released"] == 2
+        assert d["status_counts"]["stubbed"] == 1
+        assert d["status_counts"]["suppressed"] == 1
+        assert d["status_counts"]["replied"] == 1
+        assert [b["status"] for b in d["blocked"]] == ["suppressed"]
+        assert len(d["replied"]) == 1
+        assert d["replied"][0]["released_by"] == "tom"
+
+    def test_digest_scoped_to_the_requested_day(self, rfq_env):
+        self._send(run_id="r1")
+        d = rfq_env.sent_messages_digest("2020-01-01")
+        assert d["total_events"] == 0 and d["status_counts"] == {}
+
+    def test_flag_off_rows_have_no_history_or_template(self, tmp_path, monkeypatch):
+        # Flag OFF: legacy record-after, no history/template columns populated.
+        from utils import supplier_registry
+        from utils.rfq_send import Approval, send_rfq
+        monkeypatch.delenv("SEND_GOVERNANCE_V1", raising=False)
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        supplier_registry.upsert_contact("dxpe.com", {
+            "contact_email": "sales@dxpe.com", "contact_method": "generic_inbox",
+            "contact_status": "resolved"})
+        send_rfq({"vendor_name": "DXP", "source_url": "https://dxpe.com"},
+                 "Subject: Q\n\nbody", Approval("tom"), run_id="r1")
+        row = supplier_registry.get_sent_messages(run_id="r1")[0]
+        assert row["status"] == "stubbed"
+        assert row["status_history_json"] is None
+        assert row["template_version"] is None
+        assert row["released_by"] is None
+
+
+class TestDigestEndpoint:
+    def test_digest_endpoint(self, admin_api, flag_on, tmp_path, monkeypatch):
+        from utils import supplier_registry
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        supplier_registry.record_sent_message(
+            run_id="r1", supplier_domain="dxpe.com", vendor_name="DXP",
+            to=["sales@dxpe.com"], status="released", with_history=True)
+        r = admin_api.get("/api/admin/send-governance/digest", headers=_auth())
+        assert r.status_code == 200
+        assert r.json()["status_counts"] == {"released": 1}
+
+    def test_digest_bad_day_422(self, admin_api, flag_on):
+        r = admin_api.get("/api/admin/send-governance/digest?day=notaday",
+                          headers=_auth())
+        assert r.status_code == 422
+
+    def test_digest_flag_off_404(self, admin_api, monkeypatch):
+        monkeypatch.delenv("SEND_GOVERNANCE_V1", raising=False)
+        assert admin_api.get("/api/admin/send-governance/digest",
+                             headers=_auth()).status_code == 404
+
+
+class TestProcessorTransitions:
+    def test_reply_processor_stamps_replied_flag_on(self, tmp_path, monkeypatch,
+                                                    gov_store, flag_on):
+        from utils import supplier_registry, reply_processor
+        from utils.inbox_reader import ReplyNotice
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        row_id = supplier_registry.record_sent_message(
+            run_id="r1", supplier_domain="baypower.com", vendor_name="Bay Power",
+            to=["jeff@baypower.com"], status="stubbed",
+            message_id="rfq-abc@arkim.ai", thread_id="T-9", with_history=True)
+
+        class _Reader:
+            def fetch_replies(self):
+                return [ReplyNotice(sender="jeff@baypower.com",
+                                    in_reply_to="rfq-abc@arkim.ai",
+                                    thread_id="T-9", body="$85 ea, 2 week lead")]
+
+        reply_processor.process_replies(reader=_Reader())
+        row = supplier_registry.get_sent_messages(run_id="r1")[0]
+        assert row["status"] == "replied"
+        assert row_id == row["id"]
+
+    def test_reply_processor_flag_off_leaves_row(self, tmp_path, monkeypatch):
+        from utils import supplier_registry, reply_processor
+        from utils.inbox_reader import ReplyNotice
+        monkeypatch.delenv("SEND_GOVERNANCE_V1", raising=False)
+        monkeypatch.setattr(supplier_registry, "_DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(supplier_registry, "_DB_PATH",
+                            str(tmp_path / "supplier_registry.sqlite"))
+        supplier_registry.record_sent_message(
+            run_id="r1", supplier_domain="baypower.com", vendor_name="Bay Power",
+            to=["jeff@baypower.com"], status="stubbed",
+            message_id="rfq-abc@arkim.ai", thread_id="T-9")
+
+        class _Reader:
+            def fetch_replies(self):
+                return [ReplyNotice(sender="jeff@baypower.com",
+                                    in_reply_to="rfq-abc@arkim.ai",
+                                    thread_id="T-9", body="$85 ea")]
+
+        reply_processor.process_replies(reader=_Reader())
+        assert supplier_registry.get_sent_messages(run_id="r1")[0]["status"] == "stubbed"
+
+
+# ---------------------------------------------------------------------------
 # Inbox scoping (T5): intake mail and RFQ replies must never cross
 # ---------------------------------------------------------------------------
 

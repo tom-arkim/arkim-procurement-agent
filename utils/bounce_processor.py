@@ -118,6 +118,11 @@ def process_bounces(reader: Optional[InboxReader] = None) -> dict:
             continue
 
         supplier_registry.mark_contact_bounced(domain, which=which)
+        # SEND_GOVERNANCE_V1 (T6 ledger): stamp the matched outbound row "bounced"
+        # so the daily digest sees it. Flag OFF: rows untouched (byte-identical).
+        from utils.send_governance import send_governance_active
+        if send_governance_active() and row.get("id"):
+            supplier_registry.update_sent_message_status(row["id"], "bounced")
         print(f"[BounceProcessor] HARD bounce for {addr!r} @ {domain} -> cleared {which} contact")
         summary["cleared"].append({"domain": domain, "which": which, "address": addr})
 

@@ -459,6 +459,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if col not in sm_existing:
             conn.execute(f"ALTER TABLE sent_messages ADD COLUMN {col} TEXT")
             added.append(f"sent_messages.{col}")
+    # Ledger audit needs (SEND_GOVERNANCE_V1 T6): the status-transition history
+    # ([{status, at}] JSON, append-only) + the RFQ template version the send used.
+    # Nullable; governance-active writes populate them (flag-off rows unchanged).
+    for col in ("status_history_json", "template_version", "status_updated_at"):
+        if col not in sm_existing:
+            conn.execute(f"ALTER TABLE sent_messages ADD COLUMN {col} TEXT")
+            added.append(f"sent_messages.{col}")
 
     # supplier_notifications provenance column (demand-teaser honesty: a test/
     # fixture/seed row must be excludable from the live buyer-request count).
@@ -945,6 +952,8 @@ def record_sent_message(
     part_key: Optional[str] = None,
     released_by: Optional[str] = None,
     released_at: Optional[str] = None,
+    template_version: Optional[str] = None,
+    with_history: bool = False,
 ) -> Optional[str]:
     """Persist one outbound-send record (the key inbound matching will later join on).
 
@@ -977,9 +986,12 @@ def record_sent_message(
                    (id, run_id, supplier_domain, vendor_name, recipients_to_json,
                     recipients_cc_json, subject, body, message_id, thread_id, status,
                     approved_by, sent_at, created_at, part_key, released_by,
-                    released_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                row + (part_key, released_by, released_at),
+                    released_at, template_version, status_history_json,
+                    status_updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                row + (part_key, released_by, released_at, template_version,
+                       json.dumps([{"status": status, "at": now}]) if with_history else None,
+                       now if with_history else None),
             )
             conn.commit()
         print(f"[SupplierRegistry] Sent-message recorded: {vendor_name} ({domain}) status={status}")
@@ -1029,6 +1041,93 @@ SEND_ATTEMPT_STATUSES: tuple = ("sent", "stubbed", "error")
 # Statuses of an OPEN RFQ for the per-supplier-per-part cap: attempted and not yet
 # terminally resolved (T6's transitions — replied/bounced — free the slot).
 OPEN_RFQ_STATUSES: tuple = ("sent", "stubbed")
+
+
+def update_sent_message_status(
+    sent_message_id: str,
+    status: str,
+    *,
+    message_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+) -> bool:
+    """Transition one sent_messages row to a new status, appending to its
+    status-transition history (SEND_GOVERNANCE_V1 T6 ledger). Optionally fills
+    provider ids the transition learned (a live send's message/thread ids).
+    Fail-soft: returns False on error — the row keeps its last status; the send
+    flow never crashes on a ledger update."""
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with closing(_get_conn()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT status_history_json FROM sent_messages WHERE id = ?",
+                (sent_message_id,)).fetchone()
+            if row is None:
+                print(f"[SupplierRegistry] update_sent_message_status: no row {sent_message_id!r}")
+                return False
+            try:
+                history = json.loads(row["status_history_json"] or "[]")
+            except Exception:
+                history = []
+            history.append({"status": status, "at": now})
+            sets = ["status = ?", "status_history_json = ?", "status_updated_at = ?"]
+            params: list = [status, json.dumps(history), now]
+            if message_id is not None:
+                sets.append("message_id = ?")
+                params.append(message_id)
+            if thread_id is not None:
+                sets.append("thread_id = ?")
+                params.append(thread_id)
+            params.append(sent_message_id)
+            conn.execute(f"UPDATE sent_messages SET {', '.join(sets)} WHERE id = ?", params)
+            conn.commit()
+        print(f"[SupplierRegistry] sent_message {sent_message_id} -> {status}")
+        return True
+    except Exception as exc:
+        print(f"[SupplierRegistry] update_sent_message_status failed: {exc}")
+        return False
+
+
+def sent_messages_digest(day: Optional[str] = None) -> dict:
+    """The daily-ritual digest (SEND_GOVERNANCE_V1 T6 / spec §4): what happened on
+    one UTC day ('YYYY-MM-DD', default today) — status-event counts plus the
+    detail lists a 5-minute review needs (bounces, replies, anything blocked).
+
+    Counts EVENTS from each row's status history (a row released Monday and
+    bounced Tuesday counts 'released' on Monday and 'bounced' on Tuesday); rows
+    without history (legacy/flag-off) count their single recorded status on their
+    created_at day. Fail-soft: returns an empty digest on store failure (a
+    read-only surface, not an enforcement path)."""
+    day = day or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    digest: dict = {"day": day, "status_counts": {}, "bounced": [], "replied": [],
+                    "blocked": [], "total_events": 0}
+    try:
+        rows = get_sent_messages()
+    except Exception:
+        rows = []
+    for r in rows:
+        try:
+            history = json.loads(r.get("status_history_json") or "[]")
+        except Exception:
+            history = []
+        if not history:
+            history = [{"status": r.get("status"), "at": r.get("created_at") or ""}]
+        detail = {"id": r.get("id"), "vendor_name": r.get("vendor_name"),
+                  "supplier_domain": r.get("supplier_domain"), "run_id": r.get("run_id"),
+                  "released_by": r.get("released_by")}
+        for ev in history:
+            if (ev.get("at") or "")[:10] != day:
+                continue
+            st = ev.get("status") or "unknown"
+            digest["status_counts"][st] = digest["status_counts"].get(st, 0) + 1
+            digest["total_events"] += 1
+            if st == "bounced":
+                digest["bounced"].append(detail)
+            elif st == "replied":
+                digest["replied"].append(detail)
+            elif st in ("suppressed", "not_allowlisted", "cap_blocked"):
+                digest["blocked"].append({**detail, "status": st})
+    return digest
 
 
 def count_send_attempts_utc_day(day: Optional[str] = None) -> int:

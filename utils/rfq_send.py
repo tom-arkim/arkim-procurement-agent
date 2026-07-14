@@ -137,6 +137,25 @@ def send_rfq(
                   "part_key": part_key},
     )
 
+    # ── SEND_GOVERNANCE_V1 (T6, spec §1(b)): record BEFORE the delivery attempt.
+    # Governance-active sends create their ledger row at status "released" first,
+    # then transition it to the outcome — a crash mid-send leaves an auditable
+    # "released" row, never a delivered-but-unrecorded message. Flag OFF keeps the
+    # legacy record-after behavior byte-identical (see the else-branch below).
+    from utils import send_governance
+    _governed = send_governance.send_governance_active()
+    _pre_row_id: Optional[str] = None
+    if _governed:
+        from utils.procurement_agent.outreach import TEMPLATE_VERSION
+        _pre_row_id = supplier_registry.record_sent_message(
+            run_id=run_id, supplier_domain=domain, vendor_name=vendor_name,
+            to=to, cc=cc, subject=subject, body=approved_draft, status="released",
+            approved_by=approval.approved_by, part_key=part_key,
+            released_by=released_by,
+            released_at=_now_iso() if released_by else None,
+            template_version=TEMPLATE_VERSION, with_history=True,
+        )
+
     # ── Send path vs stub path. Flag False => provider is NOT invoked. ───────
     # SEND_GOVERNANCE_V1: with governance active the sender IS invoked even while
     # the delivery gate is off — the governance stack (suppression → allowlist →
@@ -144,17 +163,19 @@ def send_rfq(
     # real verdict ("suppressed"/"not_allowlisted"/"cap_blocked") instead of being
     # masked as "stubbed". The sender itself still stubs at the gate — delivery
     # remains impossible. Flag OFF: byte-identical to before (provider untouched).
-    from utils import send_governance
-    if email_sender.EMAIL_SEND_ENABLED or send_governance.send_governance_active():
+    if email_sender.EMAIL_SEND_ENABLED or _governed:
         try:
             send_result = sender.send(message)
         except Exception as exc:  # fail-soft: a provider error must not crash the flow
             print(f"[RFQSend] provider send failed for {vendor_name} ({domain}): "
                   f"{type(exc).__name__}: {exc}")
             candidate["outreach_status"] = "error"
+            if _pre_row_id:  # the released ledger row records the failure honestly
+                supplier_registry.update_sent_message_status(_pre_row_id, "error")
             return _result(status="error", sent=False, vendor_name=vendor_name, domain=domain,
                            recipients=recipients, outreach_status="error",
-                           send_result=SendResult(status="error", error=str(exc)))
+                           send_result=SendResult(status="error", error=str(exc)),
+                           sent_message_id=_pre_row_id)
     else:
         # Gated: behave like the existing no-send stub WITHOUT touching the provider.
         send_result = SendResult(status="stubbed")
@@ -165,18 +186,24 @@ def send_rfq(
     outreach_status = "contacted" if sent else ("blocked" if blocked else "awaiting")
 
     # ── Persist the sent-message record (the inbound-matching key). ──────────
-    sent_message_id = supplier_registry.record_sent_message(
-        run_id=run_id, supplier_domain=domain, vendor_name=vendor_name,
-        to=to, cc=cc, subject=subject, body=approved_draft, status=status,
-        message_id=send_result.message_id, thread_id=send_result.thread_id,
-        approved_by=approval.approved_by, sent_at=send_result.sent_at,
-        part_key=part_key,
-        # Release provenance (SEND_GOVERNANCE_V1 T4): who released this send and
-        # when. Only the flag-gated release-queue path passes released_by; the
-        # timestamp is stamped here so it is tied to the actual send attempt.
-        released_by=released_by,
-        released_at=_now_iso() if released_by else None,
-    )
+    # Governance-active: the row already exists at "released" (recorded BEFORE the
+    # attempt) — transition it to the outcome. Flag OFF: legacy record-after,
+    # byte-identical.
+    if _pre_row_id:
+        supplier_registry.update_sent_message_status(
+            _pre_row_id, status,
+            message_id=send_result.message_id, thread_id=send_result.thread_id)
+        sent_message_id = _pre_row_id
+    else:
+        sent_message_id = supplier_registry.record_sent_message(
+            run_id=run_id, supplier_domain=domain, vendor_name=vendor_name,
+            to=to, cc=cc, subject=subject, body=approved_draft, status=status,
+            message_id=send_result.message_id, thread_id=send_result.thread_id,
+            approved_by=approval.approved_by, sent_at=send_result.sent_at,
+            part_key=part_key,
+            released_by=released_by,
+            released_at=_now_iso() if released_by else None,
+        )
 
     # ── Human-readable audit event (run-level trail). ────────────────────────
     write_audit_log({
