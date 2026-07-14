@@ -21,7 +21,7 @@ import { GoferLoader } from "@/components/ui/gofer-loader";
 import { useProcToast } from "./proc-shell";
 import { QuotesSection } from "./quotes-section";
 import { OrderSection } from "./order-section";
-import type { Candidate, ComparisonArtifact, Phase, BasketRunRow } from "@/types";
+import type { Candidate, ComparisonArtifact, Phase, BasketRunRow, OutreachTarget } from "@/types";
 import { RailPartContext } from "./part-context";
 import { BRAND_NAME } from "@/lib/brand";
 
@@ -196,6 +196,10 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const options: Candidate[] = banded
     ? (sr?.findings ?? [])
     : [...(sr?.tier1 ?? []), ...(sr?.tier2 ?? []), ...(sr?.tier3 ?? [])];
+  // Band C = suppliers we intend to ASK (no candidate-specific evidence) — rendered
+  // as the outreach status block below the findings, never as option cards.
+  const outreachSuppliers = (banded ? sr?.outreachTargets?.suppliers : undefined) ?? [];
+  const hasOutreach = outreachSuppliers.length > 0;
   const priced = options.filter((c) => c.price != null);
   const recId = run.selected_candidate?.id ?? priced[0]?.id ?? options[0]?.id;
 
@@ -382,8 +386,25 @@ export function OptionsScreen({ runId }: { runId: string }) {
     </div>
   );
 
+  // The outreach status block (Band C). Null when there are no targets — no empty
+  // shell — and never on legacy/flag-off payloads (hasOutreach is banded-only), so
+  // the flag-off render tree is unchanged.
+  const outreachBlock = hasOutreach
+    ? <OutreachBlock suppliers={outreachSuppliers} manufacturer={specs?.manufacturer} />
+    : null;
+
+  // Nothing found but suppliers to ask: a real state — the headline must not claim
+  // options exist. (Findings + outreach and the plain legacy states keep the
+  // standard headline.)
+  const nothingFoundAsking = options.length === 0 && hasOutreach;
+
   return (
-    <Shell sub={`${partLabel}${specs?.part_number ? ` · ${specs.part_number}` : ""}`} onHome={() => router.push("/")} strip={basketStrip}>
+    <Shell
+      title={nothingFoundAsking ? <>We&apos;re <b>requesting quotes</b> for this part</> : undefined}
+      sub={`${partLabel}${specs?.part_number ? ` · ${specs.part_number}` : ""}`}
+      onHome={() => router.push("/")}
+      strip={basketStrip}
+    >
       {/* Committed: foreground the order status — the decision is made, so the status is
           what the page is about; the shortlist collapses into the record below. Uncommitted:
           the candidate list leads (the working decision surface) and OrderSection stays at
@@ -391,22 +412,58 @@ export function OptionsScreen({ runId }: { runId: string }) {
       {committed && <OrderSection runId={runId} />}
 
       {options.length === 0 ? (
-        <Working label="No options found for this part." sub="We couldn't find suppliers for it — a direct call may be the fastest path." />
+        nothingFoundAsking ? (
+          <div className="proc-two-col">
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <Working
+                label="We didn't find this part listed anywhere we searched."
+                sub={`Instead, we're requesting quotes from ${outreachSuppliers.length} supplier${outreachSuppliers.length === 1 ? "" : "s"} that should carry it — details below.`}
+              />
+              {outreachBlock}
+            </div>
+            {partRail}
+          </div>
+        ) : (
+          <Working label="No options found for this part." sub="We couldn't find suppliers for it — a direct call may be the fastest path." />
+        )
       ) : committed ? (
         <div className="proc-two-col" style={{ marginTop: 22 }}>
-          <CollapsedRecord
-            count={options.length}
-            vendor={selectedVendor}
-            open={optionsOpen}
-            onToggle={() => setOptionsOpen((o) => !o)}
-          >
-            {optionsList}
-          </CollapsedRecord>
+          {/* The wrapper div exists only when the outreach block does — the flag-off
+              committed layout keeps its exact previous DOM. */}
+          {outreachBlock ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <CollapsedRecord
+                count={options.length}
+                vendor={selectedVendor}
+                open={optionsOpen}
+                onToggle={() => setOptionsOpen((o) => !o)}
+              >
+                {optionsList}
+              </CollapsedRecord>
+              {outreachBlock}
+            </div>
+          ) : (
+            <CollapsedRecord
+              count={options.length}
+              vendor={selectedVendor}
+              open={optionsOpen}
+              onToggle={() => setOptionsOpen((o) => !o)}
+            >
+              {optionsList}
+            </CollapsedRecord>
+          )}
           {partRail}
         </div>
       ) : (
         <div className="proc-two-col">
-          {optionsList}
+          {outreachBlock ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {optionsList}
+              {outreachBlock}
+            </div>
+          ) : (
+            optionsList
+          )}
           {partRail}
         </div>
       )}
@@ -463,7 +520,59 @@ function CollapsedRecord({
   );
 }
 
-function Shell({ children, sub, onHome, strip }: { children: React.ReactNode; sub?: string; onHome?: () => void; strip?: React.ReactNode }) {
+/** RANKING_BANDS_V1 — the Band-C outreach block: suppliers we intend to ASK, not
+ *  findings. Deliberately NOT an option card — no scores, no prices, no order
+ *  action, no "recommended" styling, and the copy says plainly that these are
+ *  capability matches, not confirmed sources. Onboarded supplier(s) lead, named as
+ *  the user's own. The copy claims intent only ("we're asking") — RFQ delivery is a
+ *  separate milestone, so nothing here may read as "an email was sent". Renders
+ *  nothing for an empty target list (callers also gate — belt and braces). */
+function OutreachBlock({ suppliers, manufacturer }: { suppliers: OutreachTarget[]; manufacturer?: string }) {
+  const headId = useId();
+  if (suppliers.length === 0) return null;
+  const onboarded = suppliers.filter((s) => s.onboarded);
+  const others = suppliers.filter((s) => !s.onboarded);
+  // "Authorized distributors" only when the server's provenance actually says so
+  // for every one of them; otherwise the neutral phrasing.
+  const othersAuthorized = others.length > 0 &&
+    others.every((s) => (s.provenance || "").toLowerCase().includes("authorized distributor"));
+  const othersLabel = othersAuthorized
+    ? `authorized ${manufacturer ? `${manufacturer} ` : ""}distributor${others.length === 1 ? "" : "s"}`
+    : `supplier${others.length === 1 ? "" : "s"} matched to this part category`;
+  return (
+    <section className="proc-outreach" aria-labelledby={headId}>
+      <div className="or-head" id={headId}>
+        <ProcIcon name="mail" size={13} />
+        Requesting quotes
+      </div>
+      {onboarded.map((s) => (
+        <div className="or-row" key={s.vendorName}>
+          <span className="or-yours">Your supplier</span>
+          <span className="or-text">
+            <b>{s.vendorName}</b> — we&apos;re asking them to confirm availability and price.
+          </span>
+        </div>
+      ))}
+      {others.length > 0 && (
+        <div className="or-row">
+          <span className="or-text">
+            {onboarded.length > 0 ? "Also asking" : "Asking"} {others.length} {othersLabel}:{" "}
+            <b>{others.map((s) => s.vendorName).join(", ")}</b>.
+          </span>
+        </div>
+      )}
+      <div className="or-note">
+        These suppliers are matched on what they carry — none has confirmed having this
+        exact part yet. Their quotes are that confirmation, and they&apos;ll appear here.
+      </div>
+    </section>
+  );
+}
+
+function Shell({ children, sub, onHome, strip, title }: {
+  children: React.ReactNode; sub?: string; onHome?: () => void;
+  strip?: React.ReactNode; title?: React.ReactNode;
+}) {
   return (
     <div className="proc-max">
       {onHome && (
@@ -474,7 +583,7 @@ function Shell({ children, sub, onHome, strip }: { children: React.ReactNode; su
           Home
         </button>
       )}
-      <ProcHead title={<>Here are your <b>best options</b></>} sub={sub} />
+      <ProcHead title={title ?? <>Here are your <b>best options</b></>} sub={sub} />
       {strip}
       {children}
     </div>

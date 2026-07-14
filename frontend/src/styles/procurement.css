@@ -317,6 +317,18 @@
 .proc-opt .o-whybody .wb-row { display: flex; gap: 9px; font-size: 12.5px; color: var(--muted); line-height: 1.55; padding: 3px 0; }
 .proc-opt .o-whybody .wb-row .d { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; margin-top: 7px; }
 
+/* ---- outreach block (RANKING_BANDS_V1, Band C) ----
+   Suppliers we're ASKING, not findings — deliberately NOT the option-card look:
+   dashed border + flat surface (vs the cards' solid border + shadow), no price
+   column, no action buttons, no rec styling. Status is carried by the text badge
+   ("Your supplier") and copy, never by colour alone. */
+.proc-outreach { border: 1px dashed var(--border); border-radius: var(--r-lg); background: var(--surface-2); padding: 14px 17px 15px; display: flex; flex-direction: column; gap: 9px; }
+.proc-outreach .or-head { display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; color: var(--muted-2); }
+.proc-outreach .or-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 13.5px; color: var(--text); line-height: 1.55; }
+.proc-outreach .or-yours { flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--accent-text); background: var(--accent-fill); border: 1px solid var(--accent-line); border-radius: 999px; padding: 2px 8px; }
+.proc-outreach .or-text b { font-weight: 600; color: var(--text-strong); }
+.proc-outreach .or-note { font-size: 12px; color: var(--muted); line-height: 1.5; border-top: 1px solid var(--border-soft); padding-top: 8px; margin-top: 2px; }
+
 /* ---- in-progress (working) block ---- */
 .proc-working { display: flex; align-items: center; gap: 14px; padding: 22px 4px; }
 .proc-working .w-t { font-size: 14px; font-weight: 600; color: var(--text); }

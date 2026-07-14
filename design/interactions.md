@@ -931,7 +931,25 @@ scores, floor, cache behavior, and API responses are byte-identical to before.**
   with `band`, `evidenceQuality`, `isMock` - contract: never true) and
   `outreachTargets{suppliers[{vendorName, onboarded, provenance}], requestedCount}`
   (the Band-C block: onboarded supplier named first, no numbers). Legacy
-  tier1/2/3 arrays are unchanged. Outreach-block UI rendering is a follow-up task.
+  tier1/2/3 arrays are unchanged.
+- **Options screen, flag-on (payload-detected: `findings` key present — never an
+  env read in the client).** The option cards are `findings[]` (Band A/B, banded
+  order); Band C renders as the OUTREACH BLOCK below them — a dashed status panel,
+  deliberately not an option card: no scores, no prices, no Order button, no
+  "recommended" styling. Onboarded supplier(s) lead with a "Your supplier" text
+  badge; non-onboarded targets are one line ("Also asking N authorized
+  {manufacturer} distributors: ..." — "authorized" only when every target's
+  provenance says so, else "suppliers matched to this part category"). A footer
+  line states plainly that these are capability matches not confirmed sources.
+  Copy is intent-only ("we're asking") — RFQ delivery is a separate milestone, so
+  the block never claims an email was sent, and no response-time promise is made.
+  Empty outreachTargets ⇒ the block does not render. Flag-off payloads carry no
+  banded keys ⇒ the legacy tier-array rendering is unchanged, no outreach block.
+- **Nothing-found-but-asking state (flag-on).** Zero findings + non-empty
+  outreach targets is a real state: the headline switches to "We're requesting
+  quotes for this part", the body says "We didn't find this part listed anywhere
+  we searched" + how many suppliers we're asking, and the outreach block renders —
+  never an empty options list under a "best options" headline.
 - **Confirmation promotion.** A Band-C supplier whose confirmed quote carries a
   price is promoted to Band A (top, if onboarded) at read time - the card shows
   the quoted price and leaves the outreach block.
