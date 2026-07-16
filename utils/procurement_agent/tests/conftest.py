@@ -71,7 +71,7 @@ def _neutralize_external_api_keys(monkeypatch):
 _FEATURE_FLAG_ENVS = (
     "TIER1_V2", "RANKING_BANDS_V1", "SUPPLIER_PORTAL_V1", "SEND_GOVERNANCE_V1",
     "INTAKE_CHANNELS_V1", "DEMO_MODE", "INTAKE_TYPE_AWARE", "SCORING_V2",
-    "RUN_CAPTURE",
+    "RUN_CAPTURE", "QUOTE_SUBMIT_V1",
 )
 # (module in sys.modules, attribute, pinned default) — import-bound flag bindings.
 _FEATURE_FLAG_MODULE_ATTRS = (
