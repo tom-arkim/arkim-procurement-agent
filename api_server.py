@@ -62,6 +62,22 @@ def _intake_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# QUOTE_SUBMIT_V1 — the supplier structured-quote submission flag (Night 11).
+# ---------------------------------------------------------------------------
+# Independent kill switch for the quote-submission surface (the public
+# /api/quote/{token} form endpoints, the portal path-B submit, the admin
+# path-C entry + review queue, and the structured-quote merge in
+# _build_quote_index). Flag off ⇒ the quote routes DO NOT EXIST
+# (byte-identical 404 {"detail":"Not Found"}) and the index merge is skipped —
+# behavior byte-identical to pre-Night-11 (parity-tested). Read live so a
+# monkeypatched os.environ is honored (mirrors SUPPLIER_PORTAL_V1).
+def _quote_submit_enabled() -> bool:
+    """Live check for the quote-submission route gate (honors monkeypatched
+    os.environ)."""
+    return _env_truthy(os.environ.get("QUOTE_SUBMIT_V1"))
+
+
+# ---------------------------------------------------------------------------
 # DEMO_MODE — public no-login demo spine (procurement-dev.arkim.ai cold outreach)
 # ---------------------------------------------------------------------------
 # Guards active ONLY when env DEMO_MODE is truthy, all completely inert otherwise
@@ -954,17 +970,46 @@ def _index_quotes(quotes: list[dict], sent: list[dict]) -> dict:
 def _build_quote_index(run_id: str) -> dict:
     """Assemble the quote index for a run from the registry (confirmed quotes + sent
     rows). Fail-soft: any registry error degrades to an empty index (no overlay), never
-    breaks the run-detail read."""
+    breaks the run-detail read.
+
+    Night 11 (QUOTE_SUBMIT_V1): ACTIVE structured quotes (utils/quote_store) are
+    merged in as confirmation records — the I1 decision: adapt new records into
+    the EXISTING index shape here, at the single index builder, so the promotion
+    path downstream (_resolve_quote → _quote_overlay → the T4 read-time Band-C
+    promotion) consumes them unchanged. No second promotion mechanism.
+    Precedence: a structured quote OVERRIDES the domain-fallback slot (it is the
+    supplier's own authoritative submission, with a real lifecycle — supersede/
+    expiry — behind it); thread-matched concierge-confirmed email quotes still
+    win thread-primary resolution for candidates with thread history. Read-time
+    expiry in get_active_quotes means a lapsed quote simply stops appearing here
+    — the card reverts honestly, no zombie confirmations (spec §6). Flag OFF ⇒
+    this block is skipped and the index is byte-identical to pre-Night-11."""
     try:
         from utils import supplier_registry
         quotes = supplier_registry.get_review_items(run_id=run_id, kind="quote")
         sent = supplier_registry.get_sent_messages(run_id=run_id)
-        return _index_quotes(quotes, sent)
+        index = _index_quotes(quotes, sent)
     except Exception as exc:  # never let a quote-store hiccup break the run view
         import logging
         logging.getLogger(__name__).warning(
             "[%s] _build_quote_index failed, no quote overlay: %s", run_id, exc)
         return {"by_thread": {}, "by_domain": {}, "domain_threads": {}}
+    if _quote_submit_enabled():
+        try:
+            from utils import quote_store
+            seen: set = set()
+            for q in quote_store.get_active_quotes(run_id):  # newest first
+                rec = quote_store.as_confirmation_record(q)
+                dom = rec.get("supplier_domain")
+                if dom and dom not in seen:  # newest structured quote per domain
+                    index["by_domain"][dom] = rec
+                    seen.add(dom)
+        except Exception as exc:  # same fail-soft discipline as the registry read
+            import logging
+            logging.getLogger(__name__).warning(
+                "[%s] structured-quote merge failed, registry index kept: %s",
+                run_id, exc)
+    return index
 
 
 def _resolve_quote(opt: dict, index: dict) -> Optional[dict]:
@@ -5688,3 +5733,424 @@ def intake_voice(body: IntakeVoiceInbound, request: Request, background_tasks: B
         "reason": outcome.reason,
         "clarify_attrs": outcome.clarify_attrs,
     }
+
+
+# ===========================================================================
+# Night 11 — Supplier structured quote submission (QUOTE_SUBMIT_V1-gated).
+# ===========================================================================
+# The three entry paths of QUOTE_SUBMISSION_SPEC.md §2, one store
+# (utils/quote_store), one promotion seam (_build_quote_index merges active
+# quotes as confirmation records — the I1 decision; see that docstring):
+#   A. PUBLIC /api/quote/{token}    — quote-token-auth'd form (NO account, NO
+#      claim: quoting is unconditional; signup is the upgrade, pitched only
+#      AFTER submission on the unclaimed path).
+#   B. PORTAL /api/portal/{token}/quotes — claimed suppliers, claim-token-auth'd
+#      (both SUPPLIER_PORTAL_V1 and QUOTE_SUBMIT_V1 must be on).
+#   C. ADMIN  /api/admin/quotes    — concierge keys in an emailed/phoned quote
+#      (works from day one, before live sends).
+# Review queue (flag-not-block sanity checks land here): admin list/approve/
+# reject. Approval activates; a pn_differs quote stays labelled as the QUOTED
+# PN (equivalent-alternative framing) — never silently the requested PN.
+#
+# Flag gating: QUOTE_SUBMIT_V1 off ⇒ every route here is ABSENT (404
+# byte-identical to an unknown route — {"detail":"Not Found"}), proven by a
+# parity test. The flag is read LIVE (_quote_submit_enabled).
+#
+# Token security (spec §3 / criterion 7): the portal-token posture re-applied —
+# hashed at rest (utils/quote_tokens), uniform 404 on unknown tokens (no
+# oracle), rate-limit keyed (IP, token-prefix), strict no-referrer/no-store
+# headers, single-RFQ scope. A KNOWN token whose RFQ closed renders the honest
+# closed state (never an error page, never a live form on a dead request).
+#
+# NO path to order placement exists from any endpoint below (spec principle 4,
+# property-tested): a quote promotes a card; a human buyer orders through the
+# existing approval flow. NO sends: the quote ack is T6's, stubbed under the
+# EMAIL_SEND_ENABLED + governance stack.
+# ---------------------------------------------------------------------------
+
+_QUOTE_RATE_CAP_PER_BUCKET: int = _env_int("QUOTE_SUBMIT_RATE_CAP", 20)
+_QUOTE_RATE_WINDOW_SEC: int = _env_int("QUOTE_SUBMIT_RATE_WINDOW_SEC", 60)
+
+# Fixed-window limiter keyed on (ip, token_prefix) — mirrors the portal's
+# _portal_rate_buckets exactly, in a SEPARATE bucket space (a spray against the
+# quote surface never throttles the claim portal and vice versa).
+_quote_rate_lock = threading.Lock()
+_quote_rate_buckets: Dict[tuple, list] = {}
+
+
+def _quote_flag_off_404():
+    """Byte-identical-to-unknown-route 404 when QUOTE_SUBMIT_V1 is off."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _quote_reject_404():
+    """Uniform rejection for unknown quote tokens — identical to the flag-off
+    and unknown-route body (no oracle; the portal-token posture)."""
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+def _quote_rate_check(request: Request, token: str) -> None:
+    """429 when the (IP, token-prefix) bucket exceeds the cap in the window.
+    Same shape as _portal_rate_check; separate buckets (see above)."""
+    if _QUOTE_RATE_CAP_PER_BUCKET <= 0:
+        return
+    import time
+    bucket = (_client_ip(request), (token or "")[:8])
+    now = time.monotonic()
+    with _quote_rate_lock:
+        entry = _quote_rate_buckets.get(bucket)
+        if not entry or (now - entry[1]) >= _QUOTE_RATE_WINDOW_SEC:
+            entry = [0, now]
+            _quote_rate_buckets[bucket] = entry
+        entry[0] += 1
+        count = entry[0]
+    if count > _QUOTE_RATE_CAP_PER_BUCKET:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests.",
+            headers={"Retry-After": str(_QUOTE_RATE_WINDOW_SEC)},
+        )
+
+
+def _validate_quote_token(request: Request, token: str) -> dict:
+    """The shared quote-token gate. Returns the validated token context (with
+    state "live" | "closed") on a KNOWN token. Flag-off OR unknown token ⇒
+    uniform 404. Rate-limit applied BEFORE the token check so a garbage-token
+    spray is throttled regardless of validity (the portal discipline)."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    _quote_rate_check(request, token)
+    from utils import quote_tokens
+    row = quote_tokens.validate_token(token)
+    if not row:
+        _quote_reject_404()
+    return row
+
+
+def _supplier_is_claimed(domain: str) -> bool:
+    """Whether a supplier already has the claimed/onboarded relationship — used
+    ONLY to decide whether the post-submit claim pitch renders (path A,
+    unclaimed only). Claimed ⇔ registry onboarding_status is an onboarded
+    status OR the TIER1_V2 lifecycle reached onboarding/onboarded. Fail-soft:
+    an unknown/unreadable supplier counts as UNCLAIMED (the pitch is an offer,
+    not a disclosure — showing it to an edge-case claimed supplier is
+    harmless; hiding it from a real unclaimed one loses the loop)."""
+    try:
+        from utils import supplier_registry
+        rec = supplier_registry.lookup_by_domain(domain)
+        if not rec:
+            return False
+        if rec.get("onboarding_status") in supplier_registry._ONBOARDED_STATUSES:
+            return True
+        return rec.get("tier1_lifecycle") in ("onboarding", "onboarded")
+    except Exception:
+        return False
+
+
+def _run_specs_for_quote(run_id: str) -> Optional[dict]:
+    """The run's asset specs (manufacturer / part_number / quantity ...) for
+    quote validation context, or None when the run doesn't exist. Internal
+    `_`-prefixed ledger keys stripped (the run-detail discipline)."""
+    with _SessionFactory() as session:
+        run = session.get(SourcingRunORM, run_id)
+        if run is None:
+            return None
+        specs = json.loads(run.asset_specs_json) if run.asset_specs_json else {}
+    return {k: v for k, v in specs.items() if not str(k).startswith("_")}
+
+
+class QuoteSubmissionBody(BaseModel):
+    """The five required fields (spec §4) + the two optional. `part_number` is
+    the PN-CONFIRMATION field: prefilled with the requested PN client-side;
+    blank/omitted counts as confirming the requested PN, an EDIT trips the
+    wrong-part gate (pn_differs → review)."""
+    quote_number: str
+    unit_price: float
+    quantity: float
+    lead_time: str
+    part_number: Optional[str] = None
+    freight: Optional[str] = None
+    valid_until: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PortalQuoteBody(QuoteSubmissionBody):
+    run_id: str
+
+
+class AdminQuoteBody(QuoteSubmissionBody):
+    run_id: str
+    supplier_domain: str
+    vendor_name: Optional[str] = None
+
+
+def _validate_quote_fields(body: QuoteSubmissionBody) -> None:
+    """422 on semantically-invalid required fields (types are pydantic's job)."""
+    if not (body.quote_number or "").strip():
+        raise HTTPException(status_code=422, detail="quote_number is required")
+    if body.unit_price is None or body.unit_price <= 0:
+        raise HTTPException(status_code=422, detail="unit_price must be positive")
+    if body.quantity is None or body.quantity <= 0:
+        raise HTTPException(status_code=422, detail="quantity must be positive")
+    if not (body.lead_time or "").strip():
+        raise HTTPException(status_code=422, detail="lead_time is required")
+
+
+def _record_structured_quote(
+    body: QuoteSubmissionBody,
+    *,
+    submitted_via: str,
+    submitted_by: Optional[str],
+    supplier_domain: str,
+    vendor_name: Optional[str],
+    run_id: Optional[str],
+    rfq_id: Optional[str],
+    part_key: Optional[str],
+    manufacturer: Optional[str],
+    requested_part_number: Optional[str],
+    requested_quantity: Optional[float],
+    default_valid_until: Optional[str] = None,
+) -> dict:
+    """The shared submission core all three paths call: sanity-band resolution
+    (price_db median — band-absent skips), the store write (supersede + the
+    wrong-part gate + flag-not-block checks live in quote_store.submit_quote),
+    and the response shape. Raises 500 on a store failure."""
+    from utils import quote_store
+    band = quote_store.price_band_median(manufacturer, requested_part_number)
+    quote = quote_store.submit_quote(
+        supplier_domain=supplier_domain,
+        vendor_name=vendor_name,
+        unit_price=body.unit_price,
+        submitted_via=submitted_via,
+        submitted_by=submitted_by,
+        run_id=run_id,
+        rfq_id=rfq_id,
+        part_key=part_key,
+        manufacturer=manufacturer,
+        requested_part_number=requested_part_number,
+        quoted_part_number=body.part_number,
+        quote_number=body.quote_number.strip(),
+        quantity=body.quantity,
+        requested_quantity=requested_quantity,
+        lead_time=body.lead_time.strip(),
+        freight=body.freight,
+        valid_until=body.valid_until or default_valid_until,
+        notes=body.notes,
+        band_median=band,
+    )
+    if quote is None:
+        raise HTTPException(status_code=500, detail="Quote could not be recorded")
+    return {
+        "ok": True,
+        "quote_id": quote["id"],
+        "status": quote["status"],           # "active" (promotes now) | "review"
+        "review_reasons": quote["review_reasons"],
+        "pn_differs": quote["pn_differs"],
+        "valid_until": quote["valid_until"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Path A — the PUBLIC quote form (token-auth'd; the RFQ email's /quote/{token})
+# ---------------------------------------------------------------------------
+
+@app.get("/api/quote/{token}")
+def quote_form_context(token: str, request: Request):
+    """The token page contract (spec §3): the request (part identity, qty,
+    need-by), the supplier's own name/domain as addressee, and the form
+    prefills. NOTHING else — no buyer identity beyond the RFQ email, no other
+    suppliers, no pricing signals. A closed RFQ renders state="closed"
+    honestly (200, never an error page). Unknown token ⇒ uniform 404."""
+    row = _validate_quote_token(request, token)
+    if row["state"] == "closed":
+        return JSONResponse(content={"state": "closed"},
+                            headers=_portal_response_headers({}))
+    from utils import quote_store
+    existing = None
+    for q in quote_store.get_quotes(run_id=row.get("run_id"),
+                                    supplier_domain=row.get("supplier_domain")):
+        if q["effective_status"] in ("active", "review"):
+            existing = {"status": q["effective_status"],
+                        "unit_price": q["unit_price"],
+                        "submitted_at": q["submitted_at"]}
+        break  # newest first — only the latest submission matters
+    body = {
+        "state": "live",
+        "request": {
+            "manufacturer": row.get("manufacturer"),
+            "part_number": row.get("part_number"),
+            "quantity": row.get("quantity"),
+            "need_by": row.get("need_by"),
+        },
+        "supplier": {
+            "name": row.get("vendor_name"),
+            "domain": row.get("supplier_domain"),
+        },
+        "expires_at": row.get("expires_at"),
+        "existing_quote": existing,
+    }
+    return JSONResponse(content=body, headers=_portal_response_headers({}))
+
+
+@app.post("/api/quote/{token}")
+def quote_submit(token: str, body: QuoteSubmissionBody, request: Request):
+    """Path-A submission: NO account, NO claim — quoting is unconditional
+    (spec §1). The claim pitch is returned AFTER a successful submission, and
+    only for an unclaimed supplier; it is an invitation into the EXISTING
+    claim flow (concierge-issued link), never an inline token mint. A closed
+    RFQ ⇒ 409 (the form never writes to a dead request)."""
+    row = _validate_quote_token(request, token)
+    if row["state"] == "closed":
+        raise HTTPException(status_code=409, detail="This request has closed")
+    _validate_quote_fields(body)
+    out = _record_structured_quote(
+        body,
+        submitted_via="rfq_link",
+        submitted_by=row.get("token_id"),
+        supplier_domain=row["supplier_domain"],
+        vendor_name=row.get("vendor_name"),
+        run_id=row.get("run_id"),
+        rfq_id=row.get("rfq_id"),
+        part_key=row.get("part_key"),
+        manufacturer=row.get("manufacturer"),
+        requested_part_number=row.get("part_number"),
+        requested_quantity=row.get("quantity"),
+        default_valid_until=row.get("expires_at"),  # the RFQ validity window
+    )
+    out["claim_pitch"] = not _supplier_is_claimed(row["supplier_domain"])
+    return JSONResponse(content=out, headers=_portal_response_headers({}))
+
+
+# ---------------------------------------------------------------------------
+# Path B — the claimed-supplier portal submit (claim-token-auth'd)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/portal/{token}/quotes")
+def portal_quote_submit(token: str, body: PortalQuoteBody, request: Request):
+    """Path-B submission from the portal's open-requests section (T5). Gated
+    by BOTH flags: the claim token authenticates the supplier
+    (SUPPLIER_PORTAL_V1 + the portal's own rate limit / uniform 404), and the
+    quote surface must be on (QUOTE_SUBMIT_V1 — off ⇒ this route is absent,
+    404). The supplier may quote only a run with an OPEN RFQ addressed to
+    them; quotes are their own store — NEVER a profile revision (no
+    propose→approve coupling)."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    prow = _validate_portal_token(request, token)
+    dom = prow["supplier_domain"]
+    _validate_quote_fields(body)
+    from utils import supplier_registry
+    open_rfqs = [
+        m for m in supplier_registry.get_sent_messages(run_id=body.run_id,
+                                                       domain=dom)
+        if m.get("status") in supplier_registry.OPEN_RFQ_STATUSES
+    ]
+    if not open_rfqs:
+        raise HTTPException(status_code=404,
+                            detail="No open request for this supplier")
+    specs = _run_specs_for_quote(body.run_id) or {}
+    rec = supplier_registry.lookup_by_domain(dom)
+    out = _record_structured_quote(
+        body,
+        submitted_via="portal",
+        submitted_by=prow.get("token_id"),
+        supplier_domain=dom,
+        vendor_name=(rec or {}).get("name"),
+        run_id=body.run_id,
+        rfq_id=open_rfqs[0].get("id"),       # newest open RFQ row id
+        part_key=open_rfqs[0].get("part_key"),
+        manufacturer=specs.get("manufacturer"),
+        requested_part_number=specs.get("part_number"),
+        requested_quantity=specs.get("quantity"),
+    )
+    return JSONResponse(content=out, headers=_portal_response_headers({}))
+
+
+# ---------------------------------------------------------------------------
+# Path C — concierge entry + the review queue (admin-gated)
+# ---------------------------------------------------------------------------
+
+# NOTE on gate ordering for the admin quote routes: the FLAG check runs BEFORE
+# require_admin (which is therefore invoked in the handler body, not as a
+# Depends) — flag-off must render these routes ABSENT (byte-identical 404) for
+# ANY caller, whereas a Depends(require_admin) would answer 401/403 first and
+# reveal the route exists. Flag-on keeps the full require_admin contract
+# (401 no header / 403 wrong token / 503 secret unset).
+
+@app.post("/api/admin/quotes")
+def admin_quote_entry(body: AdminQuoteBody,
+                      authorization: Optional[str] = Header(default=None)):
+    """Path-C: concierge keys in a quote received by email/phone. Authoritative
+    (a human already reviewed it) but the SAME sanity checks apply — a typo'd
+    price flags for a second look regardless of who typed it. Records
+    provenance submitted_via="concierge". Works before live sends exist."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    role = require_admin(authorization)
+    _validate_quote_fields(body)
+    specs = _run_specs_for_quote(body.run_id)
+    if specs is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _record_structured_quote(
+        body,
+        submitted_via="concierge",
+        submitted_by=role,
+        supplier_domain=body.supplier_domain,
+        vendor_name=body.vendor_name,
+        run_id=body.run_id,
+        rfq_id=None,
+        part_key=None,
+        manufacturer=specs.get("manufacturer"),
+        requested_part_number=specs.get("part_number"),
+        requested_quantity=specs.get("quantity"),
+    )
+
+
+@app.get("/api/admin/quotes")
+def admin_list_quotes(run_id: Optional[str] = None, status: Optional[str] = None,
+                      authorization: Optional[str] = Header(default=None)):
+    """Admin quote listing. `status` filters on the EFFECTIVE status (read-time
+    expiry applied) — status=review is the concierge review queue (spec §6),
+    each row carrying its reasons."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    require_admin(authorization)
+    from utils import quote_store
+    return {"quotes": quote_store.get_quotes(run_id=run_id, status=status)}
+
+
+@app.post("/api/admin/quotes/{quote_id}/approve")
+def admin_approve_quote(quote_id: str,
+                        authorization: Optional[str] = Header(default=None)):
+    """Approve a review-flagged quote → active (it promotes from the next
+    read). A pn_differs quote promotes labelled as the QUOTED PN
+    (equivalent-alternative framing — criterion 4); approval never relabels
+    it as the requested PN. 404 unknown; 409 when not in review."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    role = require_admin(authorization)
+    from utils import quote_store
+    if quote_store.get_quote(quote_id) is None:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    out = quote_store.approve_review(quote_id, resolved_by=role)
+    if out is None:
+        raise HTTPException(status_code=409, detail="Quote is not in review")
+    return {"ok": True, "quote": out}
+
+
+@app.post("/api/admin/quotes/{quote_id}/reject")
+def admin_reject_quote(quote_id: str,
+                       authorization: Optional[str] = Header(default=None)):
+    """Reject a review-flagged quote → withdrawn (never promotes). 404
+    unknown; 409 when not in review."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    role = require_admin(authorization)
+    from utils import quote_store
+    if quote_store.get_quote(quote_id) is None:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    out = quote_store.reject_review(quote_id, resolved_by=role)
+    if out is None:
+        raise HTTPException(status_code=409, detail="Quote is not in review")
+    return {"ok": True, "quote": out}
+
