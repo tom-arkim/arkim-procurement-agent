@@ -136,3 +136,86 @@ export function proposeRevision(
     { method: "POST", body: JSON.stringify(body) },
   );
 }
+
+// ---------------------------------------------------------------------------
+// Night 11 (QUOTE_SUBMIT_V1) — path B: open requests, quote history, submit.
+// All three 404 (→ uniform `rejected`) when the quote feature is off, so the
+// portal page simply hides the sections — no flag plumbing in the UI.
+// ---------------------------------------------------------------------------
+
+export interface OpenRequest {
+  run_id: string;
+  manufacturer: string | null;
+  part_number: string | null;
+  quantity: number | null;
+  sent_at: string | null;
+  quoted: {
+    status: "active" | "review";
+    unit_price: number;
+    submitted_at: string;
+  } | null;
+}
+
+export interface QuoteHistoryRow {
+  quote_id: string;
+  run_id: string | null;
+  part_number: string | null;
+  quoted_part_number: string | null;
+  unit_price: number;
+  quantity: number | null;
+  lead_time: string | null;
+  status: string; // effective status: active|review|superseded|expired|withdrawn
+  submitted_at: string;
+  submitted_via: string;
+  valid_until: string | null;
+}
+
+export interface PortalQuoteSubmitResponse {
+  ok: boolean;
+  quote_id: string;
+  status: "active" | "review";
+  review_reasons: string[];
+  pn_differs: boolean;
+  valid_until: string;
+}
+
+/** GET /api/portal/{token}/open-requests — the supplier's own open RFQs. */
+export function getOpenRequests(
+  token: string,
+): Promise<PortalResult<{ requests: OpenRequest[] }>> {
+  return portalFetch<{ requests: OpenRequest[] }>(
+    `/portal/${encodeURIComponent(token)}/open-requests`,
+  );
+}
+
+/** GET /api/portal/{token}/quotes — the supplier's own quote history. */
+export function getQuoteHistory(
+  token: string,
+): Promise<PortalResult<{ quotes: QuoteHistoryRow[] }>> {
+  return portalFetch<{ quotes: QuoteHistoryRow[] }>(
+    `/portal/${encodeURIComponent(token)}/quotes`,
+  );
+}
+
+export interface PortalQuoteBody {
+  run_id: string;
+  quote_number: string;
+  unit_price: number;
+  quantity: number;
+  lead_time: string;
+  part_number?: string | null;
+  freight?: string | null;
+  valid_until?: string | null;
+  notes?: string | null;
+}
+
+/** POST /api/portal/{token}/quotes — submit a quote on one open request. */
+export function submitPortalQuote(
+  token: string,
+  body: PortalQuoteBody,
+): Promise<PortalResult<PortalQuoteSubmitResponse>> {
+  return portalFetch<PortalQuoteSubmitResponse>(
+    `/portal/${encodeURIComponent(token)}/quotes`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}

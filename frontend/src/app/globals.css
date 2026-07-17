@@ -1062,3 +1062,308 @@
     animation: none !important;
   }
 }
+
+/* ===========================================================================
+   QUOTE SUBMISSION (/quote/[token]) — Night 11, QUOTE_SUBMIT_V1
+   -------------------------------------------------------------------------
+   Rides on the portal-surface palette (one public visual system): the page
+   root is .portal-surface, so every --portal-* token, the header/footer, the
+   focus ring, the a11y rules, and the reduced-motion guard above apply as-is.
+   Only quote-specific layout lives here. Touch targets stay ≥44px.
+   =========================================================================== */
+
+/* The request summary — the hero card (what is being asked for). */
+.quote-request-card {
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-left: 4px solid var(--portal-orange);
+  border-radius: 10px;
+  padding: 24px;
+  box-shadow: 0 1px 2px rgba(38, 40, 43, 0.04);
+}
+.quote-request-eyebrow {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  color: var(--portal-slate);
+  margin: 0 0 8px;
+}
+.quote-request-part {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.25;
+  color: var(--portal-graphite);
+}
+.quote-request-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 14px 0 0;
+}
+.quote-request-fact dt {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 10.5px;
+  color: var(--portal-slate);
+}
+.quote-request-fact dd {
+  margin: 2px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--portal-graphite);
+}
+.quote-revision-note {
+  margin: 14px 0 0;
+  font-size: 13px;
+  color: var(--portal-slate);
+  border-top: 1px solid var(--portal-line);
+  padding-top: 10px;
+}
+
+/* The form */
+.quote-form {
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-radius: 10px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.quote-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1 1 0;
+}
+.quote-field-row {
+  display: flex;
+  gap: 14px;
+}
+.quote-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--portal-graphite);
+}
+.quote-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 6px;
+  background: var(--portal-paper);
+  color: var(--portal-graphite);
+  font-size: 16px; /* ≥16px prevents iOS zoom-on-focus */
+  min-height: 44px; /* touch target ≥44px */
+  font-family: inherit;
+}
+.quote-input::placeholder { color: var(--portal-slate); opacity: 0.8; }
+.quote-input:focus-visible {
+  outline: 2px solid var(--portal-orange);
+  outline-offset: 1px;
+  border-color: var(--portal-orange);
+}
+.quote-input:disabled { opacity: 0.5; }
+.quote-textarea { min-height: 80px; resize: vertical; }
+.quote-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--portal-slate);
+}
+/* The PN-edited honesty note: amber border (non-text) + graphite text — the
+   portal's status rule (color never the sole signal; the text says it all). */
+.quote-pn-note {
+  margin: 0;
+  font-size: 13px;
+  color: var(--portal-graphite);
+  background: var(--portal-paper);
+  border: 1px solid var(--portal-line);
+  border-left: 3px solid var(--portal-amber);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+/* Lead time: in-stock toggle + days input on one row */
+.quote-lead-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: stretch;
+}
+.quote-instock {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--portal-line-strong);
+  border-radius: 6px;
+  background: var(--portal-card);
+  cursor: pointer;
+  font-size: 14px;
+  min-height: 44px;
+  color: var(--portal-graphite);
+}
+.quote-instock input {
+  accent-color: var(--portal-orange);
+  width: 16px;
+  height: 16px;
+}
+.quote-lead-days {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 140px;
+}
+.quote-lead-days .quote-input { max-width: 120px; }
+.quote-lead-suffix { font-size: 14px; color: var(--portal-slate); }
+
+/* Optional fields fold */
+.quote-optional {
+  border: 1px dashed var(--portal-line-strong);
+  border-radius: 8px;
+  background: var(--portal-paper);
+}
+.quote-optional-summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  min-height: 44px;
+  box-sizing: border-box;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--portal-graphite);
+  list-style-position: inside;
+}
+.quote-optional-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 14px 14px;
+}
+
+/* Confirmation / closed / rejected state cards */
+.quote-state-card {
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-left: 4px solid var(--portal-slate);
+  border-radius: 10px;
+  padding: 28px 24px;
+}
+.quote-state-card--confirm {
+  border-left-color: var(--portal-success);
+}
+.quote-state-title {
+  margin: 0 0 8px;
+  font-size: 22px;
+  color: var(--portal-graphite);
+}
+.quote-state-body {
+  margin: 0;
+  font-size: 15px;
+  color: var(--portal-slate);
+}
+
+/* The post-submit claim pitch (path A, unclaimed only) */
+.quote-claim-pitch {
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-left: 4px solid var(--portal-orange);
+  border-radius: 10px;
+  padding: 24px;
+}
+.quote-claim-pitch-eyebrow {
+  font-family: var(--font-jetbrains), ui-monospace, monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11px;
+  color: var(--portal-slate);
+  margin: 0 0 8px;
+}
+.quote-claim-pitch-title {
+  margin: 0 0 8px;
+  font-size: 18px;
+  color: var(--portal-graphite);
+}
+
+/* ---- Portal path B: open requests + quote history (T5) ------------------- */
+.portal-section-title {
+  margin: 0 0 10px;
+  font-size: 17px;
+  color: var(--portal-graphite);
+}
+.portal-request-list,
+.portal-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.portal-request-row {
+  background: var(--portal-card);
+  border: 1px solid var(--portal-line);
+  border-left: 4px solid var(--portal-orange);
+  border-radius: 10px;
+  padding: 16px;
+}
+.portal-request-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+}
+.portal-request-part {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--portal-graphite);
+}
+/* Status badge: glyph + text + color (WCAG 1.4.1 — color never the sole
+   signal; see the standing rule above). Amber-bordered default = in review. */
+.portal-quoted-badge {
+  font-size: 13px;
+  color: var(--portal-graphite);
+  border: 1px solid var(--portal-amber);
+  background: var(--portal-paper);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.portal-quoted-badge--active {
+  border-color: var(--portal-success);
+}
+.portal-request-form {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.portal-history-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--portal-line);
+  border-radius: 8px;
+  background: var(--portal-card);
+  font-size: 13.5px;
+}
+.portal-history-part {
+  font-weight: 600;
+  color: var(--portal-graphite);
+  flex: 1 1 auto;
+}
+.portal-history-price { color: var(--portal-graphite); }
+.portal-history-status { color: var(--portal-slate); }
+
+/* Mobile (~380px): stack the paired fields; keep everything one column. */
+@media (max-width: 560px) {
+  .quote-field-row { flex-direction: column; gap: 20px; }
+  .quote-request-card, .quote-form { padding: 18px 16px; }
+  .quote-request-part { font-size: 19px; }
+  .quote-lead-days .quote-input { max-width: none; flex: 1; }
+  .portal-request-head { flex-direction: column; align-items: flex-start; }
+}

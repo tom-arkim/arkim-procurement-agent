@@ -28,6 +28,7 @@ import {
   type ShipArea,
 } from "@/lib/portal-api";
 import { ProfileForm, type FormState } from "./profile-form";
+import { OpenRequests } from "./open-requests";
 import { PortalTeaser, PortalRejection, PortalSubmitted } from "./portal-states";
 import { GoferLoader } from "@/components/ui/gofer-loader";
 
@@ -133,6 +134,10 @@ export function ClaimPage({ token }: { token: string }) {
             {submitError}
           </div>
         )}
+        {/* Night 11 (QUOTE_SUBMIT_V1): the claimed supplier's open requests +
+            quote history. Renders NOTHING when the quote feature is off (its
+            endpoints 404 uniformly) — the pre-Night-11 portal is unchanged. */}
+        <OpenRequests token={tokenRef.current} />
         <ProfileForm
           initial={form}
           aftermarketDisclosure={profile.aftermarket_disclosure}

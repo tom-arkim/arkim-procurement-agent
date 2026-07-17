@@ -30,6 +30,7 @@ explicit type annotations, fail-soft).
 
 from __future__ import annotations
 
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -55,6 +56,45 @@ class Approval:
     """
     approved_by: str
     approved_at: str = field(default_factory=_now_iso)
+
+
+def _substitute_quote_link(draft: str, *, run_id: Optional[str], rfq_id: str,
+                           part_key: Optional[str], domain: str,
+                           vendor_name: Optional[str]) -> str:
+    """QUOTE_SUBMIT_V1 (Night 11 T6): resolve the {quote_link} placeholder the
+    flag-on template carries — mint the per-RFQ quote token (single-RFQ scope,
+    hashed at rest) and substitute the /quote/{token} link MECHANICALLY. The
+    letter's copy is founder-owned; this only fills the placeholder.
+
+    Fail-soft, and never leak a raw placeholder: if the flag is off, or minting
+    fails, any line containing {quote_link} is dropped entirely (a supplier
+    must never see "{quote_link}" literally). Flag off + no placeholder (the
+    flag-off template) ⇒ the draft is returned untouched, byte-identical."""
+    if "{quote_link}" not in (draft or ""):
+        return draft
+    from utils import quote_store, quote_tokens
+    token_out = None
+    if quote_store.quote_submit_active():
+        # Display context for the token page: the run's specs (fail-soft None).
+        mfg = pn = qty = None
+        if run_id:
+            try:
+                from utils.procurement_agent.state import persistence
+                specs = (persistence.get_run(run_id) or {}).get("asset_specs_json") or {}
+                mfg, pn = specs.get("manufacturer"), specs.get("part_number")
+                qty = specs.get("quantity")
+            except Exception as exc:
+                print(f"[RFQSend] quote-link specs read failed (link still minted): {exc}")
+        token_out = quote_tokens.mint_for_rfq(
+            supplier_domain=domain, run_id=run_id, rfq_id=rfq_id,
+            part_key=part_key, vendor_name=vendor_name,
+            manufacturer=mfg, part_number=pn, quantity=qty, is_test=False)
+    if token_out:
+        base = (os.environ.get("ARKIM_PUBLIC_BASE_URL") or "").rstrip("/")
+        return draft.replace("{quote_link}", f"{base}/quote/{token_out['token']}")
+    # Flag off (stale draft) or mint failure: drop the placeholder line whole.
+    lines = [ln for ln in draft.splitlines() if "{quote_link}" not in ln]
+    return "\n".join(lines)
 
 
 def _subject_from_draft(draft: str) -> Optional[str]:
@@ -128,6 +168,12 @@ def send_rfq(
                        domain=domain, recipients=recipients, outreach_status="needs_human_contact")
 
     rfq_id = str(uuid.uuid4())
+    # QUOTE_SUBMIT_V1 (Night 11 T6): fill the {quote_link} placeholder before the
+    # body is recorded or sent, so the ledger row and the delivered text match.
+    # No placeholder (the flag-off template) ⇒ returned untouched, byte-identical.
+    approved_draft = _substitute_quote_link(
+        approved_draft, run_id=run_id, rfq_id=rfq_id, part_key=part_key,
+        domain=domain, vendor_name=vendor_name)
     subject = _subject_from_draft(approved_draft) or f"Quote request - {vendor_name or 'part'}"
     # part_key (SEND_GOVERNANCE_V1 T2): the per-supplier-per-part open-RFQ cap keys
     # on it. Callers pass it only when governance is active (flag-off rows unchanged).

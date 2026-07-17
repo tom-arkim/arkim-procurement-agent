@@ -957,3 +957,62 @@ scores, floor, cache behavior, and API responses are byte-identical to before.**
   `KNOWN_PARTS_EDGE_TTL_DAYS`) stamped with a matcher version; only TTL-fresh,
   current-version edges short-circuit discovery. Only Band A/B edges are ever
   written back; mocks/Band C never. Part-key identity persists indefinitely.
+  Cache REPLAY applies the band-aware floor, not the legacy one: flag-on, a
+  below-30 stored suitability is annotated (never dropped) and the band pass
+  re-scopes it exactly as fresh discovery does — a PN-evidence edge (Zoro,
+  10.5) survives the replay just as it survived the fresh run. Flag-off replay
+  keeps the legacy drop byte-identically.
+
+---
+
+## Supplier quote submission (Night 11 - QUOTE_SUBMIT_V1)
+
+A supplier - claimed or unclaimed - submits a structured quote in five fields;
+the quote becomes the confirmation record the Night-9 promotion consumes, and
+the supplier's card jumps from the outreach block to Band A on the live run.
+**All flag-gated (`QUOTE_SUBMIT_V1`, default OFF): flag off => every quote
+endpoint is absent (byte-identical 404), the promotion index merge is skipped,
+the RFQ template carries no quote link, and behavior is byte-identical.**
+
+- **Three entry paths, one store (`utils/quote_store`).** A: the RFQ email's
+  per-RFQ `/quote/{token}` link (no account, no login - quoting is
+  unconditional; the claim pitch renders only AFTER submission and only for
+  unclaimed suppliers). B: the claim portal's "Open requests" section (same
+  five-field form component, own quote history, zero cross-supplier
+  visibility). C: concierge keys in an emailed/phoned quote via
+  `/api/admin/quotes` (admin-gated; works before live sends).
+- **The form (public `/quote/[token]`).** Portal-surface palette, one screen,
+  >=44px targets, 16px inputs. Five required: quote number, unit price (USD),
+  quantity (prefilled, editable - partial quotes are real), lead time (days or
+  "in stock"), PN confirmation (prefilled; an edit shows an inline
+  equivalent-alternative note). Optional fold: freight, valid-until, notes.
+  States: loading / live / CLOSED (honest "this request has closed" - a state,
+  not an error) / uniform rejection / submitted (active vs under-review copy is
+  honest) / soft-error with input preserved.
+- **Promotion.** An `active`, pn-confirmed quote is adapted into the EXISTING
+  confirmation-record shape inside `_build_quote_index` - the Night-9 T4
+  read-time promotion consumes it unchanged. Onboarded suppliers top Band A.
+  The card reads "confirmed ... on {date}" (`quoteConfirmedAt`); a
+  review-approved alternative part is labelled as the QUOTED PN with
+  equivalent-alternative framing (`pnDiffers`/`quotedPartNumber`) - never
+  silently the requested PN.
+- **Flag-not-block sanity checks.** pn_differs / price >3x or <0.2x the
+  price_db median (band absent => check skips) / qty >10x or <0.1x requested
+  => the quote lands in the concierge review queue with reasons; approval
+  activates, rejection withdraws. Everything else promotes instantly.
+- **Lifecycle.** active -> superseded (resubmit wins, history kept) /
+  expired (read-time, no cron - the card reverts to outreach honestly) /
+  withdrawn. Buyer acceptance is an order event, never a quote status.
+- **Quote tokens.** Minted per RFQ send (mechanical `{quote_link}`
+  substitution in `rfq_send`; the template line is appended flag-on only),
+  hashed at rest, single-RFQ scope, NOT single-use (revisions supersede),
+  expiry = the RFQ window (14d default). Unknown token => uniform 404; a
+  known token on a dead RFQ => the closed state. Separate namespace from
+  claim tokens (cross-token isolation pinned by tests).
+- **Sends.** The quote-received ack + concierge notices ride the existing
+  stack: the ack goes through `GmailSender.send` (governance +
+  EMAIL_SEND_ENABLED run inside - stubbed until sends go live); concierge
+  notices are a `quotes` section on the existing daily digest. Zero new send
+  surfaces; zero live sends.
+- **No auto-order.** Property-tested: no quote endpoint or promotion read
+  reaches `orders.create_order`/`place_order`.

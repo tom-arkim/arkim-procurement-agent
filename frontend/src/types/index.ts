@@ -153,6 +153,12 @@ export interface Candidate {
   quoteUnverified?: boolean;                   // the quote's extraction confidence was below the 0–1 floor
   terms?: string;                              // quote payment/shipping terms, when stated
   quoteCurrency?: string;                      // quote currency (default USD)
+  // Night 11 (QUOTE_SUBMIT_V1) — structured-quote provenance, present only when
+  // the overlay came from a supplier's own submission (quote_store):
+  quoteConfirmedAt?: string;                   // "confirmed by supplier {date}"
+  quoteId?: string;                            // order-provenance hook (spec §7)
+  pnDiffers?: boolean;                         // review-APPROVED alternative part
+  quotedPartNumber?: string;                   // ...labelled as the QUOTED PN
   contact?: string;
   relationship?: string;
   // Tier 1 two-mode display: true = show "Request Confirmation"; false = show "Buy Now".

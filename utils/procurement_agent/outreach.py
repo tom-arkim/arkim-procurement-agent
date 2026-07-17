@@ -26,6 +26,14 @@ CONTACT_NOMINATION_ASK = (
     "name, position, and email."
 )
 
+# Night 11 (QUOTE_SUBMIT_V1): the quote-link line appended to the RFQ when the
+# structured-quote feature is on. The {quote_link} placeholder is substituted
+# MECHANICALLY at send time (rfq_send mints the per-RFQ token) — a template
+# ADDITION like CONTACT_NOMINATION_ASK above, never a rewrite of the letter
+# (the copy is founder-owned). Flag off ⇒ the line is absent and the template
+# is byte-identical to rfq-v1.
+QUOTE_LINK_LINE = "Prefer a form? Submit your quote in five fields: {quote_link}"
+
 
 def should_request_contact(vendor: dict | None) -> bool:
     """Whether the RFQ should ask the supplier to nominate a procurement contact.
@@ -61,6 +69,13 @@ def _make_draft(vendor_name: str, specs: dict | None, request_contact: bool = Fa
     )
     if request_contact:
         body += f"\n\n{CONTACT_NOMINATION_ASK}"
+    # QUOTE_SUBMIT_V1 (Night 11 T6): append the quote-link line so the human
+    # approves the draft WITH the placeholder; the actual link is substituted
+    # mechanically at send time (rfq_send). Read live so flag-off drafts stay
+    # byte-identical.
+    from utils.quote_store import quote_submit_active
+    if quote_submit_active():
+        body += f"\n\n{QUOTE_LINK_LINE}"
     return body
 
 

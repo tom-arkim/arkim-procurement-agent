@@ -54,13 +54,25 @@ function whyBullets(c: Candidate, manufacturer?: string): string[] {
     // claim line composes with (never masks) the unverified caveat: even when we read
     // the figure with low confidence, "supplier-confirmed" holds AND the caveat coexists.
     const supplier = c.vendorName || "The supplier";
+    // Night 11: a structured quote carries its own confirmation date — the
+    // card says WHEN the supplier confirmed. Email-parsed quotes keep their
+    // exact pre-Night-11 line (no date field ⇒ no copy change).
     out.push(c.quoteUnverified
       ? `${supplier} sent a quote — we read the price with low confidence, so confirm the figure before ordering.`
-      : `${supplier} confirmed this price, lead time, and terms in a quote.`);
+      : c.quoteConfirmedAt
+        ? `${supplier} confirmed this price and lead time in a quote on ${c.quoteConfirmedAt.slice(0, 10)}.`
+        : `${supplier} confirmed this price, lead time, and terms in a quote.`);
     if (c.terms) out.push(`Terms: ${c.terms}.`);
-    out.push(isExact(c)
-      ? "Matches the exact part number on your equipment record."
-      : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
+    // The wrong-part gate's labelling half (criterion 4): a review-approved
+    // alternative is presented as the QUOTED part number with equivalent
+    // framing — never silently as the requested PN.
+    if (c.pnDiffers && c.quotedPartNumber) {
+      out.push(`Quoted as part ${c.quotedPartNumber} — an equivalent alternative to the requested part, confirmed by our team.`);
+    } else {
+      out.push(isExact(c)
+        ? "Matches the exact part number on your equipment record."
+        : "Functionally equivalent alternative per the manufacturer cross-reference — review the spec before purchase.");
+    }
     if (c.comparisonArtifact?.engineerNotes) out.push(c.comparisonArtifact.engineerNotes);
     return out;
   }
