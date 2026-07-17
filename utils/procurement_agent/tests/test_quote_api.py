@@ -686,6 +686,120 @@ class TestPromotionWiring:
 
 
 # ---------------------------------------------------------------------------
+# T6 — the quote-received ack (stubbed under the full send stack) + digest
+# ---------------------------------------------------------------------------
+
+class _FakeSender:
+    """Records EmailMessages; returns a stubbed SendResult (the send gate is
+    pinned off by conftest — this asserts the seam, not delivery)."""
+    sent: list = []
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def send(self, message):
+        from utils.email_sender import SendResult
+        _FakeSender.sent.append(message)
+        return SendResult(status="stubbed")
+
+
+class TestQuoteAck:
+    @pytest.fixture(autouse=True)
+    def _fresh_sender_log(self):
+        _FakeSender.sent = []
+
+    def test_path_a_submission_fires_a_stubbed_ack(self, qapi, monkeypatch):
+        import utils.email_sender as es
+        monkeypatch.setattr(es, "GmailSender", _FakeSender)
+        rid = _make_run(qapi)
+        tok = _mint_token(rid)
+        assert qapi.post(f"/api/quote/{tok['token']}",
+                         json=_valid_body()).status_code == 200
+        (msg,) = _FakeSender.sent
+        assert msg.to == ["sales@dxpe.com"]  # the free-cascade generic inbox
+        assert "Quote received" in msg.subject
+        assert msg.metadata["supplier_domain"] == "dxpe.com"
+        assert msg.metadata["run_id"] == rid
+
+    def test_concierge_entry_sends_no_ack(self, qapi, monkeypatch):
+        import utils.email_sender as es
+        monkeypatch.setattr(es, "GmailSender", _FakeSender)
+        rid = _make_run(qapi)
+        resp = qapi.post("/api/admin/quotes", headers=_auth(),
+                         json={**_valid_body(), "run_id": rid,
+                               "supplier_domain": "dxpe.com"})
+        assert resp.status_code == 200
+        assert _FakeSender.sent == []
+
+    def test_ack_failure_never_fails_the_submission(self, qapi, monkeypatch):
+        import utils.email_sender as es
+
+        class _Boom:
+            def __init__(self, *a, **kw):
+                pass
+
+            def send(self, message):
+                raise RuntimeError("provider fell over")
+
+        monkeypatch.setattr(es, "GmailSender", _Boom)
+        rid = _make_run(qapi)
+        tok = _mint_token(rid)
+        resp = qapi.post(f"/api/quote/{tok['token']}", json=_valid_body())
+        assert resp.status_code == 200  # ack is fail-soft, non-fatal
+
+    def test_real_sender_path_is_stubbed_no_live_send(self, qapi):
+        # With the REAL GmailSender and the conftest-pinned gate, the ack is
+        # recorded as stubbed — zero network (criterion 10's seam).
+        rid = _make_run(qapi)
+        tok = _mint_token(rid)
+        assert qapi.post(f"/api/quote/{tok['token']}",
+                         json=_valid_body()).status_code == 200
+
+
+class TestDigestQuotesSection:
+    def test_digest_grows_a_quotes_section(self, qapi, monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_V1", "1")
+        rid = _make_run(qapi)
+        tok = _mint_token(rid)
+        qapi.post(f"/api/quote/{tok['token']}", json=_valid_body())
+        qapi.post(f"/api/quote/{tok['token']}",
+                  json=_valid_body(part_number="OTHER"))  # review (supersedes prior)
+        digest = qapi.get("/api/admin/send-governance/digest",
+                          headers=_auth()).json()
+        q = digest["quotes"]
+        # Both today's submissions listed; the review one pending action.
+        assert len(q["submitted"]) == 2
+        assert [r["status"] for r in q["review_pending"]] == ["review"]
+        assert q["review_pending"][0]["review_reasons"] == ["pn_differs"]
+
+    def test_expiring_soon_lists_active_quotes_near_the_window(self, qapi,
+                                                               monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_V1", "1")
+        rid = _make_run(qapi)
+        tok = _mint_token(rid)
+        out = qapi.post(f"/api/quote/{tok['token']}", json=_valid_body()).json()
+        import sqlite3
+        from utils import quote_store
+        conn = sqlite3.connect(quote_store._DB_PATH)
+        conn.execute("UPDATE quotes SET valid_until = ? WHERE id = ?",
+                     ((datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+                      out["quote_id"]))
+        conn.commit()
+        conn.close()
+        digest = qapi.get("/api/admin/send-governance/digest",
+                          headers=_auth()).json()
+        assert [r["quote_id"] for r in digest["quotes"]["expiring_soon"]] == \
+            [out["quote_id"]]
+
+    def test_quote_flag_off_digest_is_byte_identical(self, qapi, monkeypatch):
+        monkeypatch.setenv("SEND_GOVERNANCE_V1", "1")
+        monkeypatch.setenv("QUOTE_SUBMIT_V1", "")
+        digest = qapi.get("/api/admin/send-governance/digest",
+                          headers=_auth()).json()
+        assert "quotes" not in digest
+
+
+# ---------------------------------------------------------------------------
 # NO-AUTO-ORDER property (spec principle 4 / criterion 8)
 # ---------------------------------------------------------------------------
 

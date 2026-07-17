@@ -1061,6 +1061,21 @@ def _quote_overlay(quote: dict) -> dict:
         overlay["leadTimeSource"] = "quoted"              # the strongest provenance: a confirmed quote
     if payload.get("terms"):
         overlay["terms"] = payload["terms"]
+    # Night 11 (QUOTE_SUBMIT_V1) — buyer-card provenance from STRUCTURED quotes.
+    # Keyed on the payload's own fields (only quote_store records carry them), so
+    # email-parsed quotes and flag-off responses are byte-identical:
+    #   quoteConfirmedAt — "confirmed by supplier {date}" on the card.
+    #   quotedPartNumber/pnDiffers — a review-APPROVED alternative promotes
+    #   labelled as the QUOTED PN with equivalent-alternative framing, never
+    #   silently as the requested PN (spec §6 / criterion 4).
+    if payload.get("submitted_at"):
+        overlay["quoteConfirmedAt"] = payload["submitted_at"]
+    if payload.get("quote_id"):
+        overlay["quoteId"] = payload["quote_id"]  # order-provenance hook (spec §7)
+    if payload.get("pn_differs"):
+        overlay["pnDiffers"] = True
+        if payload.get("quoted_part_number"):
+            overlay["quotedPartNumber"] = payload["quoted_part_number"]
     return overlay
 
 
@@ -3533,7 +3548,52 @@ def admin_send_digest(day: Optional[str] = None, role: str = Depends(require_adm
     from utils import supplier_registry
     if day is not None and (len(day) != 10 or day[4] != "-" or day[7] != "-"):
         raise HTTPException(status_code=422, detail="day must be YYYY-MM-DD")
-    return supplier_registry.sent_messages_digest(day)
+    digest = supplier_registry.sent_messages_digest(day)
+    # Night 11 (QUOTE_SUBMIT_V1, spec §8): the digest grows a quotes section —
+    # no new email surface. Submitted-that-day (info), review-flagged pending
+    # (action), active quotes nearing expiry on an open request (info, ≤3 days).
+    # Flag OFF ⇒ the key is absent and the digest is byte-identical. Fail-soft:
+    # a quote-store error never breaks the send digest.
+    if _quote_submit_enabled():
+        try:
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            from utils import quote_store
+            day_val = digest.get("day") or ""
+            all_quotes = quote_store.get_quotes()
+            def _brief(q: dict) -> dict:
+                return {"quote_id": q["id"], "run_id": q.get("run_id"),
+                        "vendor_name": q.get("vendor_name"),
+                        "supplier_domain": q.get("supplier_domain"),
+                        "unit_price": q.get("unit_price"),
+                        "status": q["effective_status"],
+                        "review_reasons": q.get("review_reasons") or [],
+                        "submitted_via": q.get("submitted_via"),
+                        "valid_until": q.get("valid_until")}
+            soon = _dt.now(_tz.utc) + _td(days=3)
+            expiring = []
+            for q in all_quotes:
+                if q["effective_status"] != "active" or not q.get("valid_until"):
+                    continue
+                try:
+                    until = _dt.fromisoformat(q["valid_until"])
+                    if until.tzinfo is None:
+                        until = until.replace(tzinfo=_tz.utc)
+                except (ValueError, TypeError):
+                    continue
+                if until <= soon:
+                    expiring.append(_brief(q))
+            digest["quotes"] = {
+                "submitted": [_brief(q) for q in all_quotes
+                              if (q.get("submitted_at") or "")[:10] == day_val],
+                "review_pending": [_brief(q) for q in all_quotes
+                                   if q["effective_status"] == "review"],
+                "expiring_soon": expiring,
+            }
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "digest quotes section failed (send digest kept): %s", exc)
+    return digest
 
 
 @app.post("/api/admin/send-governance/release-queue/{draft_id}/reject")
@@ -5940,6 +6000,8 @@ def _record_structured_quote(
     )
     if quote is None:
         raise HTTPException(status_code=500, detail="Quote could not be recorded")
+    if submitted_via in ("rfq_link", "portal"):
+        _send_quote_ack(quote)  # stubbed under the full send stack; fail-soft
     return {
         "ok": True,
         "quote_id": quote["id"],
@@ -5948,6 +6010,46 @@ def _record_structured_quote(
         "pn_differs": quote["pn_differs"],
         "valid_until": quote["valid_until"],
     }
+
+
+def _send_quote_ack(quote: dict) -> None:
+    """The "quote received" supplier ack (spec §8) — routed through the SAME
+    GmailSender seam as every outbound (the governance stack + the
+    EMAIL_SEND_ENABLED gate run INSIDE sender.send, so this path structurally
+    cannot bypass them; it is stubbed until sends go live). Concierge entries
+    get no ack (the supplier already corresponded with a human). No recipient
+    on file ⇒ skip silently. Fail-soft: an ack failure never surfaces into the
+    submission response."""
+    try:
+        from utils import supplier_registry
+        from utils.email_sender import EmailMessage, GmailSender
+        recipients = supplier_registry.assemble_recipient_set(
+            quote.get("supplier_domain"))
+        to = recipients.get("to") or []
+        if not to:
+            return
+        pn = quote.get("quoted_part_number") or quote.get("requested_part_number")
+        msg = EmailMessage(
+            to=to,
+            subject=f"Quote received — {pn or 'your quote'}",
+            body=(
+                f"Hello {quote.get('vendor_name') or ''},\n\n"
+                f"Thanks — we received your quote"
+                f"{f' for {pn}' if pn else ''} "
+                f"(${quote.get('unit_price')} / unit, ref "
+                f"{quote.get('quote_number') or quote.get('id')}).\n\n"
+                f"It is now in front of the buyer. If they proceed, we'll be "
+                f"in touch at this address.\n\n"
+                f"Regards,\nArkim Procurement\nprocurement@arkim.ai"
+            ),
+            metadata={"quote_ack": quote.get("id"),
+                      "run_id": quote.get("run_id"),
+                      "supplier_domain": quote.get("supplier_domain")},
+        )
+        result = GmailSender().send(msg)
+        print(f"[QuoteAck] {result.status} -> {to} (quote {quote.get('id')})")
+    except Exception as exc:
+        print(f"[QuoteAck] failed (non-fatal): {exc}")
 
 
 # ---------------------------------------------------------------------------
