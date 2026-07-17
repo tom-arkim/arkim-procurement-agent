@@ -90,7 +90,7 @@ History note: the suite was once reported as "289 passing" but unverifiable beca
 
 When asked to "run tests," actually run them (`uv run pytest`) and report the real count. Never fabricate a result.
 
-**Two flag-gated redesigns are in flight, both default-OFF:** `INTAKE_TYPE_AWARE` (intake redesign) and `SCORING_V2` (scoring redesign). The suite is green with them off; flip a flag to exercise its redesign path.
+**Two flag-gated redesigns are in flight, both default-OFF:** `INTAKE_TYPE_AWARE` (intake redesign) and `SCORING_V2` (scoring redesign). The suite is green with them off; flip a flag to exercise its redesign path. **Night 11 added `QUOTE_SUBMIT_V1`** (supplier structured-quote submission: quote store + per-RFQ quote tokens + `/quote/{token}` form + portal open-requests + promotion via the existing quote index — see `QUOTE_SUBMISSION_SPEC.md` and `design/interactions.md`), also default-OFF and pinned off in the conftest flag list.
 
 ### Next hardening steps
 With a green baseline and the API characterization net, structural refactors are substantially unblocked — but verify per-area coverage first. Priority (see `docs/arkim_procurement_code_standard.md` §2):
