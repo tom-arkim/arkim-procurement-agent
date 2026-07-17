@@ -953,15 +953,23 @@ scores, floor, cache behavior, and API responses are byte-identical to before.**
 - **Confirmation promotion.** A Band-C supplier whose confirmed quote carries a
   price is promoted to Band A (top, if onboarded) at read time - the card shows
   the quoted price and leaves the outreach block.
-- **Cache honesty.** known_parts vendor edges are TTL'd hints (7d default,
-  `KNOWN_PARTS_EDGE_TTL_DAYS`) stamped with a matcher version; only TTL-fresh,
-  current-version edges short-circuit discovery. Only Band A/B edges are ever
-  written back; mocks/Band C never. Part-key identity persists indefinitely.
-  Cache REPLAY applies the band-aware floor, not the legacy one: flag-on, a
-  below-30 stored suitability is annotated (never dropped) and the band pass
-  re-scopes it exactly as fresh discovery does — a PN-evidence edge (Zoro,
-  10.5) survives the replay just as it survived the fresh run. Flag-off replay
-  keeps the legacy drop byte-identically.
+- **Cache honesty — seeds, never answers (design correction).** The known_parts
+  cache ACCELERATES discovery, it never replaces it: fresh Tier-2/3 discovery
+  runs on EVERY flag-on run (no cache short-circuit; replay-only runs served a
+  thinner page and let cached classification mistakes veto findings with no
+  fresh evidence to correct them). TTL-fresh, current-matcher-version edges
+  (7d default, `KNOWN_PARTS_EDGE_TTL_DAYS`) are merged into today's candidate
+  pool as SEEDS — deduped by domain (fresh result wins volatile fields; the
+  edge contributes its stored found_pn/match_type evidence where today's
+  listing showed none), then ONE band pass runs over the union. A known vendor
+  missing from today's search still surfaces and still gets the RFQ. Seed
+  floor verdicts are annotated (never dropped) and re-scoped by the band pass
+  exactly as fresh discovery; the TTL governs seed RELEVANCE, not replay
+  rights — an expired/invalidated edge simply stops seeding. The merge runs
+  after the write-back, so a seed never self-refreshes its own TTL. Only Band
+  A/B edges are ever written back; mocks/Band C never. Part-key identity
+  persists indefinitely. Flag-off keeps the legacy cache-first replay
+  byte-identically (always-serve, legacy floor, type gate).
 
 ---
 

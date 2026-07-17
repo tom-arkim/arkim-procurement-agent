@@ -1155,10 +1155,17 @@ def _transform_sourcing_results(raw: dict, quote_index: Optional[dict] = None) -
 # Background sourcing task
 # ---------------------------------------------------------------------------
 
-def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = None,
-                              banded: bool = False) -> dict:
-    """Reconstruct the SourcingAgent result shape from cached known_parts edges, so a
-    cache hit flows through the same transform/persist path without re-discovery.
+def _result_from_cached_edges(edges: list,
+                              request_noun_class: Optional[str] = None) -> dict:
+    """LEGACY (flag-off) cache replay: reconstruct the SourcingAgent result shape
+    from cached known_parts edges, so a cache hit flows through the same
+    transform/persist path without re-discovery.
+
+    RANKING_BANDS_V1 runs NEVER take this path (design correction, RANKING_BANDS
+    spec §6 primary rule: a fresh Tier-2/3 discovery ALWAYS runs — the cache
+    ACCELERATES discovery as seeds, it never replaces it; see
+    _seed_candidates_into_result). This function is the byte-identical legacy
+    behavior for flag-off runs only.
 
     A STALE cached price is marked low-confidence so the transform flags it
     priceUnverified (a stale price shown as current is an overclaim — same honesty
@@ -1215,45 +1222,18 @@ def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = N
             "lead_time_days":    e.get("lead_days") or 5,
             "from_cache":        True,
         }
-        if banded:
-            # RANKING_BANDS_V1 cache path: carry the explicit stale-price flag so
-            # priceUnverified survives the band pass (which replaces
-            # confidence_score — the legacy 1.0-confidence stale marker — with
-            # evidence-derived confidence). Flag-off cands never grow this key.
-            cand["price_stale"] = bool(e.get("price_stale"))
         # Fix B1 — drop cached edges already carrying a rejection_reason, and
         # apply the suitability floor to the rest (same threshold as live runs).
         if e.get("rejection_reason"):
             continue
         if float(cand["suitability_score"] or 0.0) < TIER_SURFACE_MIN_SUITABILITY:
             cand["rejection_reason"] = "suitability_below_floor"
-            if banded:
-                # RANKING_BANDS_V1 — the floor verdict is ANNOTATED, never a
-                # drop (annotate-don't-remove, same as fresh discovery): the
-                # band pass that ALWAYS follows on this path
-                # (apply_ranking_bands → rescope_floor) re-scopes it by band —
-                # Band A / Band C / Band-B-with-PN-evidence are cleared, Band B
-                # without PN evidence keeps the rejection and stays off the UI.
-                # Dropping here starved the band pass of the very candidates
-                # the band model protects (observed live: Zoro, legacy
-                # suitability 10.5 but found_pn=84004-28SP — surfaced by the
-                # fresh flag-on run, then floored on the cache-hit re-run), so
-                # a second run of the same part showed FEWER candidates than
-                # the first. The edge carries everything banding needs
-                # (found_pn/match_type/source_url), so no Band-C defaulting is
-                # involved. Flag OFF: the legacy drop below, byte-identical.
-                print(
-                    f"[Sourcing] Floored cached edge (band rescope pending): "
-                    f"{cand['vendor_name']} suitability={cand['suitability_score']:.1f}% "
-                    f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
-                )
-            else:
-                print(
-                    f"[Sourcing] Rejected cached edge (suitability_below_floor): "
-                    f"{cand['vendor_name']} suitability={cand['suitability_score']:.1f}% "
-                    f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
-                )
-                continue
+            print(
+                f"[Sourcing] Rejected cached edge (suitability_below_floor): "
+                f"{cand['vendor_name']} suitability={cand['suitability_score']:.1f}% "
+                f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
+            )
+            continue
         # T2 — cache type-gate: drop a confirmed-different-type cached edge. The
         # floor above catches below-score edges; this catches wrong-PART-TYPE
         # edges that score well (the :987-990 known-gap, now closed).
@@ -1278,6 +1258,125 @@ def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = N
         "warranty_banner": None, "urgency_applied": "cached",
         "filters_applied": ["known_parts_cache"], "tier3_capability_pivot": False,
     }
+
+
+def _seed_candidates_into_result(result: dict, seed_edges: list,
+                                 request_noun_class: Optional[str],
+                                 searched_pn: Optional[str]) -> dict:
+    """RANKING_BANDS_V1 seed merge (design correction, spec §6 primary rule):
+    the known_parts cache ACCELERATES discovery, it never replaces it. Fresh
+    Tier-2/3 discovery has already run; TTL-fresh edges now join TODAY'S
+    candidate pool so a known vendor missing from today's search still surfaces
+    (and still gets the RFQ), then ONE band pass runs over the union.
+
+    Merge rules:
+      - Dedupe by normalized source_url domain (name fallback): a vendor found
+        fresh today stays ONE candidate — the fresh result wins volatile fields
+        (price, lead, scores); the edge contributes its stored evidence
+        (found_pn / match_type) only where today's listing showed none.
+      - A seed-only edge is reconstructed like the legacy replay candidate and
+        appended to its stored tier, marked seeded_from_cache for audit.
+      - The legacy suitability floor is ANNOTATED, never a drop — the band
+        pass (rescope_floor) re-scopes it exactly as fresh discovery does.
+      - Type gate (Fix-B1 protection): a seed whose vendor+url class is
+        confirmed DIFFERENT from the request's is dropped — genuine
+        cross-class junk must not surface via the cache.
+      - Stored rejection_reason edges never seed (unchanged Fix-B1 rule).
+
+    Fail-soft at the caller; this function only mutates + returns `result`.
+    Flag-off runs never reach here (their replay path is _result_from_cached_edges)."""
+    from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
+    from utils.sourcing_archieved.scoring import classify_result_noun_class_dominant
+    from utils.supplier_registry import _normalize_domain
+
+    def _key(url: Optional[str], name: Optional[str]) -> str:
+        dom = _normalize_domain(url) if url else ""
+        return dom or (name or "").strip().lower()
+
+    existing: dict = {}
+    for tier_key in ("tier_1", "tier_2", "tier_3"):
+        for c in (result.get(tier_key) or {}).get("results") or []:
+            k = _key(c.get("source_url"), c.get("vendor_name"))
+            if k:
+                existing.setdefault(k, c)
+
+    seeded = 0
+    for e in seed_edges:
+        if e.get("rejection_reason"):
+            continue
+        name = e.get("display_name") or e.get("supplier_id")
+        key = _key(e.get("source_url"), name)
+        if not key:
+            continue
+        mt = e.get("match_type") or "Functional Alternative"
+        pn_status = ("exact_match" if mt == "Exact OEM"
+                     else "partial_match" if mt == "Aftermarket Compatible"
+                     else "not_visible")
+        if key in existing:
+            # Vendor also found fresh today: fresh fields win; the edge only
+            # contributes PN evidence today's listing didn't show.
+            fresh = existing[key]
+            if (e.get("found_pn") or "").strip() and \
+                    not (fresh.get("found_part_number") or "").strip():
+                fresh["found_part_number"] = e.get("found_pn")
+                if fresh.get("pn_match_status") in (None, "", "not_visible"):
+                    fresh["pn_match_status"] = pn_status
+                if not fresh.get("match_type"):
+                    fresh["match_type"] = mt
+            continue
+        # Type gate on seed-only edges (vendor+url classification, the same
+        # verdict table as the legacy replay): confirmed-different class ⇒ drop.
+        if request_noun_class is not None:
+            r_cls = classify_result_noun_class_dominant(
+                name, None, "", e.get("source_url") or "")
+            if r_cls is not None and r_cls != request_noun_class:
+                print(f"[Sourcing] Seed edge dropped (type_gate): {name} "
+                      f"result_class={r_cls} != request_class={request_noun_class}")
+                continue
+        price = e.get("price")
+        cand = {
+            "vendor_name":       name,
+            "base_price":        price,
+            "price_tbd":         price is None,
+            "requires_rfq":      e.get("purchase_channel") == "rfq",
+            "source_url":        e.get("source_url"),
+            "match_type":        mt,
+            "pn_match_status":   pn_status,
+            "found_part_number": e.get("found_pn"),
+            "suitability_score": e.get("suitability") or 0,
+            "confidence_score":  1.0 if e.get("price_stale") else 0.0,
+            "lead_time_days":    e.get("lead_days") or 5,
+            "from_cache":        True,
+            "seeded_from_cache": True,
+            "price_stale":       bool(e.get("price_stale")),
+        }
+        if float(cand["suitability_score"] or 0.0) < TIER_SURFACE_MIN_SUITABILITY:
+            # Annotate-don't-remove: the band pass re-scopes the floor verdict
+            # (Band A / C / B-with-PN-evidence cleared; evidence-less Band B
+            # keeps it and stays off the UI) — same rule as fresh discovery.
+            cand["rejection_reason"] = "suitability_below_floor"
+            print(f"[Sourcing] Floored seed edge (band rescope pending): {name} "
+                  f"suitability={float(cand['suitability_score']):.1f}% "
+                  f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor")
+        t = e.get("tier") if e.get("tier") in (1, 2, 3) else (3 if price is None else 2)
+        tier = result.setdefault(f"tier_{t}", {"results": [], "count": 0})
+        tier.setdefault("results", []).append(cand)
+        existing[key] = cand
+        seeded += 1
+
+    for tier_key in ("tier_1", "tier_2", "tier_3"):
+        tier = result.get(tier_key) or {}
+        if "results" in tier:
+            tier["count"] = len(tier["results"])
+
+    # ONE band pass over the union (idempotent re-annotation — the same pass
+    # the Step-3 tier-1 re-derive fix re-applies). Keyed off the result's own
+    # marker so an un-banded (band-pass-failed) result stays legacy-shaped.
+    if "ranking_bands:v1" in (result.get("filters_applied") or []):
+        from utils.procurement_agent.ranking_bands import apply_ranking_bands
+        apply_ranking_bands(result, searched_pn)
+    print(f"[Sourcing] Seed merge: {seeded} cached edge(s) joined fresh discovery")
+    return result
 
 
 def _run_sourcing_background(
@@ -1305,10 +1404,23 @@ def _run_sourcing_background(
 
     result = None
 
-    # ── Step 0: Cache-first (known_parts) ────────────────────────────────────
+    # ── Step 0: known_parts cache read ───────────────────────────────────────
     # Canonical part-key (aliases + PN-normalize) so the cache doesn't fork on
     # "Gusher" vs "Gusher Pumps". exact_only runs bypass the cache (filtered set).
+    #
+    # RANKING_BANDS_V1 — DESIGN CORRECTION (spec §6 primary rule): the cache
+    # ACCELERATES discovery, it never REPLACES it. Fresh Tier-2/3 discovery runs
+    # on EVERY flag-on run — no cache short-circuit. TTL-fresh, current-version
+    # edges are collected as SEEDS and merged into the fresh candidate pool
+    # AFTER discovery (_seed_candidates_into_result); the TTL now governs seed
+    # RELEVANCE, not replay rights (an expired edge simply stops seeding).
+    # Within-TTL replay-only runs served a thinner page (4-5 vs 15+ candidates),
+    # could never surface newly-listed vendors, and let cached classification
+    # mistakes veto findings with no fresh evidence to correct them.
+    # Flag OFF: the legacy cache-first replay below is byte-identical.
     part_key = ""
+    seed_edges: list = []
+    seed_req_cls = None
     try:
         from utils import known_parts
         from utils.sourcing_archieved.scoring import _query_noun_class
@@ -1316,50 +1428,34 @@ def _run_sourcing_background(
             specs_dict.get("manufacturer"), specs_dict.get("part_number"))
         if part_key and not specs_dict.get("exact_only"):
             edges = known_parts.get_edges(part_key)
-            # RANKING_BANDS_V1 (spec §6): vendor edges are TTL'd HINTS, not answers.
-            # Only TTL-fresh, current-matcher-version edges may short-circuit
-            # discovery (TTL-fresh re-verification); a stale/invalidated edge set
-            # is treated as a MISS so fresh Tier-2/3 discovery runs — a frozen
-            # verdict is never replayed. Flag OFF: edges carry no edge_stale key
-            # and the legacy always-serve behavior is byte-identical.
             from utils.procurement_agent.ranking_bands import ranking_bands_active
-            _bands_on = ranking_bands_active()
-            if edges and _bands_on:
-                fresh = [e for e in edges if not e.get("edge_stale")]
-                if not fresh:
-                    log.info("[%s] known_parts edges stale/invalidated (%d) — running fresh discovery",
-                             run_id, len(edges))
-                edges = fresh
-            if edges:
-                # T2 — detect the request's noun-class once, thread it into the
-                # cache reconstruction so wrong-PART-TYPE cached edges are dropped
-                # (a pump edge cached under a seal part-key, etc.). None on
-                # undetectable → _result_from_cached_edges keeps everything.
-                # Built directly off AssetSpecs fields (not SourcingAgent._dict_to_specs)
-                # so the cache path doesn't depend on the SourcingAgent class — which
-                # tests mock, and which the discovery path below replaces wholesale.
+            if ranking_bands_active():
+                seed_edges = [e for e in edges if not e.get("edge_stale")]
+                if seed_edges:
+                    # T2 — the request's noun-class, threaded into the seed
+                    # merge's type gate. Built directly off AssetSpecs fields
+                    # (not SourcingAgent._dict_to_specs) so the seed path does
+                    # not depend on the SourcingAgent class — which tests mock.
+                    try:
+                        seed_req_cls = _query_noun_class(_specs_from_dict(specs_dict))
+                    except Exception:
+                        seed_req_cls = None
+                    log.info("[%s] known_parts: %d TTL-fresh edge(s) will seed the "
+                             "discovery merge (discovery still runs)",
+                             run_id, len(seed_edges))
+            elif edges:
+                # Legacy flag-off cache-first replay — byte-identical behavior.
                 req_cls = None
                 try:
                     req_cls = _query_noun_class(_specs_from_dict(specs_dict))
                 except Exception:
                     req_cls = None
-                result = _result_from_cached_edges(edges, request_noun_class=req_cls,
-                                                   banded=_bands_on)
-                if _bands_on:
-                    # Band the reconstructed result so the response gains the
-                    # findings/outreach shape on cache hits too. Fail-soft.
-                    try:
-                        from utils.procurement_agent.ranking_bands import apply_ranking_bands
-                        apply_ranking_bands(result, specs_dict.get("part_number"))
-                        result["filters_applied"] = list(result.get("filters_applied") or []) \
-                            + ["ranking_bands:v1"]
-                    except Exception as exc:
-                        log.warning("[%s] ranking_bands on cache hit failed (un-banded kept): %s",
-                                    run_id, exc)
+                result = _result_from_cached_edges(edges, request_noun_class=req_cls)
                 log.info("[%s] known_parts cache HIT (%d suppliers) — skipping discovery", run_id, len(edges))
     except Exception as exc:
         log.warning("[%s] known_parts cache read failed: %s", run_id, exc)
         result = None
+        seed_edges = []
 
     if result is None:
         # ── Step 1: Sourcing (discovery) ─────────────────────────────────────
@@ -1466,6 +1562,22 @@ def _run_sourcing_background(
                 log.info("[%s] known_parts write-back: %d supplier edge(s) for %r", run_id, written, part_key)
         except Exception as exc:
             log.warning("[%s] known_parts write-back failed: %s", run_id, exc)
+
+        # ── Seed merge (RANKING_BANDS_V1 design correction) ──────────────────
+        # TTL-fresh cached edges join TODAY'S discovery pool (dedupe by domain,
+        # fresh wins, one band pass over the union) — a known vendor missing
+        # from today's search still surfaces and still gets the RFQ. Runs AFTER
+        # the write-back so seed-only edges never self-refresh their own TTL.
+        # seed_edges is only ever non-empty on flag-on runs. Fail-soft: a merge
+        # error keeps the fresh-only result.
+        if seed_edges:
+            try:
+                result = _seed_candidates_into_result(
+                    result, seed_edges, seed_req_cls,
+                    specs_dict.get("part_number"))
+            except Exception as exc:
+                log.warning("[%s] seed merge failed (fresh-only result kept): %s",
+                            run_id, exc)
 
     # ── Step 3: Persist final results and advance phase (both paths) ─────────
     # Night 5 (I4) — registry-backed Tier 1 is re-derived FRESH per run, on BOTH

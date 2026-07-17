@@ -844,9 +844,11 @@ class TestMigration:
 
 
 class TestCacheFirstReadPolicy:
-    """Spec §9 criterion 6 at the API seam: a repeat search never replays a frozen
-    verdict — stale/invalidated edges → fresh discovery; TTL-fresh current-version
-    edges → served (re-verification path) with the banded response shape."""
+    """Spec §9 criterion 6 at the API seam, under the DESIGN CORRECTION (spec §6
+    primary rule): the cache ACCELERATES discovery, it never replaces it. A
+    repeat search never replays a frozen verdict — fresh discovery runs on
+    EVERY flag-on run; stale/invalidated edges don't even seed; TTL-fresh
+    current-version edges SEED the merge alongside today's discovery."""
 
     def _specs_json(self):
         return json.dumps({
@@ -885,7 +887,10 @@ class TestCacheFirstReadPolicy:
         assert "Fresh Discovery Vendor" in vendors   # discovery ran
         assert "Sealit123" not in vendors            # frozen verdict NOT replayed
 
-    def test_fresh_edges_served_with_banded_response(self, api, kp, monkeypatch):
+    def test_fresh_edges_seed_the_discovery_merge(self, api, kp, monkeypatch):
+        # DESIGN CORRECTION: TTL-fresh edges no longer short-circuit discovery —
+        # discovery runs AND the cached vendor still surfaces (seeded into the
+        # union), with the banded response shape over the merged pool.
         from utils.procurement_agent.tests.test_api_server import (
             _create_run, _set_run, _mock_sourcing_pipeline)
         monkeypatch.setenv("RANKING_BANDS_V1", "1")
@@ -898,9 +903,9 @@ class TestCacheFirstReadPolicy:
         detail = api.get(f"/api/runs/{rid}").json()
         sr = detail["sourcing_results"]
         vendors = [c["vendorName"] for c in sr["tier2"]]
-        assert "Fresh Discovery Vendor" not in vendors   # TTL-fresh: served from cache
-        assert any("ealit123" in v for v in vendors)
-        # The cache-hit response is banded: findings/outreach shape present.
+        assert "Fresh Discovery Vendor" in vendors       # discovery ALWAYS runs
+        assert any("ealit123" in v for v in vendors)     # the seed still surfaces
+        # The merged response is banded: findings/outreach shape present.
         assert "findings" in sr and "outreachTargets" in sr
 
     def test_version_bump_forces_rediscovery(self, api, kp, monkeypatch):
@@ -917,6 +922,8 @@ class TestCacheFirstReadPolicy:
         detail = api.get(f"/api/runs/{rid}").json()
         vendors = [c["vendorName"] for c in detail["sourcing_results"]["tier2"]]
         assert "Fresh Discovery Vendor" in vendors   # invalidated → rediscovered
+        # ...and the version-invalidated edge does not even SEED the merge.
+        assert not any("ealit123" in v for v in vendors)
 
     def test_flag_off_cache_behavior_unchanged(self, api, kp, monkeypatch):
         from utils.procurement_agent.tests.test_api_server import (
