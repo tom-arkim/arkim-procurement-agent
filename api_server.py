@@ -6022,8 +6022,90 @@ def quote_submit(token: str, body: QuoteSubmissionBody, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Path B — the claimed-supplier portal submit (claim-token-auth'd)
+# Path B — the claimed-supplier portal: open requests + quote history + submit
+# (claim-token-auth'd; every route additionally gated on QUOTE_SUBMIT_V1)
 # ---------------------------------------------------------------------------
+
+@app.get("/api/portal/{token}/open-requests")
+def portal_open_requests(token: str, request: Request):
+    """T5: the claimed supplier's OPEN requests — the runs with an un-resolved
+    RFQ addressed to THEIR domain (sent_messages status in OPEN_RFQ_STATUSES),
+    deduped per run, each with the request identity (from the run's specs) and
+    their own quote state on it. THEIR view only: the domain comes from the
+    validated claim token; no other supplier's RFQs, quotes, or existence are
+    visible. Runs that no longer resolve are skipped (never a fabricated
+    row). Fail-soft on the stores ([]), never a 500 on the public surface."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    prow = _validate_portal_token(request, token)
+    dom = prow["supplier_domain"]
+    from utils import quote_store, supplier_registry
+    requests_out: list = []
+    seen_runs: set = set()
+    try:
+        for m in supplier_registry.get_sent_messages(domain=dom):  # newest first
+            rid = m.get("run_id")
+            if not rid or rid in seen_runs:
+                continue
+            if m.get("status") not in supplier_registry.OPEN_RFQ_STATUSES:
+                continue
+            seen_runs.add(rid)
+            specs = _run_specs_for_quote(rid)
+            if specs is None:
+                continue  # run vanished — never fabricate a request row
+            quoted = None
+            for q in quote_store.get_quotes(run_id=rid, supplier_domain=dom):
+                if q["effective_status"] in ("active", "review"):
+                    quoted = {"status": q["effective_status"],
+                              "unit_price": q["unit_price"],
+                              "submitted_at": q["submitted_at"]}
+                break  # newest first — only the latest submission matters
+            requests_out.append({
+                "run_id": rid,
+                "manufacturer": specs.get("manufacturer"),
+                "part_number": specs.get("part_number"),
+                "quantity": specs.get("quantity"),
+                "sent_at": m.get("sent_at"),
+                "quoted": quoted,
+            })
+    except Exception as exc:  # public surface: degrade, never 500
+        import logging
+        logging.getLogger(__name__).warning(
+            "portal open-requests read failed for %s: %s", dom, exc)
+        requests_out = []
+    return JSONResponse(content={"requests": requests_out},
+                        headers=_portal_response_headers({}))
+
+
+@app.get("/api/portal/{token}/quotes")
+def portal_quote_history(token: str, request: Request):
+    """T5: the supplier's OWN quote history — every quote from their domain
+    (all lifecycles, effective status shown honestly incl. read-time expiry),
+    newest first. Nothing cross-supplier: the domain is the token's; the rows
+    expose no buyer identity and no other suppliers. Fail-soft ([])."""
+    if not _quote_submit_enabled():
+        _quote_flag_off_404()
+    prow = _validate_portal_token(request, token)
+    from utils import quote_store
+    history = [
+        {
+            "quote_id": q["id"],
+            "run_id": q.get("run_id"),
+            "part_number": q.get("requested_part_number"),
+            "quoted_part_number": q.get("quoted_part_number"),
+            "unit_price": q["unit_price"],
+            "quantity": q.get("quantity"),
+            "lead_time": q.get("lead_time"),
+            "status": q["effective_status"],
+            "submitted_at": q["submitted_at"],
+            "submitted_via": q["submitted_via"],
+            "valid_until": q.get("valid_until"),
+        }
+        for q in quote_store.get_quotes(supplier_domain=prow["supplier_domain"])
+    ]
+    return JSONResponse(content={"quotes": history},
+                        headers=_portal_response_headers({}))
+
 
 @app.post("/api/portal/{token}/quotes")
 def portal_quote_submit(token: str, body: PortalQuoteBody, request: Request):

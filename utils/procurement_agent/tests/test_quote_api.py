@@ -412,6 +412,103 @@ class TestPathBPortal:
 
 
 # ---------------------------------------------------------------------------
+# Path B — T5: open requests + quote history (own-only visibility)
+# ---------------------------------------------------------------------------
+
+class TestPortalOpenRequestsAndHistory:
+    def _setup(self, qapi, monkeypatch, tmp_path):
+        from utils import claim_tokens as ct, supplier_registry
+        monkeypatch.setenv("SUPPLIER_PORTAL_V1", "1")
+        monkeypatch.setattr(ct, "CLAIM_TOKENS_ENABLED", True)
+        monkeypatch.setattr(ct, "_DB_PATH", str(tmp_path / "claim_tokens.sqlite"))
+        rid = _make_run(qapi)
+        supplier_registry.record_sent_message(
+            run_id=rid, supplier_domain="dxpe.com",
+            vendor_name="DXP Enterprises", to=["sales@dxpe.com"],
+            status="stubbed", part_key="gusher pumps|84004-28")
+        claim = ct.generate_for("dxpe.com")
+        return rid, claim
+
+    def test_open_requests_lists_the_suppliers_own_rfqs_only(self, qapi,
+                                                             monkeypatch,
+                                                             tmp_path):
+        rid, claim = self._setup(qapi, monkeypatch, tmp_path)
+        from utils import supplier_registry
+        # Another supplier's RFQ on another run must NOT appear.
+        other = _make_run(qapi)
+        supplier_registry.record_sent_message(
+            run_id=other, supplier_domain="sealit.example", vendor_name="Seal It",
+            to=["sales@sealit.example"], status="stubbed")
+        body = qapi.get(f"/api/portal/{claim['token']}/open-requests").json()
+        assert [r["run_id"] for r in body["requests"]] == [rid]
+        (row,) = body["requests"]
+        assert row["manufacturer"] == "Gusher Pumps"
+        assert row["part_number"] == "84004-28"
+        assert row["quantity"] == 2
+        assert row["quoted"] is None
+
+    def test_resolved_rfq_statuses_are_not_open(self, qapi, monkeypatch,
+                                                tmp_path):
+        rid, claim = self._setup(qapi, monkeypatch, tmp_path)
+        from utils import supplier_registry
+        replied_run = _make_run(qapi)
+        mid = supplier_registry.record_sent_message(
+            run_id=replied_run, supplier_domain="dxpe.com", vendor_name="DXP",
+            to=["sales@dxpe.com"], status="stubbed")
+        supplier_registry.update_sent_message_status(mid, "replied")
+        body = qapi.get(f"/api/portal/{claim['token']}/open-requests").json()
+        assert [r["run_id"] for r in body["requests"]] == [rid]
+
+    def test_quoted_marker_appears_after_submit(self, qapi, monkeypatch,
+                                                tmp_path):
+        rid, claim = self._setup(qapi, monkeypatch, tmp_path)
+        assert qapi.post(f"/api/portal/{claim['token']}/quotes",
+                         json={**_valid_body(), "run_id": rid}).status_code == 200
+        body = qapi.get(f"/api/portal/{claim['token']}/open-requests").json()
+        (row,) = body["requests"]
+        assert row["quoted"] == {"status": "active", "unit_price": 189.0,
+                                 "submitted_at": row["quoted"]["submitted_at"]}
+
+    def test_history_is_own_quotes_only_with_honest_status(self, qapi,
+                                                           monkeypatch,
+                                                           tmp_path):
+        rid, claim = self._setup(qapi, monkeypatch, tmp_path)
+        qapi.post(f"/api/portal/{claim['token']}/quotes",
+                  json={**_valid_body(), "run_id": rid})
+        # Another supplier's quote on the same run must NOT appear.
+        from utils import quote_store
+        quote_store.submit_quote(supplier_domain="sealit.example",
+                                 unit_price=53.25, submitted_via="concierge",
+                                 run_id=rid)
+        body = qapi.get(f"/api/portal/{claim['token']}/quotes").json()
+        (q,) = body["quotes"]
+        assert q["unit_price"] == 189.0
+        assert q["status"] == "active"
+        assert q["submitted_via"] == "portal"
+        # No cross-supplier fields leak (no domain of others, no buyer data).
+        assert "supplier_domain" not in q
+
+    def test_t5_routes_absent_when_quote_flag_off(self, qapi, monkeypatch,
+                                                  tmp_path):
+        rid, claim = self._setup(qapi, monkeypatch, tmp_path)
+        monkeypatch.setenv("QUOTE_SUBMIT_V1", "")
+        unknown = qapi.get("/api/definitely-not-a-route")
+        for path in (f"/api/portal/{claim['token']}/open-requests",
+                     f"/api/portal/{claim['token']}/quotes"):
+            resp = qapi.get(path)
+            assert resp.status_code == 404
+            assert resp.content == unknown.content
+
+    def test_t5_routes_reject_bad_claim_token(self, qapi, monkeypatch,
+                                              tmp_path):
+        self._setup(qapi, monkeypatch, tmp_path)
+        unknown = qapi.get("/api/definitely-not-a-route")
+        resp = qapi.get("/api/portal/garbage-claim-token/open-requests")
+        assert resp.status_code == 404
+        assert resp.content == unknown.content
+
+
+# ---------------------------------------------------------------------------
 # Path C — concierge entry + review queue (criterion 3 wiring)
 # ---------------------------------------------------------------------------
 
