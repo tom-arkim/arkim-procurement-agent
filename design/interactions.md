@@ -957,6 +957,11 @@ scores, floor, cache behavior, and API responses are byte-identical to before.**
   `KNOWN_PARTS_EDGE_TTL_DAYS`) stamped with a matcher version; only TTL-fresh,
   current-version edges short-circuit discovery. Only Band A/B edges are ever
   written back; mocks/Band C never. Part-key identity persists indefinitely.
+  Cache REPLAY applies the band-aware floor, not the legacy one: flag-on, a
+  below-30 stored suitability is annotated (never dropped) and the band pass
+  re-scopes it exactly as fresh discovery does — a PN-evidence edge (Zoro,
+  10.5) survives the replay just as it survived the fresh run. Flag-off replay
+  keeps the legacy drop byte-identically.
 
 ---
 

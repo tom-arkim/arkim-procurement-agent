@@ -1227,12 +1227,33 @@ def _result_from_cached_edges(edges: list, request_noun_class: Optional[str] = N
             continue
         if float(cand["suitability_score"] or 0.0) < TIER_SURFACE_MIN_SUITABILITY:
             cand["rejection_reason"] = "suitability_below_floor"
-            print(
-                f"[Sourcing] Rejected cached edge (suitability_below_floor): "
-                f"{cand['vendor_name']} suitability={cand['suitability_score']:.1f}% "
-                f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
-            )
-            continue
+            if banded:
+                # RANKING_BANDS_V1 — the floor verdict is ANNOTATED, never a
+                # drop (annotate-don't-remove, same as fresh discovery): the
+                # band pass that ALWAYS follows on this path
+                # (apply_ranking_bands → rescope_floor) re-scopes it by band —
+                # Band A / Band C / Band-B-with-PN-evidence are cleared, Band B
+                # without PN evidence keeps the rejection and stays off the UI.
+                # Dropping here starved the band pass of the very candidates
+                # the band model protects (observed live: Zoro, legacy
+                # suitability 10.5 but found_pn=84004-28SP — surfaced by the
+                # fresh flag-on run, then floored on the cache-hit re-run), so
+                # a second run of the same part showed FEWER candidates than
+                # the first. The edge carries everything banding needs
+                # (found_pn/match_type/source_url), so no Band-C defaulting is
+                # involved. Flag OFF: the legacy drop below, byte-identical.
+                print(
+                    f"[Sourcing] Floored cached edge (band rescope pending): "
+                    f"{cand['vendor_name']} suitability={cand['suitability_score']:.1f}% "
+                    f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
+                )
+            else:
+                print(
+                    f"[Sourcing] Rejected cached edge (suitability_below_floor): "
+                    f"{cand['vendor_name']} suitability={cand['suitability_score']:.1f}% "
+                    f"< {TIER_SURFACE_MIN_SUITABILITY:.0f}% floor"
+                )
+                continue
         # T2 — cache type-gate: drop a confirmed-different-type cached edge. The
         # floor above catches below-score edges; this catches wrong-PART-TYPE
         # edges that score well (the :987-990 known-gap, now closed).
