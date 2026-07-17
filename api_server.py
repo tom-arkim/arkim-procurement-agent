@@ -1324,15 +1324,30 @@ def _seed_candidates_into_result(result: dict, seed_edges: list,
                 if not fresh.get("match_type"):
                     fresh["match_type"] = mt
             continue
-        # Type gate on seed-only edges (vendor+url classification, the same
-        # verdict table as the legacy replay): confirmed-different class ⇒ drop.
+        # Type gate on seed-only edges — the PN-evidence exception. The stored
+        # class comes from vendor+url ONLY (the weakest signal; the fresh path
+        # scores with full snippet/title context and never hard-drops — its
+        # TypeGate is multiplicative). Observed live: Springer Pumps classed
+        # PUMP at write (a seal kit listed on a pump-parts page) while carrying
+        # found_pn=84004-28SP — the requested family. Rule: an edge WITH PN
+        # evidence reaches banding regardless of stored class (annotate, don't
+        # remove — banding's evidence rules decide); an edge with NO PN
+        # evidence and a confirmed class mismatch keeps the Fix-B1 drop
+        # (genuine cross-class junk must not surface via the cache).
+        has_pn_evidence = bool((e.get("found_pn") or "").strip())
+        type_gate_note = None
         if request_noun_class is not None:
             r_cls = classify_result_noun_class_dominant(
                 name, None, "", e.get("source_url") or "")
             if r_cls is not None and r_cls != request_noun_class:
-                print(f"[Sourcing] Seed edge dropped (type_gate): {name} "
+                if not has_pn_evidence:
+                    print(f"[Sourcing] Seed edge dropped (type_gate): {name} "
+                          f"result_class={r_cls} != request_class={request_noun_class}")
+                    continue
+                type_gate_note = "class_mismatch_pn_evidence"
+                print(f"[Sourcing] Seed edge kept despite class mismatch "
+                      f"(PN evidence {e.get('found_pn')}): {name} "
                       f"result_class={r_cls} != request_class={request_noun_class}")
-                continue
         price = e.get("price")
         cand = {
             "vendor_name":       name,
@@ -1350,6 +1365,8 @@ def _seed_candidates_into_result(result: dict, seed_edges: list,
             "seeded_from_cache": True,
             "price_stale":       bool(e.get("price_stale")),
         }
+        if type_gate_note:
+            cand["type_gate_note"] = type_gate_note  # audit: why the gate stood down
         if float(cand["suitability_score"] or 0.0) < TIER_SURFACE_MIN_SUITABILITY:
             # Annotate-don't-remove: the band pass re-scopes the floor verdict
             # (Band A / C / B-with-PN-evidence cleared; evidence-less Band B

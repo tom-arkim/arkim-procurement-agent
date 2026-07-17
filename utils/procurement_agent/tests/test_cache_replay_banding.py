@@ -156,6 +156,94 @@ class TestSeedMergeRules:
 
 
 # ---------------------------------------------------------------------------
+# Type gate on seeds — the PN-evidence exception (the Springer case)
+# ---------------------------------------------------------------------------
+
+class TestSeedTypeGatePnEvidenceException:
+    """Live evidence: 'Rejected cached edge (type_gate): Springer Pumps
+    result_class=PUMP != request_class=SEAL' — while the edge carried
+    found_pn=84004-28SP (the requested seal-kit family; a kit listed on a
+    pump-parts page, classed PUMP at write from vendor+url only — the weakest
+    signal). Rule: PN evidence reaches banding regardless of stored class
+    (annotate, don't remove); no PN evidence + confirmed mismatch keeps the
+    Fix-B1 drop. (The FRESH path never had this hard-drop — its TypeGate is
+    multiplicative and sees full snippet context; this closes the asymmetry.)"""
+
+    _SPRINGER = {
+        "supplier_id": "springerpumps.com", "display_name": "Springer Pumps",
+        "purchase_channel": "rfq", "tier": 3,
+        "match_type": "Aftermarket Compatible", "found_pn": "84004-28SP",
+        "suitability": 0.5, "price": None,
+        "source_url": "https://www.springerpumps.com/gusher-84004-28sp",
+    }
+    _PUMP_JUNK = {
+        "supplier_id": "pumpworld.example", "display_name": "Pump World",
+        "purchase_channel": "rfq", "tier": 3,
+        "match_type": "Functional Alternative", "found_pn": None,
+        "suitability": 55.0, "price": None,
+        "source_url": "https://pumpworld.example/centrifugal-pumps",
+    }
+
+    def _query_cls(self, api):
+        from utils.sourcing_archieved.scoring import _query_noun_class
+        return _query_noun_class(api._api_server._specs_from_dict(_SPECS))
+
+    def test_springer_shaped_seed_reaches_banding_and_surfaces(self, api):
+        # PN evidence + class mismatch: the gate stands down (annotated), the
+        # floor is rescoped by the band pass — Band B, on the page.
+        q_cls = self._query_cls(api)
+        assert q_cls == "SEAL"  # the live request class; premise of the case
+        result = api._api_server._seed_candidates_into_result(
+            _fresh_result(_seal_it()), [dict(self._SPRINGER)], q_cls, _GUSHER_PN)
+        (springer,) = [c for c in result["tier_3"]["results"]
+                       if c["vendor_name"] == "Springer Pumps"]
+        assert springer["type_gate_note"] == "class_mismatch_pn_evidence"
+        assert springer["band"] == "B"                 # compatible-PN evidence
+        assert springer["rejection_reason"] is None    # floor rescoped
+        # Genuine cross-class junk (no PN evidence) keeps the Fix-B1 drop.
+        result2 = api._api_server._seed_candidates_into_result(
+            _fresh_result(_seal_it()), [dict(self._PUMP_JUNK)], q_cls, _GUSHER_PN)
+        assert not any(c["vendor_name"] == "Pump World"
+                       for tk in ("tier_1", "tier_2", "tier_3")
+                       for c in result2[tk]["results"])
+
+    def test_springer_surfaces_end_to_end_junk_stays_off(self, api, monkeypatch,
+                                                         tmp_path):
+        # Through the REAL background path: both seed shapes in the cache; the
+        # PN-evidence one lands in findings, the junk one never renders.
+        import sqlite3  # noqa: F401  (parity with sibling tests' imports)
+        from utils import known_parts
+        from utils.procurement_agent.ranking_bands import MATCHER_VERSION
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        monkeypatch.setattr(known_parts, "_DB_PATH",
+                            str(tmp_path / "known_parts.json"))
+        pk = known_parts.canonical_part_key("Gusher Pumps", _GUSHER_PN)
+        # Seed the store directly in the on-disk shape (current version stamp).
+        import json as _json
+        with open(tmp_path / "known_parts.json", "w", encoding="utf-8") as f:
+            _json.dump({pk: {"edges": {
+                "springerpumps.com": {**self._SPRINGER, "first_seen": "x",
+                                      "last_seen": known_parts._now(),
+                                      "matcher_version": MATCHER_VERSION},
+                "pumpworld.example": {**self._PUMP_JUNK, "first_seen": "x",
+                                      "last_seen": known_parts._now(),
+                                      "matcher_version": MATCHER_VERSION},
+            }, "updated_at": "x"}}, f)
+        _mock_sourcing_pipeline(monkeypatch,
+                                sourcing_result=_fresh_result(_seal_it()),
+                                artifact=None)
+        rid = _create_run(api)
+        _set_run(api, rid, asset_specs_json=json.dumps(_SPECS))
+        assert api.post(f"/api/runs/{rid}/confirm-intake").status_code == 200
+        sr = api.get(f"/api/runs/{rid}").json()["sourcing_results"]
+        names = {f["vendorName"] for f in sr["findings"]}
+        assert "Springer Pumps" in names               # PN evidence surfaced
+        assert "Pump World" not in names               # junk gated off
+        assert "Pump World" not in {
+            s["vendorName"] for s in sr["outreachTargets"]["suppliers"]}
+
+
+# ---------------------------------------------------------------------------
 # THE DURABLE INVARIANT — second run surfaces AT LEAST the first run's findings
 # ---------------------------------------------------------------------------
 
