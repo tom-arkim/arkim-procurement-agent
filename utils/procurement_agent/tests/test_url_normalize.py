@@ -61,3 +61,48 @@ class TestNormalizeUrl:
         # Best-effort: never raises; returns something (stripped input or a parsed form).
         assert isinstance(normalize_url("not a url"), str)
         assert isinstance(normalize_url("http://["), str)
+
+class TestRegistrableDomain:
+    """MATCHING_CLEANUP F3 — eTLD+1 heuristic for vendor-level dedup keying."""
+
+    def test_subdomain_variants_collapse(self):
+        from utils.url_normalize import registrable_domain
+        for u in (
+            "https://www.globalindustrial.com/p/severe-duty-motor",
+            "https://static.globalindustrial.com/products/pdf/B3085296.pdf",
+            "https://catalog.globalindustrial.com/items",
+            "globalindustrial.com",
+        ):
+            assert registrable_domain(u) == "globalindustrial.com", u
+
+    def test_catalog_subdomain_case_from_live_run(self):
+        from utils.url_normalize import registrable_domain
+        assert registrable_domain("https://catalog.jamiesonequipment.com") == \
+            "jamiesonequipment.com"
+        assert registrable_domain("https://www.jamiesonequipment.com") == \
+            "jamiesonequipment.com"
+
+    def test_different_registrable_domains_stay_distinct(self):
+        # springerparts.com vs springerpumps.com is vendor-IDENTITY work
+        # (TECH_DEBT.md), never a domain-normalization collapse.
+        from utils.url_normalize import registrable_domain
+        assert registrable_domain("https://www.springerparts.com") != \
+            registrable_domain("https://catalog.springerpumps.com")
+
+    def test_two_part_public_suffixes(self):
+        from utils.url_normalize import registrable_domain
+        assert registrable_domain("https://shop.example.co.uk/x") == "example.co.uk"
+        assert registrable_domain("https://www.example.com.au") == "example.com.au"
+
+    def test_bare_host_scheme_case_port_tolerated(self):
+        from utils.url_normalize import registrable_domain
+        assert registrable_domain("WWW.Zoro.COM") == "zoro.com"
+        assert registrable_domain("https://www.zoro.com:443/p/x") == "zoro.com"
+
+    def test_edge_inputs_never_raise(self):
+        from utils.url_normalize import registrable_domain
+        assert registrable_domain("") == ""
+        assert registrable_domain(None) == ""          # type: ignore[arg-type]
+        assert registrable_domain("   ") == ""
+        assert registrable_domain("192.168.0.1") == "192.168.0.1"
+        assert registrable_domain("localhost") == "localhost"

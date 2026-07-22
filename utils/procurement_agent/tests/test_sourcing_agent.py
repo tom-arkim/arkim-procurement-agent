@@ -955,6 +955,64 @@ class TestDedupByUrl:
         assert n == 1
 
 
+class TestDedupByDomainFlagOn:
+    """MATCHING_CLEANUP F3 — flag-on (RANKING_BANDS_V1), an active entry also
+    claims its registrable DOMAIN so subdomain variants of one vendor collapse;
+    flag-off the domain slots are never built (byte-identical parity)."""
+
+    @staticmethod
+    def _jamieson_tiers():
+        # Different names AND different URLs: escapes both legacy keys; only
+        # the registrable domain (jamiesonequipment.com) links them.
+        t2 = {"results": [{"vendor_name": "Jamieson Equipment",
+                           "source_url": "https://www.jamiesonequipment.com/motors"}]}
+        t3 = {"results": [{"vendor_name": "Jamieson Catalog",
+                           "source_url": "https://catalog.jamiesonequipment.com"}]}
+        return t2, t3
+
+    def test_flag_on_subdomain_variant_marked(self, monkeypatch):
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        t2, t3 = self._jamieson_tiers()
+        n = _dedup_across_tiers({"results": []}, t2, t3)
+        assert n == 1
+        assert t2["results"][0].get("rejection_reason") is None
+        assert t3["results"][0]["rejection_reason"] == "duplicate_in_higher_tier"
+
+    def test_flag_off_domain_variants_untouched(self, monkeypatch):
+        monkeypatch.delenv("RANKING_BANDS_V1", raising=False)
+        t2, t3 = self._jamieson_tiers()
+        n = _dedup_across_tiers({"results": []}, t2, t3)
+        assert n == 0
+        assert t2["results"][0].get("rejection_reason") is None
+        assert t3["results"][0].get("rejection_reason") is None
+
+    def test_flag_on_marketplace_different_vendors_both_survive(self, monkeypatch):
+        # False-collapse guard: grainger.com is registry-classified — two
+        # different-named entries on it are not domain-collapsed.
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        t2 = {"results": [
+            {"vendor_name": "Grainger", "source_url": "https://grainger.com/p/AAA"},
+            {"vendor_name": "Grainger Pumps", "source_url": "https://grainger.com/p/BBB"},
+        ]}
+        n = _dedup_across_tiers({"results": []}, t2, {"results": []})
+        assert n == 0
+        assert all(not o.get("rejection_reason") for o in t2["results"])
+
+    def test_flag_on_rejected_entry_claims_no_domain_slot(self, monkeypatch):
+        # First-set-wins discipline unchanged: a floored first occurrence claims
+        # nothing, so the later copy survives HERE — the post-band pass
+        # (ranking_bands._dedup_same_domain) is what collapses revived copies.
+        monkeypatch.setenv("RANKING_BANDS_V1", "1")
+        t2 = {"results": [{"vendor_name": "Zoro",
+                           "source_url": "https://www.zoro.com/p/1",
+                           "rejection_reason": "suitability_below_floor"}]}
+        t3 = {"results": [{"vendor_name": "Zoro Marketplace",
+                           "source_url": "https://zoro.com/p/2"}]}
+        n = _dedup_across_tiers({"results": []}, t2, t3)
+        assert n == 0
+        assert t3["results"][0].get("rejection_reason") is None
+
+
 # ---------------------------------------------------------------------------
 # DEMO_MODE Tier 1 — live-only: the fabricated seed catalog + synthetic
 # brand-intelligence Tier 1 fallback are gated off so a public real-sourcing

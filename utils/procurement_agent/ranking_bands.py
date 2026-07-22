@@ -611,12 +611,72 @@ def cap_band_c(candidates: list[dict], cap: int = BAND_C_CAP) -> None:
         c["band_c_capped"] = True
 
 
+def _dedup_same_domain(candidates: list[dict], searched_pn: Optional[str]) -> int:
+    """F3 — post-band same-registrable-domain dedup: one vendor renders once.
+
+    Runs AFTER annotation + floor re-scope because that is where the pre-band
+    cross-tier dedup leaks: a floor-rejected first occurrence claims no dedup
+    slot (first-set-wins discipline), and rescope_floor can then revive BOTH
+    same-vendor copies (the live Zoro case — two Band-B $114.99 cards). Seeded
+    cache edges appended after SourcingAgent's dedup are covered here too.
+
+    Keying: registrable domain of source_url (www./static./catalog. variants
+    collapse). Marketplace guard: on a registry-classified marketplace domain,
+    candidates whose normalized vendor names differ are NOT collapsed (different
+    sellers may surface via one marketplace; a genuinely-different vendor must
+    never be silently dropped). Different-registrable-domain vendor identity
+    (springerparts.com vs springerpumps.com) is FUTURE work — TECH_DEBT.md.
+
+    Richest candidate wins (onboarded > priced > PN evidence > evidence quality,
+    prior order breaks ties via sort stability); the rest are ANNOTATED
+    rejection_reason="duplicate_vendor_domain" — never removed. Candidates
+    already rejected, mock cards, and URL-less candidates don't participate.
+    Onboarded candidates are never marked duplicates. Returns count marked."""
+    from utils.marketplace_registry import is_marketplace
+    from utils.url_normalize import registrable_domain
+
+    def _name_slug(c: dict) -> str:
+        return re.sub(r"[^a-z0-9]", "", (c.get("vendor_name") or "").lower())
+
+    groups: dict[tuple, list[dict]] = {}
+    for c in candidates:
+        if c.get("is_mock") or c.get("rejection_reason"):
+            continue
+        dom = registrable_domain(c.get("source_url") or "")
+        if not dom:
+            continue
+        # Marketplace guard: key marketplace domains by (domain, vendor) so two
+        # different sellers surfaced via one marketplace never collapse.
+        key = (dom, _name_slug(c)) if is_marketplace(dom) else (dom,)
+        groups.setdefault(key, []).append(c)
+
+    marked = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        ranked = sorted(group, key=lambda c: (
+            0 if is_onboarded(c) else 1,
+            0 if (not c.get("price_tbd") and float(c.get("base_price") or 0) > 0) else 1,
+            -{"exact": 3, "canonical": 2, "compatible": 1, "none": 0}[
+                pn_evidence_for(c, searched_pn)],
+            -float(c.get("evidence_quality") or 0.0),
+        ))
+        for c in ranked[1:]:
+            if is_onboarded(c):
+                continue
+            c["rejection_reason"] = "duplicate_vendor_domain"
+            marked += 1
+    return marked
+
+
 def apply_ranking_bands(result: dict, searched_pn: Optional[str]) -> dict:
     """Flag-on post-pass over a SourcingAgent result dict:
-      1. annotate every tier candidate with band + evidence_quality,
-      2. re-scope the suitability floor to the band rules (§5),
-      3. apply the Band-C count cap (cross-tier, onboarded always included),
-      4. stable-reorder each tier list into banded order.
+      1. attempt URL-slug PN recovery for extractor misses (F2),
+      2. annotate every tier candidate with band + evidence_quality,
+      3. re-scope the suitability floor to the band rules (§5),
+      4. collapse same-registrable-domain duplicates, richest wins (F3),
+      5. apply the Band-C count cap (cross-tier, onboarded always included),
+      6. stable-reorder each tier list into banded order.
     Mutates `result` in place and returns it. Never changes list membership.
     Callers gate on ranking_bands_active() — this function itself is
     unconditional so tests can drive it directly."""
@@ -631,6 +691,7 @@ def apply_ranking_bands(result: dict, searched_pn: Optional[str]) -> dict:
             annotate_candidate(c, searched_pn)
             rescope_floor(c, searched_pn)
         all_candidates.extend(results)
+    _dedup_same_domain(all_candidates, searched_pn)
     cap_band_c(all_candidates)
     for tier_key in ("tier_1", "tier_2", "tier_3"):
         results = (result.get(tier_key) or {}).get("results")
