@@ -32,6 +32,7 @@ never changed, mirroring the reconcile/rank discipline in sourcing_agent.py).
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 # Band labels (string values are part of the flag-on API/capture contract).
@@ -121,6 +122,80 @@ def classify_pn_evidence(searched_pn: Optional[str], found_pn: Optional[str]) ->
     return "compatible"
 
 
+def _spec_tokens(searched_pn: Optional[str]) -> list[str]:
+    """The requested PN's distinctive rating/frame tokens, for family corroboration.
+
+    Tokens are the digit-bearing separator-delimited segments of the RAW requested
+    PN (HHI150-12-447T → 150 / 12 / 447T; 84004-28-C238CBC → 84004 / 28 / C238CBC).
+    The leading segment's manufacturer alpha prefix is stripped (HHI150 → 150) — a
+    same-manufacturer family member is already served by the shared-prefix branch
+    of the guard, so tokens carry only the spec content (rating, frame, size).
+    """
+    segments = [s for s in re.split(r"[^A-Za-z0-9]+", (searched_pn or "").strip()) if s]
+    if not segments:
+        return []
+    first = segments[0]
+    m = re.match(r"^[A-Za-z]+(\d[A-Za-z0-9]*)$", first)
+    head = [m.group(1)] if m else [first]
+    tokens: list[str] = []
+    for seg in head + segments[1:]:
+        s = seg.upper()
+        if len(s) >= 2 and any(ch.isdigit() for ch in s) and s not in tokens:
+            tokens.append(s)
+    return tokens
+
+
+def _url_path_slug(url: Optional[str]) -> str:
+    """Uppercased alphanumeric text of a URL's PATH only. Query/fragment are
+    excluded on purpose: a search/tracking param echoing the requested PN
+    (?q=HHI150-12-447T) must not corroborate a wrong-family listing."""
+    from urllib.parse import urlsplit
+    try:
+        path = urlsplit((url or "").strip()).path
+    except ValueError:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]", "", path).upper()
+
+
+def _family_corroborated(searched_pn: Optional[str], found_pn: Optional[str],
+                         source_url: Optional[str]) -> bool:
+    """F1 family guard: does a compatible-classified found PN plausibly belong to
+    the requested part's family? True when EITHER:
+
+      - shared normalized prefix meets the same ≥6-alphanumeric base standard as
+        canonical (_CANONICAL_MIN_BASE_LEN) — the aftermarket-variant case
+        (84004-28SP vs 84004-28-C238CBC shares 8400428), OR
+      - spec-token corroboration: the found PN and/or the listing URL path carry
+        at least half (rounded up) of the request's rating/frame tokens, incl.
+        one of ≥3 chars — the cross-manufacturer case (LAM150-12-447T carries
+        150/12/447T of HHI150-12-447T).
+
+    HHI10-36-215TC vs HHI150-12-447T fails both (prefix HHI1 = 4; no 150/12/447T
+    anywhere) — a 10HP 215TC-frame motor never earns Band-B PN credit against a
+    150HP 447T-frame request. A request PN with no digit-bearing tokens can only
+    corroborate via the prefix branch (conservative).
+    """
+    from utils.procurement_agent.agents.sourcing_agent import normalize_part_number
+
+    s = normalize_part_number(searched_pn or "")
+    f = normalize_part_number(found_pn or "")
+    shared = 0
+    for a, b in zip(s, f):
+        if a != b:
+            break
+        shared += 1
+    if shared >= _CANONICAL_MIN_BASE_LEN:
+        return True
+
+    tokens = _spec_tokens(searched_pn)
+    if not tokens:
+        return False
+    text = f + " " + _url_path_slug(source_url)
+    matched = [t for t in tokens if t in text]
+    need = -(-len(tokens) // 2)  # ceil: at least half the spec tokens
+    return len(matched) >= need and any(len(t) >= 3 for t in matched)
+
+
 def pn_evidence_for(candidate: dict, searched_pn: Optional[str]) -> str:
     """The candidate's effective PN-evidence level, composing string evidence with
     the extractor verdict:
@@ -130,10 +205,20 @@ def pn_evidence_for(candidate: dict, searched_pn: Optional[str]) -> str:
       - Otherwise the string classification stands. An extractor "exact_match" that
         the string check cannot corroborate stays at its string level (conservative:
         an unverifiable claim never earns Band A on its own).
+      - F1 family guard: "compatible" credit additionally requires the found PN to
+        plausibly belong to the requested part's family (_family_corroborated) —
+        a wrong-family PN (10HP motor against a 150HP request) is not evidence of
+        a probable fit, and neither is an uncorroborated cross-manufacturer PN
+        with no spec tokens (decision-#3 conservatism).
     """
     if candidate.get("pn_match_status") == "no_match":
         return "none"
-    return classify_pn_evidence(searched_pn, candidate.get("found_part_number"))
+    ev = classify_pn_evidence(searched_pn, candidate.get("found_part_number"))
+    if ev == "compatible" and not _family_corroborated(
+            searched_pn, candidate.get("found_part_number"),
+            candidate.get("source_url")):
+        return "none"
+    return ev
 
 
 # ---------------------------------------------------------------------------

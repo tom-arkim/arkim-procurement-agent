@@ -200,11 +200,59 @@ class TestPnEvidence:
         c = _zoro(pn_match_status="no_match")
         assert pn_evidence_for(c, _GUSHER_PN) == "none"
 
-    def test_exact_match_claim_not_corroborated_stays_string_level(self):
-        # Extractor said exact_match but the found PN is unrelated → compatible,
-        # never exact (an unverifiable claim doesn't earn Band A alone).
-        c = _zoro(found_part_number="TOTALLY-DIFFERENT-99", pn_match_status="exact_match")
-        assert pn_evidence_for(c, _GUSHER_PN) == "compatible"
+    def test_exact_match_claim_not_corroborated_earns_nothing(self):
+        # Extractor said exact_match but the found PN is unrelated → the string
+        # check caps it below exact, and the F1 family guard denies compatible
+        # credit too (no shared ≥6-char base, no spec tokens): an unverifiable
+        # wrong-family claim earns NOTHING (decision-#3 conservatism).
+        c = _zoro(found_part_number="TOTALLY-DIFFERENT-99",
+                  pn_match_status="exact_match",
+                  source_url="https://www.zoro.com/some-unrelated-listing")
+        assert pn_evidence_for(c, _GUSHER_PN) == "none"
+
+    # --- F1 family guard (MATCHING_CLEANUP: wrong-family PNs earn no B credit) ---
+
+    def test_f1_wrong_family_pn_earns_no_credit(self):
+        # The Jamieson case: HHI10-36-215TC (10HP, 215TC frame) offered against
+        # HHI150-12-447T (150HP, 447T frame). Shared prefix HHI1 = 4 < 6 and no
+        # spec-token corroboration → no PN credit.
+        c = _zoro(vendor_name="Jamieson Equipment Company",
+                  found_part_number="HHI10-36-215TC",
+                  pn_match_status="not_visible",
+                  source_url="https://www.jamiesonequipment.com")
+        assert pn_evidence_for(c, "HHI150-12-447T") == "none"
+
+    def test_f1_spec_corroborated_cross_mfr_pn_keeps_credit(self):
+        # The MROSupply case: LAM150-12-447T carries the request's rating/frame
+        # tokens (150, 12, 447T) → cross-manufacturer compatible credit stands.
+        c = _zoro(vendor_name="MROSupply",
+                  found_part_number="LAM150-12-447T",
+                  pn_match_status=None,
+                  source_url="https://www.mrosupply.com/electric-motors/687438")
+        assert pn_evidence_for(c, "HHI150-12-447T") == "compatible"
+
+    def test_f1_gusher_aftermarket_prefix_branch_unchanged(self):
+        # Gusher pin: 84004-28SP shares the 7-char base 8400428 → the ≥6-alnum
+        # prefix branch keeps the compatible credit exactly as before.
+        assert pn_evidence_for(_zoro(), _GUSHER_PN) == "compatible"
+
+    def test_f1_listing_url_path_can_corroborate_but_query_cannot(self):
+        # Corroboration may come from the listing URL PATH...
+        c = _zoro(found_part_number="XYZ-9",
+                  source_url="https://vendor.example.com/motors/150hp-447t-frame")
+        assert pn_evidence_for(c, "HHI150-12-447T") == "compatible"
+        # ...but never from a query param echoing the searched PN.
+        c2 = _zoro(found_part_number="XYZ-9",
+                   source_url="https://vendor.example.com/search?q=HHI150-12-447T")
+        assert pn_evidence_for(c2, "HHI150-12-447T") == "none"
+
+    def test_f1_short_bearing_family_single_token_still_credits(self):
+        # A short-PN family (SKF 6205 vs 6205-2RS): base 6205 < 6 chars so the
+        # prefix branch can't fire, but the found PN carries the request's only
+        # ≥3-char spec token → family credit stands (no bearing regression).
+        c = _zoro(found_part_number="6205",
+                  source_url="https://www.nationalprecision.com/brands/skf")
+        assert pn_evidence_for(c, "6205-2RS") == "compatible"
 
 
 # ---------------------------------------------------------------------------
