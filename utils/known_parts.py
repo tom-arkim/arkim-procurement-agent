@@ -215,6 +215,11 @@ def upsert_edges(part_key: str, candidates: list[dict]) -> int:
             "price_date":       now if price is not None else prior.get("price_date"),
             "lead_days":        c.get("lead_time_days") if c.get("lead_time_days") is not None else prior.get("lead_days"),
         }
+        if c.get("pn_source"):
+            # F2 provenance: a URL-slug-derived found_pn stays marked as such in
+            # the cache, so a seeded candidate re-enters banding under the same
+            # URL-PN cap (never Band A). Flag-off candidates never carry this.
+            edges[eid]["pn_source"] = c["pn_source"]
         if bands_on:
             # Verdict provenance (spec §6): matcher-version stamp — a bump marks
             # this edge stale; absent (legacy / flag-off-written) edges read as

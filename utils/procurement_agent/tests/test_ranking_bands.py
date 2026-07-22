@@ -256,6 +256,102 @@ class TestPnEvidence:
 
 
 # ---------------------------------------------------------------------------
+# F2 — PN-from-URL extraction assist (MATCHING_CLEANUP)
+# ---------------------------------------------------------------------------
+
+_GALT_URL = ("https://vfds.com/galt-electric-gpt-motor-gpt15006447tk-150hp-"
+             "1200rpm-3-phase-460v-60hz-445-7t")
+_TRITON_PN = "HHI150-12-447T"
+
+
+def _galt(**over) -> dict:
+    """Galt Electric (Crown Triton live run): cheapest priced candidate, floored
+    because the extractor missed the PN that sits in the URL slug."""
+    c = {
+        "vendor_name": "Galt Electric",
+        "source_url": _GALT_URL,
+        "found_part_number": None,
+        "pn_match_status": None,
+        "base_price": 7941.46,
+        "price_tbd": False,
+        "suitability_score": 1.0,
+        "merchant_type": "Quote Request",
+        "rejection_reason": "suitability_below_floor",
+    }
+    c.update(over)
+    return c
+
+
+class TestPnFromUrl:
+    def test_galt_slug_extracts_pn(self):
+        assert rb.extract_pn_from_url(_GALT_URL, _TRITON_PN) == "GPT15006447TK"
+
+    def test_marketing_slug_extracts_nothing(self):
+        # No spec-token corroboration → no extraction, regardless of shape.
+        url = "https://vendor.example.com/industrial-electric-motors-best-prices-2026"
+        assert rb.extract_pn_from_url(url, _TRITON_PN) is None
+
+    def test_corroborated_slug_without_pn_shaped_token_extracts_nothing(self):
+        # Spec tokens present but no PN-shaped token (unit tokens excluded).
+        url = "https://vendor.example.com/motors/150hp-447t-1200rpm-sale"
+        assert rb.extract_pn_from_url(url, _TRITON_PN) is None
+
+    def test_query_string_never_corroborates(self):
+        url = "https://vendor.example.com/p/abc1234567?q=HHI150-12-447T"
+        assert rb.extract_pn_from_url(url, _TRITON_PN) is None
+
+    def test_galt_bands_b_with_url_provenance_and_floor_cleared(self):
+        # The full F2 path: assist → classification → F1 guard → rescope.
+        result = {"tier_3": {"results": [_galt()]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        c = result["tier_3"]["results"][0]
+        assert c["found_part_number"] == "GPT15006447TK"
+        assert c["pn_source"] == "url"
+        assert c["band"] == BAND_B
+        assert c.get("rejection_reason") is None
+        assert c.get("band_note") == "floor_cleared_pn_evidence"
+
+    def test_url_exact_pn_is_capped_at_band_b_never_a(self):
+        # A slug echoing the requested PN exactly is part-referencing-URL-grade
+        # evidence (spec §3 → Band B); Band A requires a listing-shown PN.
+        c = _zoro(found_part_number=None, pn_match_status=None,
+                  source_url="https://sealshop.example.com/gusher-8400428c238cbc-seal")
+        result = {"tier_2": {"results": [c]}}
+        apply_ranking_bands(result, _GUSHER_PN)
+        assert c["pn_source"] == "url"
+        assert c["found_part_number"] == "8400428C238CBC"
+        assert c["band"] == BAND_B
+
+    def test_url_pn_failing_family_guard_credits_nothing(self):
+        # A URL PN goes through the SAME F1 guard as extractor PNs: a PN-shaped
+        # token in a slug whose spec tokens belong to a DIFFERENT request part
+        # earns no credit (the searched PN here shares nothing with the slug).
+        c = _galt(source_url="https://vendor.example.com/pumps/xyz9876543-25gpm-2in")
+        result = {"tier_3": {"results": [c]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        assert c.get("pn_source") is None            # extraction never fired
+        assert c["found_part_number"] is None
+        assert c["rejection_reason"] == "suitability_below_floor"  # floor stands
+
+    def test_assist_never_overwrites_extractor_pn_or_touches_mocks(self):
+        keep = _zoro()                                # extractor PN present
+        mock = _mock_seed(source_url=_GALT_URL)       # mock: never assisted
+        result = {"tier_2": {"results": [keep]}, "tier_3": {"results": [mock]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        assert keep["found_part_number"] == "84004-28SP"
+        assert keep.get("pn_source") is None
+        assert mock.get("pn_source") is None
+        assert mock["found_part_number"] is None
+
+    def test_no_match_candidates_not_assisted(self):
+        c = _galt(pn_match_status="no_match")
+        result = {"tier_3": {"results": [c]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        assert c.get("pn_source") is None
+        assert c["found_part_number"] is None
+
+
+# ---------------------------------------------------------------------------
 # Band assignment (spec §3)
 # ---------------------------------------------------------------------------
 
@@ -1171,7 +1267,7 @@ class TestAcceptanceGusher:
 
 _BAND_KEYS = {"band", "evidence_quality", "banded", "provenance", "band_note",
               "band_c_capped", "edge_stale", "price_stale", "matcher_version",
-              "stale_hint"}
+              "stale_hint", "pn_source"}
 
 
 def _collect_keys(obj, found: set) -> None:

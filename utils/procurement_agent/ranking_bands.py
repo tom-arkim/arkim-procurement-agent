@@ -205,20 +205,104 @@ def pn_evidence_for(candidate: dict, searched_pn: Optional[str]) -> str:
       - Otherwise the string classification stands. An extractor "exact_match" that
         the string check cannot corroborate stays at its string level (conservative:
         an unverifiable claim never earns Band A on its own).
+      - F2 URL-PN cap: a PN recovered from the listing URL slug (pn_source="url")
+        never classifies above "compatible" — a slug echo is part-referencing-URL-
+        grade evidence, which spec §3 keeps at Band B; CONFIRMED (Band A) requires
+        a PN shown on the listing itself.
       - F1 family guard: "compatible" credit additionally requires the found PN to
         plausibly belong to the requested part's family (_family_corroborated) —
         a wrong-family PN (10HP motor against a 150HP request) is not evidence of
         a probable fit, and neither is an uncorroborated cross-manufacturer PN
-        with no spec tokens (decision-#3 conservatism).
+        with no spec tokens (decision-#3 conservatism). URL-derived PNs pass
+        through this same guard — never a blind trust.
     """
     if candidate.get("pn_match_status") == "no_match":
         return "none"
     ev = classify_pn_evidence(searched_pn, candidate.get("found_part_number"))
+    if ev in ("exact", "canonical") and candidate.get("pn_source") == "url":
+        ev = "compatible"
     if ev == "compatible" and not _family_corroborated(
             searched_pn, candidate.get("found_part_number"),
             candidate.get("source_url")):
         return "none"
     return ev
+
+
+# ---------------------------------------------------------------------------
+# F2 — conservative PN-from-URL extraction assist
+# ---------------------------------------------------------------------------
+
+# Quantity/unit tokens that are PN-shaped by the naive rule but are ratings, not
+# part numbers (1200rpm, 3phase). Digit-prefix + known unit suffix.
+_UNIT_TOKEN_RE = re.compile(
+    r"^\d+(hp|rpm|v|vac|vdc|hz|kw|w|a|amp|amps|ph|phase|lb|lbs|in|mm|cm|ft|gpm|psi)$",
+    re.IGNORECASE)
+
+
+def extract_pn_from_url(url: Optional[str], searched_pn: Optional[str]) -> Optional[str]:
+    """Conservative PN candidate from a listing URL's PATH slug, or None.
+
+    Fires only when EVERY condition holds (the Galt case:
+    .../galt-electric-gpt-motor-gpt15006447tk-150hp-1200rpm-... for request
+    HHI150-12-447T):
+
+      - REQUIRED corroboration: the slug carries the request's spec tokens under
+        the same rule as the F1 family guard (≥ half the rating/frame tokens,
+        one of ≥3 chars). A marketing slug with no spec content extracts nothing.
+      - PN-shape heuristic: an alphanumeric path token with ≥7 chars, ≥2 letters
+        and ≥4 digits that is not a quantity/unit token (150hp, 1200rpm, 460v).
+      - Among qualifying tokens, the one carrying the most spec tokens wins
+        (ties → longest).
+
+    Returns the token uppercased. The caller records pn_source="url"; the F2 cap
+    + F1 guard in pn_evidence_for then apply — a URL PN is never blindly trusted
+    and never earns more than compatible (Band B) credit.
+    """
+    tokens = _spec_tokens(searched_pn)
+    if not tokens:
+        return None
+    slug_text = _url_path_slug(url)
+    matched = [t for t in tokens if t in slug_text]
+    need = -(-len(tokens) // 2)
+    if not (len(matched) >= need and any(len(t) >= 3 for t in matched)):
+        return None
+
+    from urllib.parse import urlsplit
+    try:
+        path = urlsplit((url or "").strip()).path
+    except ValueError:
+        return None
+    best: Optional[str] = None
+    best_score = -1
+    for raw in re.split(r"[^A-Za-z0-9]+", path):
+        if len(raw) < 7:
+            continue
+        letters = sum(ch.isalpha() for ch in raw)
+        digits = sum(ch.isdigit() for ch in raw)
+        if letters < 2 or digits < 4:
+            continue
+        if _UNIT_TOKEN_RE.match(raw):
+            continue
+        up = raw.upper()
+        score = sum(1 for t in tokens if t in up)
+        if score > best_score or (score == best_score and best is not None
+                                  and len(up) > len(best)):
+            best, best_score = up, score
+    return best
+
+
+def _assist_pn_from_url(candidate: dict, searched_pn: Optional[str]) -> None:
+    """Attach a URL-derived found PN when the extractor returned none. Mutates in
+    place; no-op when the candidate already carries a found PN, is a mock/seeded
+    card, or the extractor explicitly saw a DIFFERENT part (no_match)."""
+    if candidate.get("found_part_number") or candidate.get("is_mock"):
+        return
+    if candidate.get("pn_match_status") == "no_match":
+        return
+    pn = extract_pn_from_url(candidate.get("source_url"), searched_pn)
+    if pn:
+        candidate["found_part_number"] = pn
+        candidate["pn_source"] = "url"
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +627,7 @@ def apply_ranking_bands(result: dict, searched_pn: Optional[str]) -> dict:
         if not results:
             continue
         for c in results:
+            _assist_pn_from_url(c, searched_pn)   # F2: URL-slug PN recovery
             annotate_candidate(c, searched_pn)
             rescope_floor(c, searched_pn)
         all_candidates.extend(results)

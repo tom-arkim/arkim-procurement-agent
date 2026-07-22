@@ -1319,6 +1319,8 @@ def _seed_candidates_into_result(result: dict, seed_edges: list,
             if (e.get("found_pn") or "").strip() and \
                     not (fresh.get("found_part_number") or "").strip():
                 fresh["found_part_number"] = e.get("found_pn")
+                if e.get("pn_source"):
+                    fresh["pn_source"] = e["pn_source"]  # F2: URL-PN cap survives the cache
                 if fresh.get("pn_match_status") in (None, "", "not_visible"):
                     fresh["pn_match_status"] = pn_status
                 if not fresh.get("match_type"):
@@ -1365,6 +1367,8 @@ def _seed_candidates_into_result(result: dict, seed_edges: list,
             "seeded_from_cache": True,
             "price_stale":       bool(e.get("price_stale")),
         }
+        if e.get("pn_source"):
+            cand["pn_source"] = e["pn_source"]  # F2: URL-PN cap survives the cache
         if type_gate_note:
             cand["type_gate_note"] = type_gate_note  # audit: why the gate stood down
         if float(cand["suitability_score"] or 0.0) < TIER_SURFACE_MIN_SUITABILITY:
