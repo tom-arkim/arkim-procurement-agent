@@ -971,6 +971,36 @@ scores, floor, cache behavior, and API responses are byte-identical to before.**
   persists indefinitely. Flag-off keeps the legacy cache-first replay
   byte-identically (always-serve, legacy floor, type gate).
 
+### Matching cleanup (2026-07-22 — F1/F2/F3, all inside RANKING_BANDS_V1)
+
+- **F1 — compatible-PN family guard.** A found PN earns COMPATIBLE (Band-B)
+  credit only when it plausibly belongs to the requested part's family: shared
+  normalized prefix ≥6 alphanumerics (same standard as canonical), OR the found
+  PN / listing URL path carries the request's rating/frame tokens (≥ half,
+  one ≥3 chars; query strings never corroborate). A wrong-family PN (the live
+  Jamieson case: 10HP `HHI10-36-215TC` against 150HP `HHI150-12-447T`) now
+  credits nothing and the candidate bands on its remaining evidence — an
+  evidence-less floored Band B stays off the page. Spec-corroborated
+  cross-manufacturer PNs (`LAM150-12-447T`) keep their credit; uncorroborated
+  ones with no spec tokens earn nothing (decision-#3 conservatism).
+- **F2 — PN-from-URL assist.** When the extractor returns no found_pn, a
+  conservative PN candidate is recovered from the listing URL path slug
+  (PN-shape heuristic + REQUIRED spec-token corroboration in the same slug),
+  recorded with `pn_source="url"` and passed through the SAME classification +
+  F1 guard. A URL PN is capped at compatible-grade evidence: it can earn
+  Band B (the live Galt case — $7.9k listing floored on an extraction miss now
+  surfaces) but never Band A. `pn_source` survives the edge cache.
+- **F3 — one vendor renders once.** All dedup keying normalizes to the
+  registrable domain (`url_normalize.registrable_domain`): www./static./catalog.
+  variants collapse in cross-tier dedup (flag-on only), in the seed merge, and
+  in a post-band pass that catches copies revived by the floor re-scope (the
+  live two-Zoro mechanism) — richest wins (onboarded > priced > PN evidence >
+  evidence quality), losers are ANNOTATED `duplicate_vendor_domain`, never
+  removed. Registry-classified marketplace domains never collapse
+  different-named vendors (false-collapse guard). Different-registrable-domain
+  vendor identity (springerparts.com vs springerpumps.com) is future work —
+  TECH_DEBT.md §1.
+
 ---
 
 ## Supplier quote submission (Night 11 - QUOTE_SUBMIT_V1)

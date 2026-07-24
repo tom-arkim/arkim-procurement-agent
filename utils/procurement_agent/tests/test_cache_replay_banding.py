@@ -140,6 +140,32 @@ class TestSeedMergeRules:
         assert zoro["found_part_number"] == "84004-28-C238CBC"  # fresh wins
         assert zoro["pn_match_status"] == "exact_match"
 
+    def test_subdomain_variant_edge_merges_instead_of_duplicating(self, api):
+        # MATCHING_CLEANUP F3: the live Global Industrial case — a seeded
+        # static.globalindustrial.com PDF edge must MERGE into the vendor found
+        # fresh at www.globalindustrial.com (registrable-domain keying), not
+        # render a second card. Fresh volatile fields win; the edge contributes
+        # its stored PN evidence.
+        fresh_gi = {"vendor_name": "Global Industrial",
+                    "source_url": "https://www.globalindustrial.com/p/severe-duty-motor",
+                    "base_price": 36175.0, "price_tbd": False,
+                    "suitability_score": 50.0, "pn_match_status": "not_visible"}
+        edge = _zoro_edge(
+            supplier_id="static.globalindustrial.com",
+            display_name="Global Industrial",
+            found_pn="ECP844156TR-5",
+            source_url="https://static.globalindustrial.com/products/pdf/B3085296.pdf",
+            price=22051.72)
+        result = self._merge(api, _fresh_result(_seal_it(), fresh_gi), [edge],
+                             req_cls=None)
+        gis = [c for c in result["tier_2"]["results"]
+               if c["vendor_name"] == "Global Industrial"]
+        assert len(gis) == 1                              # merged, not appended
+        (gi,) = gis
+        assert gi["base_price"] == 36175.0                # fresh volatile wins
+        assert gi["found_part_number"] == "ECP844156TR-5"  # edge PN contributed
+        assert gi.get("seeded_from_cache") is None        # it IS the fresh cand
+
     def test_stored_rejection_edges_never_seed(self, api):
         edge = _zoro_edge(rejection_reason="pn_mismatch")
         result = self._merge(api, _fresh_result(_seal_it()), [edge], req_cls=None)

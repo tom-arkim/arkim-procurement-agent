@@ -32,6 +32,7 @@ never changed, mirroring the reconcile/rank discipline in sourcing_agent.py).
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 # Band labels (string values are part of the flag-on API/capture contract).
@@ -121,6 +122,80 @@ def classify_pn_evidence(searched_pn: Optional[str], found_pn: Optional[str]) ->
     return "compatible"
 
 
+def _spec_tokens(searched_pn: Optional[str]) -> list[str]:
+    """The requested PN's distinctive rating/frame tokens, for family corroboration.
+
+    Tokens are the digit-bearing separator-delimited segments of the RAW requested
+    PN (HHI150-12-447T → 150 / 12 / 447T; 84004-28-C238CBC → 84004 / 28 / C238CBC).
+    The leading segment's manufacturer alpha prefix is stripped (HHI150 → 150) — a
+    same-manufacturer family member is already served by the shared-prefix branch
+    of the guard, so tokens carry only the spec content (rating, frame, size).
+    """
+    segments = [s for s in re.split(r"[^A-Za-z0-9]+", (searched_pn or "").strip()) if s]
+    if not segments:
+        return []
+    first = segments[0]
+    m = re.match(r"^[A-Za-z]+(\d[A-Za-z0-9]*)$", first)
+    head = [m.group(1)] if m else [first]
+    tokens: list[str] = []
+    for seg in head + segments[1:]:
+        s = seg.upper()
+        if len(s) >= 2 and any(ch.isdigit() for ch in s) and s not in tokens:
+            tokens.append(s)
+    return tokens
+
+
+def _url_path_slug(url: Optional[str]) -> str:
+    """Uppercased alphanumeric text of a URL's PATH only. Query/fragment are
+    excluded on purpose: a search/tracking param echoing the requested PN
+    (?q=HHI150-12-447T) must not corroborate a wrong-family listing."""
+    from urllib.parse import urlsplit
+    try:
+        path = urlsplit((url or "").strip()).path
+    except ValueError:
+        return ""
+    return re.sub(r"[^A-Za-z0-9]", "", path).upper()
+
+
+def _family_corroborated(searched_pn: Optional[str], found_pn: Optional[str],
+                         source_url: Optional[str]) -> bool:
+    """F1 family guard: does a compatible-classified found PN plausibly belong to
+    the requested part's family? True when EITHER:
+
+      - shared normalized prefix meets the same ≥6-alphanumeric base standard as
+        canonical (_CANONICAL_MIN_BASE_LEN) — the aftermarket-variant case
+        (84004-28SP vs 84004-28-C238CBC shares 8400428), OR
+      - spec-token corroboration: the found PN and/or the listing URL path carry
+        at least half (rounded up) of the request's rating/frame tokens, incl.
+        one of ≥3 chars — the cross-manufacturer case (LAM150-12-447T carries
+        150/12/447T of HHI150-12-447T).
+
+    HHI10-36-215TC vs HHI150-12-447T fails both (prefix HHI1 = 4; no 150/12/447T
+    anywhere) — a 10HP 215TC-frame motor never earns Band-B PN credit against a
+    150HP 447T-frame request. A request PN with no digit-bearing tokens can only
+    corroborate via the prefix branch (conservative).
+    """
+    from utils.procurement_agent.agents.sourcing_agent import normalize_part_number
+
+    s = normalize_part_number(searched_pn or "")
+    f = normalize_part_number(found_pn or "")
+    shared = 0
+    for a, b in zip(s, f):
+        if a != b:
+            break
+        shared += 1
+    if shared >= _CANONICAL_MIN_BASE_LEN:
+        return True
+
+    tokens = _spec_tokens(searched_pn)
+    if not tokens:
+        return False
+    text = f + " " + _url_path_slug(source_url)
+    matched = [t for t in tokens if t in text]
+    need = -(-len(tokens) // 2)  # ceil: at least half the spec tokens
+    return len(matched) >= need and any(len(t) >= 3 for t in matched)
+
+
 def pn_evidence_for(candidate: dict, searched_pn: Optional[str]) -> str:
     """The candidate's effective PN-evidence level, composing string evidence with
     the extractor verdict:
@@ -130,10 +205,104 @@ def pn_evidence_for(candidate: dict, searched_pn: Optional[str]) -> str:
       - Otherwise the string classification stands. An extractor "exact_match" that
         the string check cannot corroborate stays at its string level (conservative:
         an unverifiable claim never earns Band A on its own).
+      - F2 URL-PN cap: a PN recovered from the listing URL slug (pn_source="url")
+        never classifies above "compatible" — a slug echo is part-referencing-URL-
+        grade evidence, which spec §3 keeps at Band B; CONFIRMED (Band A) requires
+        a PN shown on the listing itself.
+      - F1 family guard: "compatible" credit additionally requires the found PN to
+        plausibly belong to the requested part's family (_family_corroborated) —
+        a wrong-family PN (10HP motor against a 150HP request) is not evidence of
+        a probable fit, and neither is an uncorroborated cross-manufacturer PN
+        with no spec tokens (decision-#3 conservatism). URL-derived PNs pass
+        through this same guard — never a blind trust.
     """
     if candidate.get("pn_match_status") == "no_match":
         return "none"
-    return classify_pn_evidence(searched_pn, candidate.get("found_part_number"))
+    ev = classify_pn_evidence(searched_pn, candidate.get("found_part_number"))
+    if ev in ("exact", "canonical") and candidate.get("pn_source") == "url":
+        ev = "compatible"
+    if ev == "compatible" and not _family_corroborated(
+            searched_pn, candidate.get("found_part_number"),
+            candidate.get("source_url")):
+        return "none"
+    return ev
+
+
+# ---------------------------------------------------------------------------
+# F2 — conservative PN-from-URL extraction assist
+# ---------------------------------------------------------------------------
+
+# Quantity/unit tokens that are PN-shaped by the naive rule but are ratings, not
+# part numbers (1200rpm, 3phase). Digit-prefix + known unit suffix.
+_UNIT_TOKEN_RE = re.compile(
+    r"^\d+(hp|rpm|v|vac|vdc|hz|kw|w|a|amp|amps|ph|phase|lb|lbs|in|mm|cm|ft|gpm|psi)$",
+    re.IGNORECASE)
+
+
+def extract_pn_from_url(url: Optional[str], searched_pn: Optional[str]) -> Optional[str]:
+    """Conservative PN candidate from a listing URL's PATH slug, or None.
+
+    Fires only when EVERY condition holds (the Galt case:
+    .../galt-electric-gpt-motor-gpt15006447tk-150hp-1200rpm-... for request
+    HHI150-12-447T):
+
+      - REQUIRED corroboration: the slug carries the request's spec tokens under
+        the same rule as the F1 family guard (≥ half the rating/frame tokens,
+        one of ≥3 chars). A marketing slug with no spec content extracts nothing.
+      - PN-shape heuristic: an alphanumeric path token with ≥7 chars, ≥2 letters
+        and ≥4 digits that is not a quantity/unit token (150hp, 1200rpm, 460v).
+      - Among qualifying tokens, the one carrying the most spec tokens wins
+        (ties → longest).
+
+    Returns the token uppercased. The caller records pn_source="url"; the F2 cap
+    + F1 guard in pn_evidence_for then apply — a URL PN is never blindly trusted
+    and never earns more than compatible (Band B) credit.
+    """
+    tokens = _spec_tokens(searched_pn)
+    if not tokens:
+        return None
+    slug_text = _url_path_slug(url)
+    matched = [t for t in tokens if t in slug_text]
+    need = -(-len(tokens) // 2)
+    if not (len(matched) >= need and any(len(t) >= 3 for t in matched)):
+        return None
+
+    from urllib.parse import urlsplit
+    try:
+        path = urlsplit((url or "").strip()).path
+    except ValueError:
+        return None
+    best: Optional[str] = None
+    best_score = -1
+    for raw in re.split(r"[^A-Za-z0-9]+", path):
+        if len(raw) < 7:
+            continue
+        letters = sum(ch.isalpha() for ch in raw)
+        digits = sum(ch.isdigit() for ch in raw)
+        if letters < 2 or digits < 4:
+            continue
+        if _UNIT_TOKEN_RE.match(raw):
+            continue
+        up = raw.upper()
+        score = sum(1 for t in tokens if t in up)
+        if score > best_score or (score == best_score and best is not None
+                                  and len(up) > len(best)):
+            best, best_score = up, score
+    return best
+
+
+def _assist_pn_from_url(candidate: dict, searched_pn: Optional[str]) -> None:
+    """Attach a URL-derived found PN when the extractor returned none. Mutates in
+    place; no-op when the candidate already carries a found PN, is a mock/seeded
+    card, or the extractor explicitly saw a DIFFERENT part (no_match)."""
+    if candidate.get("found_part_number") or candidate.get("is_mock"):
+        return
+    if candidate.get("pn_match_status") == "no_match":
+        return
+    pn = extract_pn_from_url(candidate.get("source_url"), searched_pn)
+    if pn:
+        candidate["found_part_number"] = pn
+        candidate["pn_source"] = "url"
 
 
 # ---------------------------------------------------------------------------
@@ -442,12 +611,72 @@ def cap_band_c(candidates: list[dict], cap: int = BAND_C_CAP) -> None:
         c["band_c_capped"] = True
 
 
+def _dedup_same_domain(candidates: list[dict], searched_pn: Optional[str]) -> int:
+    """F3 — post-band same-registrable-domain dedup: one vendor renders once.
+
+    Runs AFTER annotation + floor re-scope because that is where the pre-band
+    cross-tier dedup leaks: a floor-rejected first occurrence claims no dedup
+    slot (first-set-wins discipline), and rescope_floor can then revive BOTH
+    same-vendor copies (the live Zoro case — two Band-B $114.99 cards). Seeded
+    cache edges appended after SourcingAgent's dedup are covered here too.
+
+    Keying: registrable domain of source_url (www./static./catalog. variants
+    collapse). Marketplace guard: on a registry-classified marketplace domain,
+    candidates whose normalized vendor names differ are NOT collapsed (different
+    sellers may surface via one marketplace; a genuinely-different vendor must
+    never be silently dropped). Different-registrable-domain vendor identity
+    (springerparts.com vs springerpumps.com) is FUTURE work — TECH_DEBT.md.
+
+    Richest candidate wins (onboarded > priced > PN evidence > evidence quality,
+    prior order breaks ties via sort stability); the rest are ANNOTATED
+    rejection_reason="duplicate_vendor_domain" — never removed. Candidates
+    already rejected, mock cards, and URL-less candidates don't participate.
+    Onboarded candidates are never marked duplicates. Returns count marked."""
+    from utils.marketplace_registry import is_marketplace
+    from utils.url_normalize import registrable_domain
+
+    def _name_slug(c: dict) -> str:
+        return re.sub(r"[^a-z0-9]", "", (c.get("vendor_name") or "").lower())
+
+    groups: dict[tuple, list[dict]] = {}
+    for c in candidates:
+        if c.get("is_mock") or c.get("rejection_reason"):
+            continue
+        dom = registrable_domain(c.get("source_url") or "")
+        if not dom:
+            continue
+        # Marketplace guard: key marketplace domains by (domain, vendor) so two
+        # different sellers surfaced via one marketplace never collapse.
+        key = (dom, _name_slug(c)) if is_marketplace(dom) else (dom,)
+        groups.setdefault(key, []).append(c)
+
+    marked = 0
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        ranked = sorted(group, key=lambda c: (
+            0 if is_onboarded(c) else 1,
+            0 if (not c.get("price_tbd") and float(c.get("base_price") or 0) > 0) else 1,
+            -{"exact": 3, "canonical": 2, "compatible": 1, "none": 0}[
+                pn_evidence_for(c, searched_pn)],
+            -float(c.get("evidence_quality") or 0.0),
+        ))
+        for c in ranked[1:]:
+            if is_onboarded(c):
+                continue
+            c["rejection_reason"] = "duplicate_vendor_domain"
+            marked += 1
+    return marked
+
+
 def apply_ranking_bands(result: dict, searched_pn: Optional[str]) -> dict:
     """Flag-on post-pass over a SourcingAgent result dict:
-      1. annotate every tier candidate with band + evidence_quality,
-      2. re-scope the suitability floor to the band rules (§5),
-      3. apply the Band-C count cap (cross-tier, onboarded always included),
-      4. stable-reorder each tier list into banded order.
+      1. attempt URL-slug PN recovery for extractor misses (F2),
+      2. annotate every tier candidate with band + evidence_quality,
+      3. re-scope the suitability floor to the band rules (§5),
+      4. collapse same-registrable-domain duplicates, richest wins (F3),
+      5. apply the Band-C count cap (cross-tier, onboarded always included),
+      6. stable-reorder each tier list into banded order.
     Mutates `result` in place and returns it. Never changes list membership.
     Callers gate on ranking_bands_active() — this function itself is
     unconditional so tests can drive it directly."""
@@ -458,9 +687,11 @@ def apply_ranking_bands(result: dict, searched_pn: Optional[str]) -> dict:
         if not results:
             continue
         for c in results:
+            _assist_pn_from_url(c, searched_pn)   # F2: URL-slug PN recovery
             annotate_candidate(c, searched_pn)
             rescope_floor(c, searched_pn)
         all_candidates.extend(results)
+    _dedup_same_domain(all_candidates, searched_pn)
     cap_band_c(all_candidates)
     for tier_key in ("tier_1", "tier_2", "tier_3"):
         results = (result.get(tier_key) or {}).get("results")

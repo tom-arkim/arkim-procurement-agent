@@ -157,10 +157,26 @@ def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
     DIFFERENT urls (e.g. OTC Industrial / OTC Industrial Technologies) — is
     unchanged and still needs the entity-resolution layer. §5a is NOT resolved.
 
+    RANKING_BANDS_V1 (MATCHING_CLEANUP F3): flag-on, an active entry ALSO claims
+    its registrable DOMAIN (www./static./catalog. variants of one vendor key
+    identically) — except on registry-classified marketplace domains, where a
+    different vendor name never collapses (different sellers can legitimately
+    surface via one marketplace). Flag OFF: domain slots are never built and
+    behavior is byte-identical. Note the flag-on band pass runs a second,
+    post-rescope domain dedup (ranking_bands._dedup_same_domain) for copies this
+    pass structurally cannot catch (floored entries claim no slot here, then
+    rescope_floor revives them).
+
     Returns the count of newly-marked duplicates.
     """
+    from utils.marketplace_registry import is_marketplace
+    from utils.procurement_agent.ranking_bands import ranking_bands_active
+    from utils.url_normalize import registrable_domain
+
+    bands_on = ranking_bands_active()
     seen_names: set[str] = set()
     seen_urls: set[str] = set()
+    seen_domains: dict[str, str] = {}   # registrable domain -> claiming vendor key
     deduped = 0
 
     for tier_label, tier_data in (("tier_1", tier1), ("tier_2", tier2), ("tier_3", tier3)):
@@ -169,7 +185,13 @@ def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
             url = (o.get("source_url") or "").rstrip("/").lower()
             if not name and not url:
                 continue
-            is_dup = (name and name in seen_names) or (url and url in seen_urls)
+            domain = registrable_domain(url) if (bands_on and url) else ""
+            domain_dup = bool(
+                domain and domain in seen_domains
+                and not (is_marketplace(domain) and seen_domains[domain] != name)
+            )
+            is_dup = (name and name in seen_names) or (url and url in seen_urls) \
+                or domain_dup
             if is_dup:
                 if not o.get("rejection_reason"):
                     o["rejection_reason"] = "duplicate_in_higher_tier"
@@ -179,11 +201,13 @@ def _dedup_across_tiers(tier1: dict, tier2: dict, tier3: dict) -> int:
                     )
                     deduped += 1
             elif not o.get("rejection_reason"):
-                # First (highest-tier) occurrence claims BOTH slots.
+                # First (highest-tier) occurrence claims its slots.
                 if name:
                     seen_names.add(name)
                 if url:
                     seen_urls.add(url)
+                if domain:
+                    seen_domains.setdefault(domain, name)
 
     return deduped
 

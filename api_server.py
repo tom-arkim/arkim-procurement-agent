@@ -1287,10 +1287,14 @@ def _seed_candidates_into_result(result: dict, seed_edges: list,
     Flag-off runs never reach here (their replay path is _result_from_cached_edges)."""
     from utils.sourcing_archieved.constants import TIER_SURFACE_MIN_SUITABILITY
     from utils.sourcing_archieved.scoring import classify_result_noun_class_dominant
-    from utils.supplier_registry import _normalize_domain
+    from utils.url_normalize import registrable_domain
 
     def _key(url: Optional[str], name: Optional[str]) -> str:
-        dom = _normalize_domain(url) if url else ""
+        # F3: registrable domain, not raw host — a static./catalog./www. edge
+        # variant of a vendor found fresh today must MERGE, not duplicate (the
+        # live static.globalindustrial.com case). Edge stores are vendor-level
+        # (one edge per domain), so domain-only keying is the edge semantic.
+        dom = registrable_domain(url) if url else ""
         return dom or (name or "").strip().lower()
 
     existing: dict = {}
@@ -1319,6 +1323,8 @@ def _seed_candidates_into_result(result: dict, seed_edges: list,
             if (e.get("found_pn") or "").strip() and \
                     not (fresh.get("found_part_number") or "").strip():
                 fresh["found_part_number"] = e.get("found_pn")
+                if e.get("pn_source"):
+                    fresh["pn_source"] = e["pn_source"]  # F2: URL-PN cap survives the cache
                 if fresh.get("pn_match_status") in (None, "", "not_visible"):
                     fresh["pn_match_status"] = pn_status
                 if not fresh.get("match_type"):
@@ -1365,6 +1371,8 @@ def _seed_candidates_into_result(result: dict, seed_edges: list,
             "seeded_from_cache": True,
             "price_stale":       bool(e.get("price_stale")),
         }
+        if e.get("pn_source"):
+            cand["pn_source"] = e["pn_source"]  # F2: URL-PN cap survives the cache
         if type_gate_note:
             cand["type_gate_note"] = type_gate_note  # audit: why the gate stood down
         if float(cand["suitability_score"] or 0.0) < TIER_SURFACE_MIN_SUITABILITY:

@@ -200,11 +200,267 @@ class TestPnEvidence:
         c = _zoro(pn_match_status="no_match")
         assert pn_evidence_for(c, _GUSHER_PN) == "none"
 
-    def test_exact_match_claim_not_corroborated_stays_string_level(self):
-        # Extractor said exact_match but the found PN is unrelated → compatible,
-        # never exact (an unverifiable claim doesn't earn Band A alone).
-        c = _zoro(found_part_number="TOTALLY-DIFFERENT-99", pn_match_status="exact_match")
-        assert pn_evidence_for(c, _GUSHER_PN) == "compatible"
+    def test_exact_match_claim_not_corroborated_earns_nothing(self):
+        # Extractor said exact_match but the found PN is unrelated → the string
+        # check caps it below exact, and the F1 family guard denies compatible
+        # credit too (no shared ≥6-char base, no spec tokens): an unverifiable
+        # wrong-family claim earns NOTHING (decision-#3 conservatism).
+        c = _zoro(found_part_number="TOTALLY-DIFFERENT-99",
+                  pn_match_status="exact_match",
+                  source_url="https://www.zoro.com/some-unrelated-listing")
+        assert pn_evidence_for(c, _GUSHER_PN) == "none"
+
+    # --- F1 family guard (MATCHING_CLEANUP: wrong-family PNs earn no B credit) ---
+
+    def test_f1_wrong_family_pn_earns_no_credit(self):
+        # The Jamieson case: HHI10-36-215TC (10HP, 215TC frame) offered against
+        # HHI150-12-447T (150HP, 447T frame). Shared prefix HHI1 = 4 < 6 and no
+        # spec-token corroboration → no PN credit.
+        c = _zoro(vendor_name="Jamieson Equipment Company",
+                  found_part_number="HHI10-36-215TC",
+                  pn_match_status="not_visible",
+                  source_url="https://www.jamiesonequipment.com")
+        assert pn_evidence_for(c, "HHI150-12-447T") == "none"
+
+    def test_f1_spec_corroborated_cross_mfr_pn_keeps_credit(self):
+        # The MROSupply case: LAM150-12-447T carries the request's rating/frame
+        # tokens (150, 12, 447T) → cross-manufacturer compatible credit stands.
+        c = _zoro(vendor_name="MROSupply",
+                  found_part_number="LAM150-12-447T",
+                  pn_match_status=None,
+                  source_url="https://www.mrosupply.com/electric-motors/687438")
+        assert pn_evidence_for(c, "HHI150-12-447T") == "compatible"
+
+    def test_f1_gusher_aftermarket_prefix_branch_unchanged(self):
+        # Gusher pin: 84004-28SP shares the 7-char base 8400428 → the ≥6-alnum
+        # prefix branch keeps the compatible credit exactly as before.
+        assert pn_evidence_for(_zoro(), _GUSHER_PN) == "compatible"
+
+    def test_f1_listing_url_path_can_corroborate_but_query_cannot(self):
+        # Corroboration may come from the listing URL PATH...
+        c = _zoro(found_part_number="XYZ-9",
+                  source_url="https://vendor.example.com/motors/150hp-447t-frame")
+        assert pn_evidence_for(c, "HHI150-12-447T") == "compatible"
+        # ...but never from a query param echoing the searched PN.
+        c2 = _zoro(found_part_number="XYZ-9",
+                   source_url="https://vendor.example.com/search?q=HHI150-12-447T")
+        assert pn_evidence_for(c2, "HHI150-12-447T") == "none"
+
+    def test_f1_short_bearing_family_single_token_still_credits(self):
+        # A short-PN family (SKF 6205 vs 6205-2RS): base 6205 < 6 chars so the
+        # prefix branch can't fire, but the found PN carries the request's only
+        # ≥3-char spec token → family credit stands (no bearing regression).
+        c = _zoro(found_part_number="6205",
+                  source_url="https://www.nationalprecision.com/brands/skf")
+        assert pn_evidence_for(c, "6205-2RS") == "compatible"
+
+
+# ---------------------------------------------------------------------------
+# F2 — PN-from-URL extraction assist (MATCHING_CLEANUP)
+# ---------------------------------------------------------------------------
+
+_GALT_URL = ("https://vfds.com/galt-electric-gpt-motor-gpt15006447tk-150hp-"
+             "1200rpm-3-phase-460v-60hz-445-7t")
+_TRITON_PN = "HHI150-12-447T"
+
+
+def _galt(**over) -> dict:
+    """Galt Electric (Crown Triton live run): cheapest priced candidate, floored
+    because the extractor missed the PN that sits in the URL slug."""
+    c = {
+        "vendor_name": "Galt Electric",
+        "source_url": _GALT_URL,
+        "found_part_number": None,
+        "pn_match_status": None,
+        "base_price": 7941.46,
+        "price_tbd": False,
+        "suitability_score": 1.0,
+        "merchant_type": "Quote Request",
+        "rejection_reason": "suitability_below_floor",
+    }
+    c.update(over)
+    return c
+
+
+class TestPnFromUrl:
+    def test_galt_slug_extracts_pn(self):
+        assert rb.extract_pn_from_url(_GALT_URL, _TRITON_PN) == "GPT15006447TK"
+
+    def test_marketing_slug_extracts_nothing(self):
+        # No spec-token corroboration → no extraction, regardless of shape.
+        url = "https://vendor.example.com/industrial-electric-motors-best-prices-2026"
+        assert rb.extract_pn_from_url(url, _TRITON_PN) is None
+
+    def test_corroborated_slug_without_pn_shaped_token_extracts_nothing(self):
+        # Spec tokens present but no PN-shaped token (unit tokens excluded).
+        url = "https://vendor.example.com/motors/150hp-447t-1200rpm-sale"
+        assert rb.extract_pn_from_url(url, _TRITON_PN) is None
+
+    def test_query_string_never_corroborates(self):
+        url = "https://vendor.example.com/p/abc1234567?q=HHI150-12-447T"
+        assert rb.extract_pn_from_url(url, _TRITON_PN) is None
+
+    def test_galt_bands_b_with_url_provenance_and_floor_cleared(self):
+        # The full F2 path: assist → classification → F1 guard → rescope.
+        result = {"tier_3": {"results": [_galt()]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        c = result["tier_3"]["results"][0]
+        assert c["found_part_number"] == "GPT15006447TK"
+        assert c["pn_source"] == "url"
+        assert c["band"] == BAND_B
+        assert c.get("rejection_reason") is None
+        assert c.get("band_note") == "floor_cleared_pn_evidence"
+
+    def test_url_exact_pn_is_capped_at_band_b_never_a(self):
+        # A slug echoing the requested PN exactly is part-referencing-URL-grade
+        # evidence (spec §3 → Band B); Band A requires a listing-shown PN.
+        c = _zoro(found_part_number=None, pn_match_status=None,
+                  source_url="https://sealshop.example.com/gusher-8400428c238cbc-seal")
+        result = {"tier_2": {"results": [c]}}
+        apply_ranking_bands(result, _GUSHER_PN)
+        assert c["pn_source"] == "url"
+        assert c["found_part_number"] == "8400428C238CBC"
+        assert c["band"] == BAND_B
+
+    def test_url_pn_failing_family_guard_credits_nothing(self):
+        # A URL PN goes through the SAME F1 guard as extractor PNs: a PN-shaped
+        # token in a slug whose spec tokens belong to a DIFFERENT request part
+        # earns no credit (the searched PN here shares nothing with the slug).
+        c = _galt(source_url="https://vendor.example.com/pumps/xyz9876543-25gpm-2in")
+        result = {"tier_3": {"results": [c]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        assert c.get("pn_source") is None            # extraction never fired
+        assert c["found_part_number"] is None
+        assert c["rejection_reason"] == "suitability_below_floor"  # floor stands
+
+    def test_assist_never_overwrites_extractor_pn_or_touches_mocks(self):
+        keep = _zoro()                                # extractor PN present
+        mock = _mock_seed(source_url=_GALT_URL)       # mock: never assisted
+        result = {"tier_2": {"results": [keep]}, "tier_3": {"results": [mock]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        assert keep["found_part_number"] == "84004-28SP"
+        assert keep.get("pn_source") is None
+        assert mock.get("pn_source") is None
+        assert mock["found_part_number"] is None
+
+    def test_no_match_candidates_not_assisted(self):
+        c = _galt(pn_match_status="no_match")
+        result = {"tier_3": {"results": [c]}}
+        apply_ranking_bands(result, _TRITON_PN)
+        assert c.get("pn_source") is None
+        assert c["found_part_number"] is None
+
+
+# ---------------------------------------------------------------------------
+# F3 — post-band same-registrable-domain dedup (MATCHING_CLEANUP)
+# ---------------------------------------------------------------------------
+
+class TestDomainDedup:
+    def test_zoro_revival_mechanism_collapses_richest_wins(self):
+        """The live seal-run mechanism: BOTH same-vendor copies floored (so the
+        pre-band cross-tier dedup claims no slot for either), then rescope_floor
+        revives both on PN evidence → two Band-B Zoro cards. The post-band pass
+        must keep exactly one — the priced (richest) copy."""
+        priced = _zoro(source_url="https://www.zoro.com/springer-parts-seal/i/G406012291",
+                       base_price=114.99, price_tbd=False,
+                       rejection_reason="suitability_below_floor")
+        bare = _zoro(source_url="https://zoro.com/p/84004-28sp",
+                     rejection_reason="suitability_below_floor")
+        result = {"tier_2": {"results": [priced]}, "tier_3": {"results": [bare]}}
+        apply_ranking_bands(result, _GUSHER_PN)
+        assert priced.get("rejection_reason") is None          # revived, kept
+        assert bare["rejection_reason"] == "duplicate_vendor_domain"
+        from utils.procurement_agent.ranking_bands import banded_findings
+        zoros = [c for c, _, _ in banded_findings(result)
+                 if c["vendor_name"] == "Zoro"]
+        assert len(zoros) == 1 and zoros[0]["base_price"] == 114.99
+
+    def test_subdomain_variants_collapse_pn_evidence_breaks_price_tie(self):
+        # The live Global Industrial case: fresh www. listing (priced, PN) +
+        # seeded static. PDF edge (priced, no PN) → one card, fresh wins.
+        fresh = _zoro(vendor_name="Global Industrial",
+                      found_part_number="ECP844156TR-5",
+                      pn_match_status="partial_match",
+                      source_url="https://www.globalindustrial.com/p/severe-duty-"
+                                 "motor-ecp844156tr-5-3-ph-150-hp-1190-rpm-447t-frame",
+                      base_price=36175.0, price_tbd=False, suitability_score=50.0)
+        seeded = _zoro(vendor_name="Global Industrial",
+                       found_part_number=None, pn_match_status="not_visible",
+                       source_url="https://static.globalindustrial.com/products/"
+                                  "pdf/55294/B3085296_BROCHURE-2.pdf",
+                       base_price=22051.72, price_tbd=False,
+                       suitability_score=35.0, seeded_from_cache=True)
+        result = {"tier_2": {"results": [fresh, seeded]}}
+        apply_ranking_bands(result, "HHI150-12-447T")
+        assert fresh.get("rejection_reason") is None
+        assert seeded["rejection_reason"] == "duplicate_vendor_domain"
+
+    def test_non_marketplace_subdomain_variants_collapse(self):
+        # catalog.jamiesonequipment.com vs www.jamiesonequipment.com → one card
+        # (names need not match on a non-marketplace domain).
+        a = _zoro(vendor_name="Jamieson Equipment Company",
+                  found_part_number=None, pn_match_status="not_visible",
+                  source_url="https://www.jamiesonequipment.com",
+                  suitability_score=40.0)
+        b = _zoro(vendor_name="Jamieson Catalog",
+                  found_part_number=None, pn_match_status="not_visible",
+                  source_url="https://catalog.jamiesonequipment.com",
+                  suitability_score=35.0)
+        result = {"tier_3": {"results": [a, b]}}
+        apply_ranking_bands(result, "HHI150-12-447T")
+        rejected = [c for c in (a, b)
+                    if c.get("rejection_reason") == "duplicate_vendor_domain"]
+        assert len(rejected) == 1
+
+    def test_marketplace_different_vendor_names_never_collapse(self):
+        # False-collapse guard: two different sellers surfaced via one
+        # registry-classified marketplace domain must BOTH survive.
+        a = _zoro(vendor_name="Alpha Seals",
+                  source_url="https://www.zoro.com/alpha-seals-84004-28sp/i/1")
+        b = _zoro(vendor_name="Beta Bearing Supply",
+                  source_url="https://www.zoro.com/beta-bearing-84004-28sp/i/2")
+        result = {"tier_2": {"results": [a, b]}}
+        apply_ranking_bands(result, _GUSHER_PN)
+        assert a.get("rejection_reason") is None
+        assert b.get("rejection_reason") is None
+
+    def test_different_registrable_domains_never_collapse(self):
+        # springerparts.com vs catalog.springerpumps.com: vendor-IDENTITY work
+        # (TECH_DEBT.md), out of scope for domain normalization.
+        a = _zoro(vendor_name="Springer Parts / Springer Pumps, LLC",
+                  source_url="https://www.springerparts.com")
+        b = _zoro(vendor_name="Springer Pumps",
+                  source_url="https://catalog.springerpumps.com/viewitems/sp-gusher")
+        result = {"tier_3": {"results": [a, b]}}
+        apply_ranking_bands(result, _GUSHER_PN)
+        assert a.get("rejection_reason") is None
+        assert b.get("rejection_reason") is None
+
+    def test_onboarded_candidate_never_marked_duplicate(self):
+        onboarded = _dxp()                                   # dxpe.com, registry
+        discovered = _zoro(vendor_name="DXP Store",
+                           source_url="https://shop.dxpe.com/p/84004-28sp",
+                           base_price=99.0, price_tbd=False)
+        result = {"tier_1": {"results": [onboarded]},
+                  "tier_2": {"results": [discovered]}}
+        apply_ranking_bands(result, _GUSHER_PN)
+        assert onboarded.get("rejection_reason") is None     # richer or not: kept
+        assert discovered["rejection_reason"] == "duplicate_vendor_domain"
+
+    def test_mocks_urlless_and_prerejected_do_not_participate(self):
+        mock = _mock_seed()
+        urlless = _zoro(source_url=None, found_part_number=None,
+                        pn_match_status="not_visible")
+        rejected = _zoro(rejection_reason="pn_mismatch",
+                         source_url="https://www.zoro.com/x/i/1")
+        active = _zoro(source_url="https://www.zoro.com/y/i/2")
+        result = {"tier_2": {"results": [rejected, active]},
+                  "tier_3": {"results": [mock, urlless]}}
+        apply_ranking_bands(result, _GUSHER_PN)
+        assert rejected["rejection_reason"] == "pn_mismatch"  # first-set wins
+        assert active.get("rejection_reason") is None         # no active dup
+        assert mock.get("rejection_reason") is None
+        assert urlless.get("rejection_reason") is None
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1379,7 @@ class TestAcceptanceGusher:
 
 _BAND_KEYS = {"band", "evidence_quality", "banded", "provenance", "band_note",
               "band_c_capped", "edge_stale", "price_stale", "matcher_version",
-              "stale_hint"}
+              "stale_hint", "pn_source"}
 
 
 def _collect_keys(obj, found: set) -> None:
