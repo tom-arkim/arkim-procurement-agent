@@ -317,6 +317,22 @@
 .proc-opt .o-whybody .wb-row { display: flex; gap: 9px; font-size: 12.5px; color: var(--muted); line-height: 1.55; padding: 3px 0; }
 .proc-opt .o-whybody .wb-row .d { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; margin-top: 7px; }
 
+/* State C banner — a supplier-CONFIRMED quote: the strongest claim on the screen,
+   worn as a full band (outranks and replaces the Recommended band). Done-tone,
+   icon + text (never colour alone). */
+.proc-opt[data-conf="true"] { border-color: var(--st-done); }
+.proc-opt .conf-band { display: flex; align-items: center; gap: 8px; padding: 8px 17px; background: var(--st-done-fill); color: var(--st-done); font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; border-bottom: 1px solid var(--st-done); flex-wrap: wrap; }
+.proc-opt .conf-band .reason { font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 12.5px; opacity: 0.95; color: var(--text); }
+
+/* "Also listed at N more pages" — collapsed same-domain duplicates (render-time
+   dedup, options-compose). A quiet disclosure, not a card feature. */
+.o-also { margin-top: 2px; }
+.o-also-t { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; padding: 4px 2px; font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--muted-2); cursor: pointer; position: relative; border-radius: 4px; }
+.o-also-t:hover { color: var(--accent-text); }
+.o-also-t:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.o-also-t::after { content: ""; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%); }
+.o-also-list { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+
 /* ---- outreach block (RANKING_BANDS_V1, Band C) ----
    Suppliers we're ASKING, not findings — deliberately NOT the option-card look:
    dashed border + flat surface (vs the cards' solid border + shadow), no price
@@ -328,6 +344,9 @@
 .proc-outreach .or-yours { flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--accent-text); background: var(--accent-fill); border: 1px solid var(--accent-line); border-radius: 999px; padding: 2px 8px; }
 .proc-outreach .or-text b { font-weight: 600; color: var(--text-strong); }
 .proc-outreach .or-note { font-size: 12px; color: var(--muted); line-height: 1.5; border-top: 1px solid var(--border-soft); padding-top: 8px; margin-top: 2px; }
+/* Compact variant — rendered ABOVE thin findings (≤2 cards) so "your supplier is
+   being asked" is visible without scrolling; same content, tighter rhythm. */
+.proc-outreach[data-compact="true"] { padding: 11px 14px 12px; gap: 6px; }
 
 /* ---- in-progress (working) block ---- */
 .proc-working { display: flex; align-items: center; gap: 14px; padding: 22px 4px; }

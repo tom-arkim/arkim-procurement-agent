@@ -16,7 +16,8 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useRunLive, useOrderNow, useOrders, useGroup, useDemoMode } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
-import { ProcHead, procMoney } from "./proc-ui";
+import { ProcHead, SecHead, procMoney } from "./proc-ui";
+import { composeFindings, registrableDomain } from "./options-compose";
 import { GoferLoader } from "@/components/ui/gofer-loader";
 import { useProcToast } from "./proc-shell";
 import { QuotesSection } from "./quotes-section";
@@ -214,6 +215,16 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const hasOutreach = outreachSuppliers.length > 0;
   const priced = options.filter((c) => c.price != null);
   const recId = run.selected_candidate?.id ?? priced[0]?.id ?? options[0]?.id;
+  // Render-time composition (banded payloads only — brief §2.3): collapse
+  // same-domain duplicates onto one card, then group buy-now apart from
+  // quote-needed. Pure presentation; server band order preserved within groups.
+  // Legacy payloads keep the flat tier-array list untouched.
+  const composed = banded ? composeFindings(sr?.findings ?? []) : null;
+  // Distinct cards actually painted (post-dedup) — drives counts and the
+  // thin-results outreach placement.
+  const displayCount = composed
+    ? composed.buyNow.length + composed.quoteNeeded.length
+    : options.length;
 
   // Committed = this run's single selection/order is locked in (buying ⇒ selecting), so
   // the per-candidate order/quote actions must lock. Three signals (mirror the backend
@@ -231,12 +242,10 @@ export function OptionsScreen({ runId }: { runId: string }) {
   const selectedId = sel?.candidate_id ?? run.selected_candidate?.id;
   const selectedVendor = options.find((c) => c.id === selectedId)?.vendorName;
 
-  // The candidate list — the working decision surface when uncommitted, the locked,
-  // read-only record (collapsed into the accordion) once committed. Defined once so both
-  // the committed and uncommitted layouts render the SAME list (no fork).
-  const optionsList = (
-    <div className="proc-opts">
-            {options.map((c) => {
+  // One card — the working decision surface. Shared by the banded (grouped,
+  // deduped) and legacy (flat) lists so there is exactly one card renderer.
+  // `alsoListed` = same-domain duplicates collapsed behind an affordance.
+  const renderCard = (c: Candidate, alsoListed: Candidate[] = []) => {
               const rec = c.id === recId;
               const exact = isExact(c);
               const isMkt = c.purchaseChannel === "marketplace";  // State M: a buyable price now
@@ -247,14 +256,28 @@ export function OptionsScreen({ runId }: { runId: string }) {
               // when quoted, the listing's otherwise — composes, never masked.
               const unverified = quoted ? Boolean(c.quoteUnverified) : Boolean(c.priceUnverified);
               return (
-                <div key={c.id} className="proc-opt" data-rec={rec}>
-                  {rec && (
+                <div key={c.id} className="proc-opt" data-rec={rec && !quoted} data-conf={quoted}>
+                  {/* State C band — a supplier-confirmed quote is the platform's strongest,
+                      proudest claim: it outranks (and replaces) the Recommended band. Every
+                      figure in it is the quote's own; an unverified-figure quote states the
+                      confirmation without asserting the number. */}
+                  {quoted ? (
+                    <div className="conf-band">
+                      <ProcIcon name="checkCircle" size={13} />Confirmed by supplier
+                      <span style={{ opacity: 0.5, margin: "0 2px" }}>·</span>
+                      <span className="reason">
+                        {c.vendorName} confirmed{!c.quoteUnverified && c.price != null ? ` ${procMoney(c.price)}` : " this quote"}
+                        {c.leadTime ? ` · ${c.leadTime.toLowerCase()}` : ""}
+                        {c.quoteConfirmedAt ? ` · on ${c.quoteConfirmedAt.slice(0, 10)}` : ""}
+                      </span>
+                    </div>
+                  ) : rec ? (
                     <div className="rec-band">
                       <ProcIcon name="spark" size={13} />Recommended
                       <span style={{ opacity: 0.5, margin: "0 2px" }}>·</span>
                       <span className="reason">{recReason(c)}</span>
                     </div>
-                  )}
+                  ) : null}
                   <div className="o-body">
                     <div className="o-tt">
                       {/* The headline is ALWAYS the actual seller. Gofer is a buying agent
@@ -299,6 +322,9 @@ export function OptionsScreen({ runId }: { runId: string }) {
                           View listing ↗
                         </a>
                       )}
+                      {/* Same-domain duplicates, collapsed at render time (brief §2.3) —
+                          exposed, never dropped. */}
+                      {alsoListed.length > 0 && <AlsoListed also={alsoListed} />}
                     </div>
                     <div className="o-price">
                       {c.price != null
@@ -388,8 +414,24 @@ export function OptionsScreen({ runId }: { runId: string }) {
                   )}
                 </div>
               );
-            })}
+  };
+
+  // The candidate list — banded payloads paint the composed groups (buy-now apart
+  // from quote-needed, headers only when BOTH exist so a single-kind list stays
+  // plain); legacy payloads keep the flat tier-order list byte-for-byte.
+  const optionsList = composed ? (
+    <div className="proc-opts">
+      {composed.buyNow.length > 0 && composed.quoteNeeded.length > 0 && (
+        <SecHead t="Ready to order" c={composed.buyNow.length} />
+      )}
+      {composed.buyNow.map((e) => renderCard(e.primary, e.alsoListed))}
+      {composed.buyNow.length > 0 && composed.quoteNeeded.length > 0 && (
+        <SecHead t="Quote needed" c={composed.quoteNeeded.length} />
+      )}
+      {composed.quoteNeeded.map((e) => renderCard(e.primary, e.alsoListed))}
     </div>
+  ) : (
+    <div className="proc-opts">{options.map((c) => renderCard(c))}</div>
   );
 
   const partRail = (
@@ -401,8 +443,12 @@ export function OptionsScreen({ runId }: { runId: string }) {
   // The outreach status block (Band C). Null when there are no targets — no empty
   // shell — and never on legacy/flag-off payloads (hasOutreach is banded-only), so
   // the flag-off render tree is unchanged.
+  // Thin results (≤2 cards): the buyer must see "your supplier is being asked"
+  // without scrolling, so the block renders compact and ABOVE the findings;
+  // rich results keep it below (brief §2.3).
+  const findingsThin = displayCount > 0 && displayCount <= 2;
   const outreachBlock = hasOutreach
-    ? <OutreachBlock suppliers={outreachSuppliers} manufacturer={specs?.manufacturer} />
+    ? <OutreachBlock suppliers={outreachSuppliers} manufacturer={specs?.manufacturer} compact={findingsThin} />
     : null;
 
   // Nothing found but suppliers to ask: a real state — the headline must not claim
@@ -445,7 +491,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
           {outreachBlock ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <CollapsedRecord
-                count={options.length}
+                count={displayCount}
                 vendor={selectedVendor}
                 open={optionsOpen}
                 onToggle={() => setOptionsOpen((o) => !o)}
@@ -456,7 +502,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
             </div>
           ) : (
             <CollapsedRecord
-              count={options.length}
+              count={displayCount}
               vendor={selectedVendor}
               open={optionsOpen}
               onToggle={() => setOptionsOpen((o) => !o)}
@@ -470,8 +516,17 @@ export function OptionsScreen({ runId }: { runId: string }) {
         <div className="proc-two-col">
           {outreachBlock ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {optionsList}
-              {outreachBlock}
+              {findingsThin ? (
+                <>
+                  {outreachBlock}
+                  {optionsList}
+                </>
+              ) : (
+                <>
+                  {optionsList}
+                  {outreachBlock}
+                </>
+              )}
             </div>
           ) : (
             optionsList
@@ -539,7 +594,9 @@ function CollapsedRecord({
  *  the user's own. The copy claims intent only ("we're asking") — RFQ delivery is a
  *  separate milestone, so nothing here may read as "an email was sent". Renders
  *  nothing for an empty target list (callers also gate — belt and braces). */
-function OutreachBlock({ suppliers, manufacturer }: { suppliers: OutreachTarget[]; manufacturer?: string }) {
+function OutreachBlock({ suppliers, manufacturer, compact }: {
+  suppliers: OutreachTarget[]; manufacturer?: string; compact?: boolean;
+}) {
   const headId = useId();
   if (suppliers.length === 0) return null;
   const onboarded = suppliers.filter((s) => s.onboarded);
@@ -552,10 +609,10 @@ function OutreachBlock({ suppliers, manufacturer }: { suppliers: OutreachTarget[
     ? `authorized ${manufacturer ? `${manufacturer} ` : ""}distributor${others.length === 1 ? "" : "s"}`
     : `supplier${others.length === 1 ? "" : "s"} matched to this part category`;
   return (
-    <section className="proc-outreach" aria-labelledby={headId}>
+    <section className="proc-outreach" data-compact={compact || undefined} aria-labelledby={headId}>
       <div className="or-head" id={headId}>
         <ProcIcon name="mail" size={13} />
-        Requesting quotes
+        Requesting quotes — in progress on your behalf
       </div>
       {onboarded.map((s) => (
         <div className="or-row" key={s.vendorName}>
@@ -757,6 +814,41 @@ function UnverifiedNote({ reason = "listing" }: { reason?: "listing" | "quote" }
               You&apos;ll be charged the supplier&apos;s actual price when the order is confirmed —
               not this estimate.</>}
       </div>
+    </div>
+  );
+}
+
+/** Human label for a collapsed duplicate listing: its domain + whatever real
+ *  evidence it carries (PN, price). Nothing invented — absent fields just omit. */
+function alsoLabel(c: Candidate): string {
+  const bits = [registrableDomain(c.url) || "listing"];
+  if (c.foundPartNumber) bits.push(`PN ${c.foundPartNumber}`);
+  if (c.price != null) bits.push(procMoney(c.price));
+  return bits.join(" · ");
+}
+
+/** "Also listed at N more pages" — the same vendor's other URL granularities,
+ *  collapsed at render time (options-compose). Exposed on demand, each with its
+ *  own working listing link — collapsed never means dropped. */
+function AlsoListed({ also }: { also: Candidate[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="o-also">
+      <button type="button" className="o-also-t" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        Also listed at {also.length} more page{also.length === 1 ? "" : "s"}
+        <ProcIcon name={open ? "chevD" : "chevR"} size={12} />
+      </button>
+      {open && (
+        <ul className="o-also-list">
+          {also.map((c) => (
+            <li key={c.id}>
+              <a className="o-listing" href={c.url} target="_blank" rel="noopener noreferrer">
+                {alsoLabel(c)} ↗
+              </a>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
