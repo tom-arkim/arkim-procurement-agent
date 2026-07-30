@@ -91,7 +91,7 @@
 .proc-navsite .ss { font-size: 11px; color: var(--muted); font-weight: 500; }
 .proc-navlabel { font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted-2); padding: 4px 12px 8px; }
 .proc-navlist { display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; }
-.proc-navitem { display: flex; align-items: center; gap: 12px; padding: 10px 11px; border-radius: var(--r); cursor: pointer; color: var(--muted); font-size: 14px; font-weight: 600; transition: background-color 0.14s, color 0.14s; position: relative; background: none; border: none; font-family: var(--font-sans); text-align: left; width: 100%; }
+.proc-navitem { display: flex; align-items: center; gap: 12px; padding: 13px 11px; border-radius: var(--r); cursor: pointer; color: var(--muted); font-size: 14px; font-weight: 600; transition: background-color 0.14s, color 0.14s; position: relative; background: none; border: none; font-family: var(--font-sans); text-align: left; width: 100%; }
 .proc-navitem:hover { background: var(--surface-2); color: var(--text); }
 .proc-navitem .ni-ic { color: var(--muted-2); flex: none; }
 .proc-navitem[data-on="true"] { background: var(--accent-fill); color: var(--accent-text); }
@@ -115,7 +115,7 @@
 .proc-bellhead { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; padding: 8px 10px 6px; }
 .proc-bellempty { font-size: 13px; color: var(--muted); text-align: center; padding: 14px 10px 16px; }
 .proc-belllist { display: flex; flex-direction: column; gap: 2px; }
-.proc-bellitem { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; padding: 9px 10px; border: none; border-radius: var(--r); background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-sans); transition: background-color 0.12s; }
+.proc-bellitem { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; padding: 13px 10px; border: none; border-radius: var(--r); background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-sans); transition: background-color 0.12s; }
 .proc-bellitem:hover { background: var(--surface-2); }
 .proc-bellitem:disabled { cursor: default; }
 .proc-bellitem:disabled:hover { background: transparent; }
@@ -595,6 +595,47 @@
 .spendbar { height: 6px; border-radius: 3px; background: var(--surface-hi); overflow: hidden; }
 .spendbar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 @media (max-width: 900px) { .proc-intel { grid-template-columns: 1fr; } }
+
+/* ============================================================
+   Touch-target floor — brief §1.10: every interactive control presents a
+   ≥44px hit area. Dense desktop visuals stay as they are; controls smaller
+   than 44px expand their HIT AREA (not their visible box) via a centered
+   inset pseudo-element. Padding-based bumps are used where a row can absorb
+   them (nav items, bell rows) so stacked rows never overlap hit areas.
+   ============================================================ */
+.proc-btn, .proc-btnprimary, .proc-iconbtn, .ask-send, .ask-attach, .ask-chip,
+.proc-stepper-btn, .proc-sitetab, .proc-back, .o-why, .o-unv-i, .af-x,
+.pih-drill, .o-listing, .q-contact .qc-save { position: relative; }
+.proc-btn::after, .proc-btnprimary::after, .proc-iconbtn::after, .ask-send::after,
+.ask-attach::after, .ask-chip::after, .proc-stepper-btn::after, .proc-sitetab::after,
+.proc-back::after, .o-why::after, .o-unv-i::after, .af-x::after,
+.pih-drill::after, .o-listing::after, .q-contact .qc-save::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: max(100%, 44px); height: max(100%, 44px);
+  transform: translate(-50%, -50%);
+}
+/* Stacked action column (Order button above the "Why?" toggle): the button wins
+   hit-testing in the sliver where the small control's expanded area reaches it. */
+.o-act .proc-btn { z-index: 1; }
+/* Text inputs meet the floor with real height (no pseudo needed). */
+.proc-field input, .proc-idinput { min-height: 44px; }
+
+/* ---- skeletons — list/table loading placeholders (skeletons, not spinners) ---- */
+.proc-theme[data-theme="dark"] { --sk-sweep: rgba(255, 255, 255, 0.05); }
+.proc-theme[data-theme="light"] { --sk-sweep: rgba(255, 255, 255, 0.55); }
+.proc-skel { position: relative; overflow: hidden; background: var(--sk); border-radius: var(--r); min-height: 12px; }
+.proc-skel::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--sk-sweep), transparent);
+  animation: proc-skel-sweep 1.4s ease infinite; }
+@keyframes proc-skel-sweep { 100% { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .proc-skel::after { animation: none; } }
+.proc-skelrow { display: flex; flex-direction: column; gap: 9px; padding: 16px 17px;
+  border: 1px solid var(--border-soft); border-radius: var(--r-lg); background: var(--surface); }
+.proc-skellist { display: flex; flex-direction: column; gap: 10px; }
+
+/* ---- shared icon tile (list-row leading icon — replaces per-screen inline styles) ---- */
+.proc-rowic { width: 32px; height: 32px; flex: none; border-radius: var(--r); border: 1px solid var(--border);
+  background: var(--bg); color: var(--muted); display: flex; align-items: center; justify-content: center; }
 
 /* ---- chevron loader ---- */
 .proc-chevstack { display: flex; flex-direction: column; gap: 2.5px; flex: none; }
