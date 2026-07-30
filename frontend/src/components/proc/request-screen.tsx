@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { createRun, sendMessage, confirmIntake, uploadNameplate, seedAssetSpecs } from "@/lib/api";
 import { useRun } from "@/lib/queries";
@@ -101,6 +101,7 @@ export function RequestScreen() {
   const router = useRouter();
   const qc = useQueryClient();
   const fire = useProcToast();
+  const params = useSearchParams();
 
   const [stage, setStage] = useState<Stage>("entry");
   const [text, setText] = useState("");
@@ -145,6 +146,24 @@ export function RequestScreen() {
 
   const allReady = items.length > 0 && items.every((it) => readyById[it.runId] === true);
   const readyCount = items.filter((it) => readyById[it.runId] === true).length;
+
+  // Deep-link entries (frontend-only, no new endpoints):
+  //  ?prefill=<text>  — the reorder affordance seeds the description box.
+  //  ?resume=<runId>  — the home triage queue reopens a run stuck mid-intake as
+  //    an identify card (single-part: it already has its own group at birth, so
+  //    "+ add part" is hidden on a resume — no cross-basket mixing).
+  const prefill = params.get("prefill");
+  const resumeId = params.get("resume");
+  const resumed = Boolean(resumeId);
+  useEffect(() => {
+    if (prefill) setText((t) => t || prefill);
+  }, [prefill]);
+  useEffect(() => {
+    if (resumeId) {
+      setItems((prev) => (prev.length ? prev : [{ runId: resumeId, reply: "" }]));
+      setStage((s) => (s === "entry" ? "identify" : s));
+    }
+  }, [resumeId]);
 
   // A returned part is seedable only if it carries REAL identity — never seed a card from an
   // empty/identity-less fragment (no invented parts).
@@ -402,20 +421,23 @@ export function RequestScreen() {
           ))}
 
           {/* + add another part — a new run created into the SAME basket group. The button and
-              Enter share one path (handleAddClick / addPart); an empty box focuses, never no-ops. */}
-          <div className="id-actions" style={{ marginTop: 12 }}>
-            <input
-              ref={addRef}
-              className="proc-idinput"
-              value={addText}
-              onChange={(e) => setAddText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") addPart(); }}
-              placeholder="Add another part — describe it…"
-            />
-            <button className="proc-btn" data-kind="quiet" disabled={addBusy} onClick={handleAddClick}>
-              {addBusy ? "Adding…" : "+ Add part"}
-            </button>
-          </div>
+              Enter share one path (handleAddClick / addPart); an empty box focuses, never no-ops.
+              Hidden on a ?resume= deep link (no basket group to add into). */}
+          {!resumed && (
+            <div className="id-actions" style={{ marginTop: 12 }}>
+              <input
+                ref={addRef}
+                className="proc-idinput"
+                value={addText}
+                onChange={(e) => setAddText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") addPart(); }}
+                placeholder="Add another part — describe it…"
+              />
+              <button className="proc-btn" data-kind="quiet" disabled={addBusy} onClick={handleAddClick}>
+                {addBusy ? "Adding…" : "+ Add part"}
+              </button>
+            </div>
+          )}
 
           {/* Basket advance — ONE action for the whole group, enabled only when EVERY item is sufficient. */}
           <div className="id-actions" style={{ marginTop: 16 }}>

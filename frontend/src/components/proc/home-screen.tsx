@@ -14,12 +14,14 @@ import { useRouter } from "next/navigation";
 import { useRuns, useReorder } from "@/lib/queries";
 import { useProcEvents } from "./proc-shell";
 import { ProcIcon } from "./proc-icon";
-import { ProcPill, SecHead, ProcHead, type ProcTone } from "./proc-ui";
+import { ProcPill, SecHead, ProcHead, SkelList, type ProcTone } from "./proc-ui";
 import { HomeProcImpact } from "./home-impact";
 import { BRAND_NAME } from "@/lib/brand";
 import type { Phase, ReorderItem, SourcingRunListItem } from "@/types";
 
 const HANDOFF_PHASE: Phase = "pending_intake";
+/** Mid-intake: the agent asked something and is waiting on the user's answer. */
+const CLARIFY_PHASE: Phase = "intake";
 const INFLIGHT_PHASES: Phase[] = [
   "sourcing", "comparison", "pending_first_approval", "pending_second_approval",
   "approved", "executing", "fulfilling",
@@ -77,7 +79,8 @@ export function HomeScreen() {
   if (isLoading) {
     return (
       <div className="proc-max proc-center">
-        <ProcHead title={<><b>Parts &amp; Orders</b></>} sub="Loading what needs you…" actions={needPart} />
+        <ProcHead title={<><b>Parts &amp; Orders</b></>} sub="Checking what needs you…" actions={needPart} />
+        <SkelList rows={4} label="Loading your requests" />
       </div>
     );
   }
@@ -95,9 +98,12 @@ export function HomeScreen() {
 
   const all = runs ?? [];
   const handoffs = all.filter((r) => r.phase === HANDOFF_PHASE);
+  // Runs parked mid-intake — the agent asked for a detail and is waiting on the
+  // user. Real state, previously invisible on Home; resumes in the request flow.
+  const clarify = all.filter((r) => r.phase === CLARIFY_PHASE);
   const decisions = all.filter((r) => DECISION_PHASES.includes(r.phase as Phase));
   const inFlight = all.filter((r) => INFLIGHT_PHASES.includes(r.phase as Phase) && !DECISION_PHASES.includes(r.phase as Phase));
-  const needsCount = handoffs.length + decisions.length;
+  const needsCount = handoffs.length + clarify.length + decisions.length;
 
   // Empty: nothing in the pipeline at all.
   if (all.length === 0) {
@@ -135,6 +141,21 @@ export function HomeScreen() {
           <div className="proc-actions">
             {handoffs.map((r) => (
               <HandoffCard key={r.id} run={r} onOpen={() => router.push(`/parts/${r.id}`)} />
+            ))}
+            {clarify.map((r) => (
+              <button key={r.id} className="proc-act" data-tone="act" onClick={() => router.push(`/request?resume=${r.id}`)}>
+                <span className="pa-ic"><ProcIcon name="mail" size={18} /></span>
+                <span className="pa-tt">
+                  <span className="pa-title" style={{ display: "block" }}>
+                    {isRunUpdated(r.id) && <span className="proc-newdot" aria-label="New update" />}
+                    Waiting on your answer
+                  </span>
+                  <span className="pa-sub" style={{ display: "block" }}>
+                    {r.asset_summary ?? "We need one more detail to identify this part"}
+                  </span>
+                </span>
+                <span className="pa-go">Answer<ProcIcon name="arrowR" size={14} /></span>
+              </button>
             ))}
             {decisions.map((r) => {
               const c = decisionCard(r.phase as Phase);
@@ -194,7 +215,17 @@ export function HomeScreen() {
           <SecHead t="Coming up" />
           <div className="proc-actions">
             {reorderData!.reorder.slice(0, 4).map((r) => (
-              <ReorderCard key={`${r.manufacturer}-${r.part_number}`} item={r} onOrder={() => router.push("/request")} />
+              <ReorderCard
+                key={`${r.manufacturer}-${r.part_number}`}
+                item={r}
+                // No reorder endpoint exists — the affordance prefills a new request
+                // with the part's real identity (frontend-only deep link, no invention).
+                onOrder={() =>
+                  router.push(`/request?prefill=${encodeURIComponent(
+                    `${r.part}${r.part_number ? ` (part no. ${r.part_number})` : ""} — same as my last order`,
+                  )}`)
+                }
+              />
             ))}
           </div>
         </>
@@ -204,7 +235,7 @@ export function HomeScreen() {
       <SecHead t="More" />
       <div className="proc-flight">
         <button className="proc-fl" onClick={() => router.push("/history")}>
-          <span style={{ width: 32, height: 32, flexShrink: 0, borderRadius: "var(--r)", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <span className="proc-rowic">
             <ProcIcon name="clock" size={16} />
           </span>
           <span className="fl-tt">
@@ -216,7 +247,7 @@ export function HomeScreen() {
           <ProcIcon name="chevR" size={15} color="var(--muted-2)" />
         </button>
         <button className="proc-fl" onClick={() => router.push("/settings")}>
-          <span style={{ width: 32, height: 32, flexShrink: 0, borderRadius: "var(--r)", border: "1px solid var(--border)", background: "var(--bg)", color: "var(--muted)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <span className="proc-rowic">
             <ProcIcon name="building" size={16} />
           </span>
           <span className="fl-tt">

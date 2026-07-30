@@ -14,7 +14,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAllOrders, useImpact } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
-import { ProcPill, ProcHead, procMoney, type ProcTone } from "./proc-ui";
+import { ProcPill, ProcHead, SkelList, procMoney, type ProcTone } from "./proc-ui";
 import { ImpactPanelBody } from "./impact-screen";
 import { BRAND_NAME } from "@/lib/brand";
 import type { Order, OrderStatus } from "@/types";
@@ -59,7 +59,7 @@ export function HistoryScreen() {
         ))}
       </div>
 
-      {isLoading && tab !== "impact" && <p style={{ fontSize: 13, color: "var(--muted)" }}>Loading…</p>}
+      {isLoading && tab !== "impact" && <SkelList rows={3} label="Loading your order history" />}
       {tab === "orders" && !isLoading && <OrdersTab orders={orders} onNew={() => router.push("/request")} />}
       {tab === "spend" && !isLoading && <SpendTab orders={orders} />}
       {tab === "impact" && <ImpactTab />}
@@ -262,6 +262,6 @@ function SpendTab({ orders }: { orders: Order[] }) {
 
 function ImpactTab() {
   const { data, isLoading } = useImpact();
-  if (isLoading || !data) return <p style={{ fontSize: 13, color: "var(--muted)" }}>Loading…</p>;
+  if (isLoading || !data) return <SkelList rows={3} label="Loading your impact" />;
   return <ImpactPanelBody d={data} />;
 }

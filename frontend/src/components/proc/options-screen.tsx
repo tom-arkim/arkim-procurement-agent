@@ -171,7 +171,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
     return () => clearInterval(t);
   }, [runPhase, refetch]);
 
-  if (isLoading) return <Shell><Working label="Loading…" sub="Fetching your request." /></Shell>;
+  if (isLoading) return <Shell><Working label="Opening this request…" sub="Fetching the latest status." spin /></Shell>;
   if (isError || !run) return <Shell><Working label="Couldn't load this request" sub="Is the backend running?" loud /></Shell>;
 
   const phase = run.phase as Phase;
