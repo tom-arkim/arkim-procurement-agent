@@ -1357,7 +1357,14 @@
   flex: 1 1 auto;
 }
 .portal-history-price { color: var(--portal-graphite); }
-.portal-history-status { color: var(--portal-slate); }
+.portal-history-status { color: var(--portal-slate); font-size: 12.5px; }
+/* Quote-history status chips — dot (shape) + label + colour, never colour alone.
+   Colour rules per the palette notes: amber is border-only (graphite text);
+   success green is text-safe on the white card (5.31:1). */
+.portal-status-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--portal-line-strong); color: var(--portal-slate); background: var(--portal-card); white-space: nowrap; }
+.portal-status-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.portal-status-chip[data-status="active"] { color: var(--portal-success); border-color: var(--portal-success); }
+.portal-status-chip[data-status="review"] { color: var(--portal-graphite); border-color: var(--portal-amber); }
 
 /* Mobile (~380px): stack the paired fields; keep everything one column. */
 @media (max-width: 560px) {

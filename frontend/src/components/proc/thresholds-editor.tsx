@@ -17,7 +17,7 @@
 
 import { useEffect, useState } from "react";
 import { ProcIcon } from "./proc-icon";
-import { procMoney } from "./proc-ui";
+import { SkelList, procMoney } from "./proc-ui";
 import { ApiError } from "@/lib/query-client";
 import { PROC_FACILITY_ID } from "@/lib/proc-config";
 import { useApprovalRules, useUpsertApprovalRule } from "@/lib/queries";
@@ -101,7 +101,7 @@ export function ThresholdsEditor() {
     </div>;
   }
   if (isLoading || !tiers) {
-    return <div className="rc-note">Loading…</div>;
+    return <SkelList rows={2} label="Loading approval thresholds" />;
   }
 
   return (

@@ -130,6 +130,23 @@ export function QuotePage({ token }: { token: string }) {
       <QuoteShell supplier={context?.supplier}>
         <section className="quote-state-card quote-state-card--confirm">
           <h1 className="quote-state-title">Quote received</h1>
+          {/* Their own submission, echoed back — the confirmation carries the
+              quote summary (brief §3.1), straight from what they entered. */}
+          {form && (
+            <dl className="quote-request-facts" style={{ margin: "0 0 14px" }}>
+              <div className="quote-request-fact"><dt>Unit price</dt><dd>${form.unitPrice}</dd></div>
+              <div className="quote-request-fact"><dt>Quantity</dt><dd>{form.quantity}</dd></div>
+              <div className="quote-request-fact">
+                <dt>Lead time</dt><dd>{form.inStock ? "In stock" : `${form.leadTimeDays} days`}</dd>
+              </div>
+              {form.partNumber.trim() && (
+                <div className="quote-request-fact"><dt>Part number</dt><dd>{form.partNumber}</dd></div>
+              )}
+              {form.quoteNumber.trim() && (
+                <div className="quote-request-fact"><dt>Your ref</dt><dd>{form.quoteNumber}</dd></div>
+              )}
+            </dl>
+          )}
           {result.status === "active" ? (
             <p className="quote-state-body">
               Your quote is in front of the buyer now. If they proceed,
@@ -209,6 +226,7 @@ export function QuotePage({ token }: { token: string }) {
           onChange={setForm}
           onSubmit={handleSubmit}
           submitting={submitting}
+          revising={Boolean(context.existing_quote)}
         />
       </QuoteShell>
     );

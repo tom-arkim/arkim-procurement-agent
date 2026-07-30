@@ -24,6 +24,16 @@ import {
 } from "@/lib/portal-api";
 import { QuoteForm, type QuoteFormState } from "../../quote/[token]/quote-form";
 
+/** Effective quote statuses (portal-api QuoteHistoryRow.status) → chip labels.
+ *  Unknown values fall through verbatim — never masked. */
+const STATUS_LABEL: Record<string, string> = {
+  active: "Active",
+  review: "In review",
+  superseded: "Superseded",
+  expired: "Expired",
+  withdrawn: "Withdrawn",
+};
+
 export function OpenRequests({ token }: { token: string }) {
   const tokenRef = useRef(token);
   const [requests, setRequests] = useState<OpenRequest[] | null>(null);
@@ -153,6 +163,7 @@ export function OpenRequests({ token }: { token: string }) {
                       onChange={setForm}
                       onSubmit={(f) => void handleSubmit(r.run_id, f)}
                       submitting={submitting}
+                      revising={Boolean(r.quoted)}
                     />
                   </div>
                 )}
@@ -172,10 +183,12 @@ export function OpenRequests({ token }: { token: string }) {
                   {q.quoted_part_number || q.part_number || "—"}
                 </span>
                 <span className="portal-history-price">${q.unit_price}</span>
-                <span className="portal-history-status">
-                  {q.status}
-                  {q.submitted_at ? ` · ${q.submitted_at.slice(0, 10)}` : ""}
+                <span className="portal-status-chip" data-status={q.status}>
+                  {STATUS_LABEL[q.status] ?? q.status}
                 </span>
+                {q.submitted_at && (
+                  <span className="portal-history-status">{q.submitted_at.slice(0, 10)}</span>
+                )}
               </li>
             ))}
           </ul>

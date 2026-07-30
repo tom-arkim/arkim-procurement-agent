@@ -18,7 +18,7 @@
 import { useRouter } from "next/navigation";
 import { useRuns, useRun } from "@/lib/queries";
 import { ProcIcon } from "./proc-icon";
-import { ProcHead } from "./proc-ui";
+import { ProcHead, ProcErrorNote, Skel, SkelList } from "./proc-ui";
 import { ApprovalActions, deriveApproval, approvalStatusLine } from "./approval-actions";
 import { ApprovalContext } from "./approval-context";
 import type { SourcingRunListItem } from "@/types";
@@ -45,13 +45,19 @@ export function ApprovalsScreen() {
       />
 
       {errored ? (
-        <div className="rc-note" style={{ color: "var(--st-overdue)" }}>
-          Couldn&apos;t load the approvals queue. Is the backend running?
-        </div>
+        <ProcErrorNote title="Couldn't load the approvals queue." sub="Is the backend running?" />
       ) : loading ? (
-        <div className="rc-note">Loading…</div>
+        <SkelList rows={2} label="Loading the approvals queue" />
       ) : runs.length === 0 ? (
-        <div className="rc-note">No runs awaiting approval.</div>
+        <div className="proc-empty" style={{ padding: "44px 20px 48px" }}>
+          <div className="pe-mark"><ProcIcon name="checkCircle" size={26} /></div>
+          <div className="pe-t">Nothing is waiting on approval.</div>
+          <div className="pe-s">Orders that need a decision land here.</div>
+          <div className="pe-sub">
+            When a request crosses an approval threshold, it appears in this queue with
+            the chosen supplier, the amount, and one-click approve or reject.
+          </div>
+        </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
           {runs.map((r) => (
@@ -68,7 +74,12 @@ function ApprovalQueueRow({ runId }: { runId: string }) {
   const { data: run, isLoading } = useRun(runId);
 
   if (isLoading || !run) {
-    return <div className="proc-track"><div className="rc-note">Loading…</div></div>;
+    return (
+      <div className="proc-track" role="status" aria-label="Loading approval">
+        <Skel w="38%" h={14} />
+        <div style={{ marginTop: 9 }}><Skel w="62%" h={11} /></div>
+      </div>
+    );
   }
 
   const d = deriveApproval(run);

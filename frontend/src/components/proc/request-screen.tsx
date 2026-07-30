@@ -12,7 +12,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { createRun, sendMessage, confirmIntake, uploadNameplate, seedAssetSpecs } from "@/lib/api";
 import { useRun } from "@/lib/queries";
@@ -101,11 +101,15 @@ export function RequestScreen() {
   const router = useRouter();
   const qc = useQueryClient();
   const fire = useProcToast();
+  const params = useSearchParams();
 
   const [stage, setStage] = useState<Stage>("entry");
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  // Photo dropzone: the entry card accepts a dragged image (same path as the
+  // attach button — one file; the upload endpoint takes a single nameplate shot).
+  const [dragOver, setDragOver] = useState(false);
   // Each described part is its OWN run; all share ONE client-minted basket group_id, so the
   // resolved list proceeds to sourcing as a single basket. Every item renders as a uniform
   // ItemCard (item 0 included).
@@ -142,6 +146,24 @@ export function RequestScreen() {
 
   const allReady = items.length > 0 && items.every((it) => readyById[it.runId] === true);
   const readyCount = items.filter((it) => readyById[it.runId] === true).length;
+
+  // Deep-link entries (frontend-only, no new endpoints):
+  //  ?prefill=<text>  — the reorder affordance seeds the description box.
+  //  ?resume=<runId>  — the home triage queue reopens a run stuck mid-intake as
+  //    an identify card (single-part: it already has its own group at birth, so
+  //    "+ add part" is hidden on a resume — no cross-basket mixing).
+  const prefill = params.get("prefill");
+  const resumeId = params.get("resume");
+  const resumed = Boolean(resumeId);
+  useEffect(() => {
+    if (prefill) setText((t) => t || prefill);
+  }, [prefill]);
+  useEffect(() => {
+    if (resumeId) {
+      setItems((prev) => (prev.length ? prev : [{ runId: resumeId, reply: "" }]));
+      setStage((s) => (s === "entry" ? "identify" : s));
+    }
+  }, [resumeId]);
 
   // A returned part is seedable only if it carries REAL identity — never seed a card from an
   // empty/identity-less fragment (no invented parts).
@@ -290,7 +312,18 @@ export function RequestScreen() {
       {/* ENTRY */}
       {stage === "entry" && (
         <>
-          <div className="proc-ask">
+          <div
+            className="proc-ask"
+            data-drag={dragOver || undefined}
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const dropped = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("image/"));
+              if (dropped) setFile(dropped);
+            }}
+          >
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -336,7 +369,8 @@ export function RequestScreen() {
           )}
           <div className="ask-hint">
             <ProcIcon name="alert" size={13} color="var(--muted-2)" />
-            No part number? That&apos;s fine — describe what it does and we&apos;ll figure it out.
+            No part number? That&apos;s fine — describe what it does, snap the nameplate,
+            or drag a photo in.
           </div>
         </>
       )}
@@ -387,20 +421,23 @@ export function RequestScreen() {
           ))}
 
           {/* + add another part — a new run created into the SAME basket group. The button and
-              Enter share one path (handleAddClick / addPart); an empty box focuses, never no-ops. */}
-          <div className="id-actions" style={{ marginTop: 12 }}>
-            <input
-              ref={addRef}
-              className="proc-idinput"
-              value={addText}
-              onChange={(e) => setAddText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") addPart(); }}
-              placeholder="Add another part — describe it…"
-            />
-            <button className="proc-btn" data-kind="quiet" disabled={addBusy} onClick={handleAddClick}>
-              {addBusy ? "Adding…" : "+ Add part"}
-            </button>
-          </div>
+              Enter share one path (handleAddClick / addPart); an empty box focuses, never no-ops.
+              Hidden on a ?resume= deep link (no basket group to add into). */}
+          {!resumed && (
+            <div className="id-actions" style={{ marginTop: 12 }}>
+              <input
+                ref={addRef}
+                className="proc-idinput"
+                value={addText}
+                onChange={(e) => setAddText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") addPart(); }}
+                placeholder="Add another part — describe it…"
+              />
+              <button className="proc-btn" data-kind="quiet" disabled={addBusy} onClick={handleAddClick}>
+                {addBusy ? "Adding…" : "+ Add part"}
+              </button>
+            </div>
+          )}
 
           {/* Basket advance — ONE action for the whole group, enabled only when EVERY item is sufficient. */}
           <div className="id-actions" style={{ marginTop: 16 }}>
@@ -508,6 +545,36 @@ function ItemCard({
   // Report this item's ready state up whenever it changes (onReady is stable via useCallback).
   useEffect(() => { onReady?.(runId, ready); }, [runId, ready, onReady]);
 
+  // Editable-before-confirm (brief §2.2): the identification card's identity fields
+  // (manufacturer / model / part number) can be corrected before Confirm, persisted
+  // through the SAME PUT the quantity control already uses (seedAssetSpecs). The
+  // sufficiency gate re-derives from the saved specs — clearing a field honestly
+  // drops the card back to "need a little more".
+  const [editing, setEditing] = useState(false);
+  const [editBusy, setEditBusy] = useState(false);
+  const [editVals, setEditVals] = useState({ manufacturer: "", model: "", part_number: "" });
+  const openEdit = () => {
+    setEditVals({
+      manufacturer: val(specs?.manufacturer) ?? "",
+      model: val(specs?.model) ?? "",
+      part_number: val(specs?.part_number) ?? "",
+    });
+    setEditing(true);
+  };
+  const saveEdit = async () => {
+    if (!specs || editBusy) return;
+    setEditBusy(true);
+    try {
+      await seedAssetSpecs(runId, { ...specs, ...editVals });
+      qc.invalidateQueries({ queryKey: queryKeys.runs.detail(runId) });
+      setEditing(false);
+    } catch {
+      fire("Couldn't save those details — please try again.");
+    } finally {
+      setEditBusy(false);
+    }
+  };
+
   // The latest reply for THIS item: seeded from intake, then owned locally after each clarification.
   const [reply, setReply] = useState(initialReply);
   const [moreText, setMoreText] = useState("");
@@ -608,6 +675,44 @@ function ItemCard({
           {ready && pn && <div className="id-meta">Part no. <b>{pn}</b>{mfg ? <> · {mfg}</> : null}</div>}
           {ready && !pn && specs?.spec_based_sourcing && (
             <div className="id-meta">Matching by category — no exact part number needed.</div>
+          )}
+          {/* Real extraction confidence (0–100 from the backend) — shown, never invented. */}
+          {ready && (specs?.part_id_confidence ?? specs?.manufacturer_confidence) != null && (
+            <div className="id-meta" style={{ marginTop: 2 }}>
+              Identified from your request · confidence{" "}
+              {Math.round(specs?.part_id_confidence ?? specs!.manufacturer_confidence)}%
+            </div>
+          )}
+          {ready && !editing && (
+            <button
+              className="proc-btn"
+              data-kind="quiet"
+              style={{ marginTop: 8, padding: "4px 8px", fontSize: 12 }}
+              onClick={openEdit}
+            >
+              Edit details
+            </button>
+          )}
+          {editing && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10, maxWidth: 420 }}>
+              {([["manufacturer", "Manufacturer"], ["model", "Model"], ["part_number", "Part number"]] as const).map(([k, l]) => (
+                <label key={k} style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, fontWeight: 600, color: "var(--muted)" }}>
+                  {l}
+                  <input
+                    className="proc-idinput"
+                    value={editVals[k]}
+                    disabled={editBusy}
+                    onChange={(e) => setEditVals((v) => ({ ...v, [k]: e.target.value }))}
+                  />
+                </label>
+              ))}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="proc-btn" data-kind="quiet" disabled={editBusy} onClick={() => setEditing(false)}>Cancel</button>
+                <button className="proc-btn" data-kind="primary" disabled={editBusy} onClick={saveEdit}>
+                  {editBusy ? "Saving…" : "Save details"}
+                </button>
+              </div>
+            </div>
           )}
           {ready && specs?.quantity != null && (
             <div className="proc-qty" style={{ marginTop: 10 }}>

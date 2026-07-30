@@ -16,7 +16,7 @@
 import { useRouter } from "next/navigation";
 import { useImpact } from "@/lib/queries";
 import { ProcIcon, type ProcIconName } from "./proc-icon";
-import { ProcHead, procMoney } from "./proc-ui";
+import { ProcHead, SkelList, procMoney } from "./proc-ui";
 import { BRAND_NAME } from "@/lib/brand";
 import type { CumulativeImpact, ImpactCounts, ImpactMonth } from "@/types";
 
@@ -60,7 +60,7 @@ export function ImpactScreen() {
       </button>
       <ProcHead title={<>Your {BRAND_NAME} <b>impact</b></>} sub="What you've saved and the legwork we handled — every figure traces to a real transaction." />
 
-      {isLoading && <p style={{ fontSize: 13, color: "var(--muted)" }}>Loading…</p>}
+      {isLoading && <SkelList rows={3} label="Loading your impact" />}
       {isError && <p style={{ fontSize: 13, color: "var(--st-overdue)" }}>Couldn&apos;t load impact — is the backend running?</p>}
       {data && <ImpactPanelBody d={data} />}
     </div>

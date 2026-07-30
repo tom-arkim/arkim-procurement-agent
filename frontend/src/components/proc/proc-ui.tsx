@@ -49,6 +49,39 @@ export function ProcHead({
   );
 }
 
+/** One shimmer bar. Width is a CSS width (number = px); height defaults to a text line. */
+export function Skel({ w = "100%", h = 12 }: { w?: number | string; h?: number }) {
+  return <span className="proc-skel" aria-hidden="true" style={{ display: "block", width: w, height: h }} />;
+}
+
+/** Skeleton list — the loading state for card/row lists (skeletons, not spinners).
+ *  Announces itself to AT once, not per-bar. */
+export function SkelList({ rows = 3, label = "Loading" }: { rows?: number; label?: string }) {
+  return (
+    <div className="proc-skellist" role="status" aria-label={label}>
+      {Array.from({ length: rows }, (_, i) => (
+        <div key={i} className="proc-skelrow">
+          <Skel w={`${52 - (i % 3) * 9}%`} h={14} />
+          <Skel w={`${74 - (i % 2) * 16}%`} h={11} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** Shared inline error state — icon + real reason, consistent across screens. */
+export function ProcErrorNote({ title, sub }: { title: string; sub?: string }) {
+  return (
+    <div className="proc-working" role="alert">
+      <ProcIcon name="alert" size={20} color="var(--st-overdue)" />
+      <div>
+        <div className="w-t">{title}</div>
+        {sub && <div className="w-s">{sub}</div>}
+      </div>
+    </div>
+  );
+}
+
 export function ChevLoader({ size = 20 }: { size?: number }) {
   return (
     <span className="proc-chevstack" style={{ width: size }} aria-hidden="true">

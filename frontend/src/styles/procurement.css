@@ -77,6 +77,11 @@
   --sk: #e9e2d4;
 }
 
+/* Standardized visible keyboard focus for the whole buyer surface (a11y floor):
+   one accent ring on any focus-visible element. Per-element rules below may
+   tighten the offset; nothing removes the ring without replacing it. */
+.proc-theme :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* ---- shell ---- */
 .proc-dash { position: absolute; inset: 0; display: flex; background: var(--bg); color: var(--text); font-family: var(--font-sans); overflow: hidden; }
 .proc-dnav { width: 232px; flex: none; height: 100%; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 18px 13px 14px; }
@@ -91,7 +96,7 @@
 .proc-navsite .ss { font-size: 11px; color: var(--muted); font-weight: 500; }
 .proc-navlabel { font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted-2); padding: 4px 12px 8px; }
 .proc-navlist { display: flex; flex-direction: column; gap: 2px; flex: 1; min-height: 0; overflow-y: auto; }
-.proc-navitem { display: flex; align-items: center; gap: 12px; padding: 10px 11px; border-radius: var(--r); cursor: pointer; color: var(--muted); font-size: 14px; font-weight: 600; transition: background-color 0.14s, color 0.14s; position: relative; background: none; border: none; font-family: var(--font-sans); text-align: left; width: 100%; }
+.proc-navitem { display: flex; align-items: center; gap: 12px; padding: 13px 11px; border-radius: var(--r); cursor: pointer; color: var(--muted); font-size: 14px; font-weight: 600; transition: background-color 0.14s, color 0.14s; position: relative; background: none; border: none; font-family: var(--font-sans); text-align: left; width: 100%; }
 .proc-navitem:hover { background: var(--surface-2); color: var(--text); }
 .proc-navitem .ni-ic { color: var(--muted-2); flex: none; }
 .proc-navitem[data-on="true"] { background: var(--accent-fill); color: var(--accent-text); }
@@ -115,7 +120,7 @@
 .proc-bellhead { font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; padding: 8px 10px 6px; }
 .proc-bellempty { font-size: 13px; color: var(--muted); text-align: center; padding: 14px 10px 16px; }
 .proc-belllist { display: flex; flex-direction: column; gap: 2px; }
-.proc-bellitem { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; padding: 9px 10px; border: none; border-radius: var(--r); background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-sans); transition: background-color 0.12s; }
+.proc-bellitem { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; padding: 13px 10px; border: none; border-radius: var(--r); background: transparent; color: var(--text); cursor: pointer; font-family: var(--font-sans); transition: background-color 0.12s; }
 .proc-bellitem:hover { background: var(--surface-2); }
 .proc-bellitem:disabled { cursor: default; }
 .proc-bellitem:disabled:hover { background: transparent; }
@@ -317,6 +322,22 @@
 .proc-opt .o-whybody .wb-row { display: flex; gap: 9px; font-size: 12.5px; color: var(--muted); line-height: 1.55; padding: 3px 0; }
 .proc-opt .o-whybody .wb-row .d { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex: none; margin-top: 7px; }
 
+/* State C banner — a supplier-CONFIRMED quote: the strongest claim on the screen,
+   worn as a full band (outranks and replaces the Recommended band). Done-tone,
+   icon + text (never colour alone). */
+.proc-opt[data-conf="true"] { border-color: var(--st-done); }
+.proc-opt .conf-band { display: flex; align-items: center; gap: 8px; padding: 8px 17px; background: var(--st-done-fill); color: var(--st-done); font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; border-bottom: 1px solid var(--st-done); flex-wrap: wrap; }
+.proc-opt .conf-band .reason { font-weight: 500; letter-spacing: 0; text-transform: none; font-size: 12.5px; opacity: 0.95; color: var(--text); }
+
+/* "Also listed at N more pages" — collapsed same-domain duplicates (render-time
+   dedup, options-compose). A quiet disclosure, not a card feature. */
+.o-also { margin-top: 2px; }
+.o-also-t { display: inline-flex; align-items: center; gap: 4px; background: none; border: none; padding: 4px 2px; font-family: var(--font-sans); font-size: 12px; font-weight: 600; color: var(--muted-2); cursor: pointer; position: relative; border-radius: 4px; }
+.o-also-t:hover { color: var(--accent-text); }
+.o-also-t:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.o-also-t::after { content: ""; position: absolute; left: 50%; top: 50%; width: max(100%, 44px); height: max(100%, 44px); transform: translate(-50%, -50%); }
+.o-also-list { list-style: none; margin: 2px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+
 /* ---- outreach block (RANKING_BANDS_V1, Band C) ----
    Suppliers we're ASKING, not findings — deliberately NOT the option-card look:
    dashed border + flat surface (vs the cards' solid border + shadow), no price
@@ -328,6 +349,9 @@
 .proc-outreach .or-yours { flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--accent-text); background: var(--accent-fill); border: 1px solid var(--accent-line); border-radius: 999px; padding: 2px 8px; }
 .proc-outreach .or-text b { font-weight: 600; color: var(--text-strong); }
 .proc-outreach .or-note { font-size: 12px; color: var(--muted); line-height: 1.5; border-top: 1px solid var(--border-soft); padding-top: 8px; margin-top: 2px; }
+/* Compact variant — rendered ABOVE thin findings (≤2 cards) so "your supplier is
+   being asked" is visible without scrolling; same content, tighter rhythm. */
+.proc-outreach[data-compact="true"] { padding: 11px 14px 12px; gap: 6px; }
 
 /* ---- in-progress (working) block ---- */
 .proc-working { display: flex; align-items: center; gap: 14px; padding: 22px 4px; }
@@ -434,6 +458,8 @@
 .proc-kicker { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted-2); margin-bottom: 6px; }
 .proc-ask { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); padding: 16px; transition: border-color 0.14s, box-shadow 0.14s; }
 .proc-ask:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill); }
+/* Drag-a-photo-in state — same emphasis as focus, plus a dashed cue. */
+.proc-ask[data-drag="true"] { border-color: var(--accent); border-style: dashed; box-shadow: 0 0 0 3px var(--accent-fill); }
 .proc-ask textarea { width: 100%; min-height: 86px; resize: none; border: none; background: transparent; outline: none; font-family: var(--font-sans); font-size: 15.5px; line-height: 1.55; color: var(--text); }
 .proc-ask textarea::placeholder { color: var(--muted-2); }
 .proc-ask .ask-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
@@ -595,6 +621,47 @@
 .spendbar { height: 6px; border-radius: 3px; background: var(--surface-hi); overflow: hidden; }
 .spendbar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
 @media (max-width: 900px) { .proc-intel { grid-template-columns: 1fr; } }
+
+/* ============================================================
+   Touch-target floor — brief §1.10: every interactive control presents a
+   ≥44px hit area. Dense desktop visuals stay as they are; controls smaller
+   than 44px expand their HIT AREA (not their visible box) via a centered
+   inset pseudo-element. Padding-based bumps are used where a row can absorb
+   them (nav items, bell rows) so stacked rows never overlap hit areas.
+   ============================================================ */
+.proc-btn, .proc-btnprimary, .proc-iconbtn, .ask-send, .ask-attach, .ask-chip,
+.proc-stepper-btn, .proc-sitetab, .proc-back, .o-why, .o-unv-i, .af-x,
+.pih-drill, .o-listing, .q-contact .qc-save { position: relative; }
+.proc-btn::after, .proc-btnprimary::after, .proc-iconbtn::after, .ask-send::after,
+.ask-attach::after, .ask-chip::after, .proc-stepper-btn::after, .proc-sitetab::after,
+.proc-back::after, .o-why::after, .o-unv-i::after, .af-x::after,
+.pih-drill::after, .o-listing::after, .q-contact .qc-save::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: max(100%, 44px); height: max(100%, 44px);
+  transform: translate(-50%, -50%);
+}
+/* Stacked action column (Order button above the "Why?" toggle): the button wins
+   hit-testing in the sliver where the small control's expanded area reaches it. */
+.o-act .proc-btn { z-index: 1; }
+/* Text inputs meet the floor with real height (no pseudo needed). */
+.proc-field input, .proc-idinput { min-height: 44px; }
+
+/* ---- skeletons — list/table loading placeholders (skeletons, not spinners) ---- */
+.proc-theme[data-theme="dark"] { --sk-sweep: rgba(255, 255, 255, 0.05); }
+.proc-theme[data-theme="light"] { --sk-sweep: rgba(255, 255, 255, 0.55); }
+.proc-skel { position: relative; overflow: hidden; background: var(--sk); border-radius: var(--r); min-height: 12px; }
+.proc-skel::after { content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--sk-sweep), transparent);
+  animation: proc-skel-sweep 1.4s ease infinite; }
+@keyframes proc-skel-sweep { 100% { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) { .proc-skel::after { animation: none; } }
+.proc-skelrow { display: flex; flex-direction: column; gap: 9px; padding: 16px 17px;
+  border: 1px solid var(--border-soft); border-radius: var(--r-lg); background: var(--surface); }
+.proc-skellist { display: flex; flex-direction: column; gap: 10px; }
+
+/* ---- shared icon tile (list-row leading icon — replaces per-screen inline styles) ---- */
+.proc-rowic { width: 32px; height: 32px; flex: none; border-radius: var(--r); border: 1px solid var(--border);
+  background: var(--bg); color: var(--muted); display: flex; align-items: center; justify-content: center; }
 
 /* ---- chevron loader ---- */
 .proc-chevstack { display: flex; flex-direction: column; gap: 2.5px; flex: none; }
