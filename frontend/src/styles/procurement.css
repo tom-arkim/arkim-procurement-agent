@@ -77,6 +77,11 @@
   --sk: #e9e2d4;
 }
 
+/* Standardized visible keyboard focus for the whole buyer surface (a11y floor):
+   one accent ring on any focus-visible element. Per-element rules below may
+   tighten the offset; nothing removes the ring without replacing it. */
+.proc-theme :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 /* ---- shell ---- */
 .proc-dash { position: absolute; inset: 0; display: flex; background: var(--bg); color: var(--text); font-family: var(--font-sans); overflow: hidden; }
 .proc-dnav { width: 232px; flex: none; height: 100%; background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 18px 13px 14px; }

@@ -22,6 +22,9 @@ import type { Phase, ReorderItem, SourcingRunListItem } from "@/types";
 const HANDOFF_PHASE: Phase = "pending_intake";
 /** Mid-intake: the agent asked something and is waiting on the user's answer. */
 const CLARIFY_PHASE: Phase = "intake";
+/** Triage cap for the clarification list — decisions and handoffs outrank stale
+ *  clarifications; beyond the cap an honest "+N more" line states the true count. */
+const CLARIFY_CAP = 5;
 const INFLIGHT_PHASES: Phase[] = [
   "sourcing", "comparison", "pending_first_approval", "pending_second_approval",
   "approved", "executing", "fulfilling",
@@ -142,21 +145,6 @@ export function HomeScreen() {
             {handoffs.map((r) => (
               <HandoffCard key={r.id} run={r} onOpen={() => router.push(`/parts/${r.id}`)} />
             ))}
-            {clarify.map((r) => (
-              <button key={r.id} className="proc-act" data-tone="act" onClick={() => router.push(`/request?resume=${r.id}`)}>
-                <span className="pa-ic"><ProcIcon name="mail" size={18} /></span>
-                <span className="pa-tt">
-                  <span className="pa-title" style={{ display: "block" }}>
-                    {isRunUpdated(r.id) && <span className="proc-newdot" aria-label="New update" />}
-                    Waiting on your answer
-                  </span>
-                  <span className="pa-sub" style={{ display: "block" }}>
-                    {r.asset_summary ?? "We need one more detail to identify this part"}
-                  </span>
-                </span>
-                <span className="pa-go">Answer<ProcIcon name="arrowR" size={14} /></span>
-              </button>
-            ))}
             {decisions.map((r) => {
               const c = decisionCard(r.phase as Phase);
               return (
@@ -175,6 +163,27 @@ export function HomeScreen() {
                 </button>
               );
             })}
+            {clarify.slice(0, CLARIFY_CAP).map((r) => (
+              <button key={r.id} className="proc-act" data-tone="act" onClick={() => router.push(`/request?resume=${r.id}`)}>
+                <span className="pa-ic"><ProcIcon name="mail" size={18} /></span>
+                <span className="pa-tt">
+                  <span className="pa-title" style={{ display: "block" }}>
+                    {isRunUpdated(r.id) && <span className="proc-newdot" aria-label="New update" />}
+                    Waiting on your answer
+                  </span>
+                  <span className="pa-sub" style={{ display: "block" }}>
+                    {r.asset_summary ?? "We need one more detail to identify this part"}
+                  </span>
+                </span>
+                <span className="pa-go">Answer<ProcIcon name="arrowR" size={14} /></span>
+              </button>
+            ))}
+            {clarify.length > CLARIFY_CAP && (
+              <div className="rc-note" style={{ padding: "2px 4px" }}>
+                + {clarify.length - CLARIFY_CAP} more request{clarify.length - CLARIFY_CAP === 1 ? " is" : "s are"} also
+                waiting on an answer (newest shown first).
+              </div>
+            )}
           </div>
         </>
       )}
