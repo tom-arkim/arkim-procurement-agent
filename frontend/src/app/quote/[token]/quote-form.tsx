@@ -40,12 +40,15 @@ export function QuoteForm({
   onChange,
   onSubmit,
   submitting,
+  revising = false,
 }: {
   initial: QuoteFormState;
   requestedPartNumber: string | null;
   onChange: (next: QuoteFormState) => void;
   onSubmit: (next: QuoteFormState) => void;
   submitting: boolean;
+  /** True when an earlier quote exists — submission SUPERSEDES it (clear update framing). */
+  revising?: boolean;
 }) {
   const [form, setFormLocal] = useState<QuoteFormState>(initial);
   const [touchedSubmit, setTouchedSubmit] = useState(false);
@@ -246,10 +249,12 @@ export function QuoteForm({
 
       <div className="portal-form-actions">
         <button className="portal-submit" type="submit" disabled={submitting}>
-          {submitting ? "Submitting…" : "Submit quote"}
+          {submitting ? "Submitting…" : revising ? "Update your quote" : "Submit quote"}
         </button>
         <p className="portal-submit-note">
-          No account needed. Submitting again later replaces this quote.
+          {revising
+            ? "This replaces your earlier quote for this request."
+            : "No account needed. Submitting again later replaces this quote."}
         </p>
       </div>
     </form>
