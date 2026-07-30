@@ -186,7 +186,7 @@ export function OptionsScreen({ runId }: { runId: string }) {
   if (WORKING_PHASES.includes(phase)) {
     return (
       <Shell sub={partLabel} onHome={() => router.push("/")} strip={basketStrip}>
-        <SourcingProgress />
+        <SourcingProgress phase={phase} />
       </Shell>
     );
   }
@@ -721,40 +721,25 @@ function Working({ label, sub, spin, loud }: { label: string; sub?: string; spin
   );
 }
 
-// The steps mirror the real sourcing tiers. Under DEMO_MODE, Tier 1 (the "Arkim network" catalog)
-// is gated off / returns nothing, so we DROP that step + mention — the loader must tell the same
-// story the demo actually tells (live search across marketplaces + specialist suppliers). Non-demo
-// keeps the full four (Tier 1 runs there). The labels are honest about what runs; the TIMING is
-// approximate — the backend holds phase="sourcing" for the whole run and emits no per-tier events,
-// so this is a frontend-only progression, NOT backend-synced.
-const SOURCING_STEPS_FULL = [
-  "Searching the Gofer network",
-  "Scanning marketplaces",
-  "Checking specialist suppliers",
-  "Comparing candidates",
-];
-const SOURCING_STEPS_DEMO = [
-  "Scanning marketplaces",
-  "Checking specialist suppliers",
-  "Comparing candidates",
-];
+// Run progress is driven by the run's REAL phase — never a timer (brief §2.2:
+// no fake progress; real stage labels only). The backend exposes exactly three
+// observable stages before options exist: identifying (intake/inventory),
+// searching (sourcing), options (comparison+ — the parent unmounts this view).
+// No per-tier sourcing events exist server-side, so no per-tier sub-steps are shown.
+const RUN_STEPS = ["Identify the part", "Search suppliers & marketplaces", "Options ready"];
 
-/** Prominent, alive sourcing-in-progress screen for the 30–60s live-search wait. Advances the
- *  steps on a timer and HOLDS on the last one until results arrive (the parent unmounts this
- *  when the run flips to comparison), so a step never reads "done" before the data is actually in. */
-function SourcingProgress() {
+/** Prominent sourcing-in-progress screen for the 30–60s live-search wait. Step
+ *  states derive from run.phase; a step only reads "done" when the run has
+ *  actually left that phase. */
+function SourcingProgress({ phase }: { phase: Phase }) {
   const demo = useDemoMode();
-  const steps = demo ? SOURCING_STEPS_DEMO : SOURCING_STEPS_FULL;
-  const sub = demo
-    ? "Searching live across marketplaces and specialist suppliers — this can take up to a minute."
-    : `Searching live across the ${BRAND_NAME} network, marketplaces, and specialist suppliers — this can take up to a minute.`;
-
-  const [step, setStep] = useState(0);
-  useEffect(() => {
-    const t = setInterval(() => setStep((s) => s + 1), 9000);
-    return () => clearInterval(t);
-  }, []);
-  const cur = Math.min(step, steps.length - 1);   // clamp so a shorter (demo) list holds on its last step
+  const searching = phase === "sourcing";
+  const cur = searching ? 1 : 0;
+  const sub = searching
+    ? demo
+      ? "Searching live across marketplaces and specialist suppliers — this can take up to a minute."
+      : `Searching live across the ${BRAND_NAME} network, marketplaces, and specialist suppliers — this can take up to a minute.`
+    : "Confirming what the part is from your request.";
 
   return (
     <div className="proc-loading proc-loading-split">
@@ -763,7 +748,7 @@ function SourcingProgress() {
         <div className="pl-head">Finding your best options</div>
         <div className="pl-sub">{sub}</div>
         <ol className="sp-steps">
-          {steps.map((label, i) => {
+          {RUN_STEPS.map((label, i) => {
             const state = i < cur ? "done" : i === cur ? "active" : "pending";
             return (
               <li key={label} className="sp-step" data-state={state}>

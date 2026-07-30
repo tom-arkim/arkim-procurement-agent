@@ -453,6 +453,8 @@
 .proc-kicker { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted-2); margin-bottom: 6px; }
 .proc-ask { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); box-shadow: var(--card-shadow); padding: 16px; transition: border-color 0.14s, box-shadow 0.14s; }
 .proc-ask:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-fill); }
+/* Drag-a-photo-in state — same emphasis as focus, plus a dashed cue. */
+.proc-ask[data-drag="true"] { border-color: var(--accent); border-style: dashed; box-shadow: 0 0 0 3px var(--accent-fill); }
 .proc-ask textarea { width: 100%; min-height: 86px; resize: none; border: none; background: transparent; outline: none; font-family: var(--font-sans); font-size: 15.5px; line-height: 1.55; color: var(--text); }
 .proc-ask textarea::placeholder { color: var(--muted-2); }
 .proc-ask .ask-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
